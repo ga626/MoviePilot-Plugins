@@ -1,4 +1,18 @@
 {
+  "MediaGovernor": {
+    "name": "媒体治理（S1 兼容性验证）",
+    "description": "仅验证 MoviePilot V3 插件加载合同；不整理、不移动、不改名任何媒体文件。",
+    "labels": "媒体治理,兼容性验证,开发中",
+    "version": "0.1.0",
+    "icon": "Moviepilot_A.png",
+    "author": "MoviePilotMediaGovernor contributors",
+    "level": 1,
+    "release": false,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v0.1.0": "建立符合 MoviePilot V3 官方目录、索引与生命周期合同的零副作用兼容性骨架。"
+    }
+  },
   "AutoSubv2": {
     "name": "AI字幕自动生成(v2)",
     "description": "使用 whisper 自动生成视频文件字幕，并使用大模型翻译字幕成中文。",
