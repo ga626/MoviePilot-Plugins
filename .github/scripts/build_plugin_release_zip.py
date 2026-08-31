@@ -26,7 +26,10 @@ def build(plugin_dir: Path, output: Path) -> None:
     if not root.is_dir():
         raise SystemExit(f"Plugin directory does not exist: {plugin_dir}")
 
-    files = sorted(path for path in root.rglob("*") if path.is_file() and _included(path, root))
+    files = sorted(
+        (path for path in root.rglob("*") if path.is_file() and _included(path, root)),
+        key=lambda path: path.relative_to(root).as_posix().encode("utf-8"),
+    )
     if not files:
         raise SystemExit(f"Plugin directory has no distributable files: {plugin_dir}")
 
@@ -36,6 +39,7 @@ def build(plugin_dir: Path, output: Path) -> None:
             arcname = Path(root.name, path.relative_to(root)).as_posix()
             info = zipfile.ZipInfo(arcname, date_time=ARCHIVE_TIMESTAMP)
             info.compress_type = zipfile.ZIP_STORED
+            info.create_system = 3
             # Windows and Linux report different default file permissions.
             # Use the stable Git-style regular-file mode so the archive identity
             # does not vary with the machine that built it.
