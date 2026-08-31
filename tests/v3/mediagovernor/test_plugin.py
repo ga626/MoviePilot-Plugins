@@ -7,6 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -44,11 +45,11 @@ def test_v3_directory_manifest_and_version_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
 
-    assert manifest["version"] == "0.2.0"
+    assert manifest["version"] == "0.3.0"
     assert manifest["system_version"] == ">=3.0.0"
     assert manifest["release"] is False
     assert "class MediaGovernor(_PluginBase):" in source
-    assert 'plugin_version = "0.2.0"' in source
+    assert 'plugin_version = "0.3.0"' in source
 
 
 def test_observation_groups_a_work_and_deduplicates_at_least_once_events() -> None:
@@ -79,6 +80,29 @@ def test_observation_without_stable_dedup_identity_is_refused() -> None:
     """不能退化为源路径去重，缺少历史号和事件键时不入队。"""
     governor = _governor_module()
     assert governor.EventObservation.from_contract("failed", {"mediainfo": {"title": "测试"}}) is None
+
+
+def test_historical_failure_reconciliation_uses_no_path_as_identity() -> None:
+    """旧失败历史也能入队，但源路径不出现在插件状态中。"""
+    governor = _governor_module()
+    queue = governor.GovernanceQueue()
+    history = SimpleNamespace(
+        id=2001,
+        src="/sensitive/down/example.mkv",
+        media_source="tmdb",
+        media_id="42",
+        type="电视剧",
+        title="测试作品",
+        year="2026",
+        seasons="S01",
+    )
+
+    assert queue.observe_failed_history(history) is True
+    assert queue.observe_failed_history(history) is False
+    item = queue.public_items()[0]
+    assert item["failure_count"] == 1
+    assert queue.allows_preview(2001) is True
+    assert "/sensitive/down" not in json.dumps(queue.to_data(), ensure_ascii=False)
 
 
 def test_native_preview_gateway_forces_link_preview_and_hides_result_paths() -> None:
@@ -115,7 +139,7 @@ def test_s3_uses_only_public_contracts_and_has_no_execution_api() -> None:
     tree = ast.parse(source)
     modules = {node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
 
-    assert {"app.plugins", "app.sdk.events", "app.schemas.types", "app.db.oper.transferhistory"} <= modules
+    assert {"app.plugins", "app.sdk.events", "app.schemas.types", "app.schemas.query", "app.db.oper.transferhistory"} <= modules
     assert not any(module.startswith(("app.core.", "app.helper.", "app.utils.", "app.db.models", "app.sdk._legacy")) for module in modules)
     assert '"path": "/packages"' in source
     assert '"methods": ["GET"]' in source
@@ -123,6 +147,9 @@ def test_s3_uses_only_public_contracts_and_has_no_execution_api() -> None:
     assert '"methods": ["POST"]' in source
     assert "history_not_in_failure_queue" in source
     assert "history_not_previewable" in source
+    assert "def reconcile_history" in source
+    assert "TransferHistoryFilter(status=False)" in source
+    assert '"id": "MediaGovernor.HistoryReconcile"' in source
     assert "def do_transfer" not in source
     assert "preview=True" in GOVERNOR_SOURCE.read_text(encoding="utf-8")
     assert 'transfer_type="link"' in GOVERNOR_SOURCE.read_text(encoding="utf-8")

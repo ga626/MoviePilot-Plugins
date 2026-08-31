@@ -162,6 +162,16 @@ class GovernanceQueue:
             package["success_count"] += 1
         return True
 
+    def observe_failed_history(self, history: Any) -> bool:
+        """把一条宿主失败历史投影为观察事件；不读取或保存历史路径字段。"""
+        history_id = _value(history, "id")
+        observation = EventObservation.from_contract(
+            "failed",
+            {"transfer_history_id": history_id},
+            history,
+        )
+        return bool(observation) and self.observe(observation)
+
     def to_data(self) -> dict[str, Any]:
         """序列化插件自己的状态；不包含源路径、目标路径或 FileItem。"""
         return {"schema": self._SCHEMA, "packages": self._packages}

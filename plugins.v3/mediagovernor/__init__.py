@@ -6,6 +6,7 @@ from typing import Any
 
 from app.db.oper.transferhistory import TransferHistoryOper
 from app.plugins import _PluginBase
+from app.schemas.query import QueryPageRequest, QuerySort, QuerySortDirection, QuerySortField, TransferHistoryFilter
 from app.schemas.types import EventType
 from app.sdk.events import Event, eventmanager, snapshot_event_data
 
@@ -15,10 +16,10 @@ from .governor import EventObservation, GovernanceQueue, NativePreviewGateway
 class MediaGovernor(_PluginBase):
     """以通用事件归并发现问题，绝不替代 MoviePilot 的原生整理器。"""
 
-    plugin_name = "媒体治理（S3 观察与预览）"
-    plugin_desc = "默认关闭：只观察整理结果、归并诊断队列，并可作零写入硬链接预览。"
+    plugin_name = "媒体治理（S3 全量审计与预览）"
+    plugin_desc = "默认关闭：回溯失败整理历史、归并诊断队列，并可作零写入硬链接预览。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.2.0"
+    plugin_version = "0.3.0"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -26,12 +27,18 @@ class MediaGovernor(_PluginBase):
     auth_level = 1
 
     _QUEUE_KEY = "s3_queue"
+    _AUDIT_KEY = "s3_audit"
+    _AUDIT_PAGE_SIZE = 100
+    _AUDIT_PAGES_PER_RUN = 5
     _enabled = False
 
     def init_plugin(self, config: dict[str, Any] | None = None) -> None:
         """仅在启用后恢复插件自身的脱敏队列，不创建后台任务。"""
         self._enabled = bool((config or {}).get("enabled"))
         self._queue = GovernanceQueue.from_data(self.get_data(self._QUEUE_KEY)) if self._enabled else GovernanceQueue()
+        self._audit = self.get_data(self._AUDIT_KEY) if self._enabled else {}
+        if self._enabled:
+            self.reconcile_history()
 
     def get_state(self) -> bool:
         """当前实例被显式启用时才观察事件。"""
@@ -64,7 +71,26 @@ class MediaGovernor(_PluginBase):
     def get_packages(self) -> dict[str, Any]:
         """返回作品包卡片；绝不返回源/目标路径或 FileItem。"""
         queue = getattr(self, "_queue", GovernanceQueue())
-        return {"items": queue.public_items(), "mode": "observe_preview", "enabled": self.get_state()}
+        return {
+            "items": queue.public_items(),
+            "mode": "observe_preview",
+            "enabled": self.get_state(),
+            "history_audit": getattr(self, "_audit", {}),
+        }
+
+    def get_service(self) -> list[dict[str, Any]]:
+        """每 15 分钟只读补扫一批失败历史，直至覆盖全部历史页。"""
+        if not self.get_state():
+            return []
+        return [
+            {
+                "id": "MediaGovernor.HistoryReconcile",
+                "name": "媒体治理失败历史只读回溯",
+                "trigger": "interval",
+                "func": self.reconcile_history,
+                "kwargs": {"minutes": 15},
+            }
+        ]
 
     def get_form(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """明确说明开关只控制观察，不开启真实整理。"""
@@ -141,6 +167,52 @@ class MediaGovernor(_PluginBase):
         if queue.observe(observation):
             self._queue = queue
             self.save_data(self._QUEUE_KEY, queue.to_data())
+
+    def reconcile_history(self, minutes: int | None = None) -> None:
+        """分批读取失败历史；任何错误只标记稍后重试，不影响宿主整理流程。"""
+        del minutes
+        if not self.get_state():
+            return
+        state = getattr(self, "_audit", {})
+        next_page = state.get("next_page", 1) if isinstance(state, dict) else 1
+        page_number = next_page if isinstance(next_page, int) and next_page > 0 else 1
+        queue = getattr(self, "_queue", GovernanceQueue())
+        processed = 0
+        try:
+            for _ in range(self._AUDIT_PAGES_PER_RUN):
+                histories, total = TransferHistoryOper().query(
+                    filters=TransferHistoryFilter(status=False),
+                    page=QueryPageRequest(
+                        page=page_number,
+                        count=self._AUDIT_PAGE_SIZE,
+                        sort=QuerySort(field=QuerySortField.ID, direction=QuerySortDirection.DESC),
+                    ),
+                )
+                for history in histories:
+                    if queue.observe_failed_history(history):
+                        processed += 1
+                if not histories or page_number * self._AUDIT_PAGE_SIZE >= total:
+                    page_number = 1
+                    complete = True
+                    break
+                page_number += 1
+                complete = False
+            else:
+                complete = False
+        except Exception:
+            self._audit = {"schema": "mediagovernor-s3-audit/v1", "state": "retry_pending"}
+            self.save_data(self._AUDIT_KEY, self._audit)
+            return
+
+        self._queue = queue
+        self._audit = {
+            "schema": "mediagovernor-s3-audit/v1",
+            "state": "complete" if complete else "in_progress",
+            "next_page": page_number,
+            "added_packages": processed,
+        }
+        self.save_data(self._QUEUE_KEY, queue.to_data())
+        self.save_data(self._AUDIT_KEY, self._audit)
 
     @staticmethod
     def _transfer_chain() -> Any:
