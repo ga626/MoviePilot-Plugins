@@ -45,11 +45,11 @@ def test_v3_directory_manifest_and_version_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
 
-    assert manifest["version"] == "0.3.0"
+    assert manifest["version"] == "0.3.1"
     assert manifest["system_version"] == ">=3.0.0"
     assert manifest["release"] is True
     assert "class MediaGovernor(_PluginBase):" in source
-    assert 'plugin_version = "0.3.0"' in source
+    assert 'plugin_version = "0.3.1"' in source
 
 
 def test_observation_groups_a_work_and_deduplicates_at_least_once_events() -> None:

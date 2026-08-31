@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import stat
 import zipfile
 
 
 ARCHIVE_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+ARCHIVE_FILE_MODE = 0o100644
 
 
 def _included(path: Path, root: Path) -> bool:
@@ -36,7 +36,10 @@ def build(plugin_dir: Path, output: Path) -> None:
             arcname = Path(root.name, path.relative_to(root)).as_posix()
             info = zipfile.ZipInfo(arcname, date_time=ARCHIVE_TIMESTAMP)
             info.compress_type = zipfile.ZIP_STORED
-            info.external_attr = (stat.S_IMODE(path.stat().st_mode) & 0xFFFF) << 16
+            # Windows and Linux report different default file permissions.
+            # Use the stable Git-style regular-file mode so the archive identity
+            # does not vary with the machine that built it.
+            info.external_attr = ARCHIVE_FILE_MODE << 16
             archive.writestr(info, path.read_bytes())
 
 
