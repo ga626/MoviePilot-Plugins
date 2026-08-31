@@ -41,13 +41,13 @@ def _payload(history_id: int, event_key: str) -> dict[str, object]:
 
 
 def test_v3_directory_manifest_and_version_contract() -> None:
-    """S3 候选版本、索引和类声明必须一致且不可提前发布。"""
+    """S3 正式版本、索引和类声明必须一致且可由市场分发。"""
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
 
     assert manifest["version"] == "0.3.0"
     assert manifest["system_version"] == ">=3.0.0"
-    assert manifest["release"] is False
+    assert manifest["release"] is True
     assert "class MediaGovernor(_PluginBase):" in source
     assert 'plugin_version = "0.3.0"' in source
 
