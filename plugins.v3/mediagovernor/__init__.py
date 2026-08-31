@@ -19,7 +19,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理（S3 全量审计与预览）"
     plugin_desc = "默认关闭：回溯失败整理历史、归并诊断队列，并可作零写入硬链接预览。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.3.2"
+    plugin_version = "0.3.3"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"

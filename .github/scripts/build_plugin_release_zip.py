@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import subprocess
 import zipfile
 
 
@@ -16,9 +17,14 @@ ARCHIVE_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 ARCHIVE_FILE_MODE = 0o100644
 
 
-def _included(path: Path, root: Path) -> bool:
-    relative = path.relative_to(root)
-    return "__pycache__" not in relative.parts and path.suffix != ".pyc"
+def _git_output(repository: Path, *args: str) -> bytes:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repository,
+        check=True,
+        stdout=subprocess.PIPE,
+    )
+    return completed.stdout
 
 
 def build(plugin_dir: Path, output: Path) -> None:
@@ -26,17 +32,18 @@ def build(plugin_dir: Path, output: Path) -> None:
     if not root.is_dir():
         raise SystemExit(f"Plugin directory does not exist: {plugin_dir}")
 
-    files = sorted(
-        (path for path in root.rglob("*") if path.is_file() and _included(path, root)),
-        key=lambda path: path.relative_to(root).as_posix().encode("utf-8"),
-    )
+    repository = Path(_git_output(root, "rev-parse", "--show-toplevel").decode().strip())
+    source_root = root.relative_to(repository).as_posix()
+    listed = _git_output(repository, "ls-files", "-z", "--", source_root).split(b"\0")
+    files = sorted(path.decode("utf-8") for path in listed if path)
     if not files:
         raise SystemExit(f"Plugin directory has no distributable files: {plugin_dir}")
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED, strict_timestamps=True) as archive:
-        for path in files:
-            arcname = Path(root.name, path.relative_to(root)).as_posix()
+        for tracked_path in files:
+            source_path = Path(tracked_path)
+            arcname = Path(root.name, source_path.relative_to(source_root)).as_posix()
             info = zipfile.ZipInfo(arcname, date_time=ARCHIVE_TIMESTAMP)
             info.compress_type = zipfile.ZIP_STORED
             info.create_system = 3
@@ -44,7 +51,7 @@ def build(plugin_dir: Path, output: Path) -> None:
             # Use the stable Git-style regular-file mode so the archive identity
             # does not vary with the machine that built it.
             info.external_attr = ARCHIVE_FILE_MODE << 16
-            archive.writestr(info, path.read_bytes())
+            archive.writestr(info, _git_output(repository, "show", f"HEAD:{tracked_path}"))
 
 
 def main() -> None:
