@@ -6,7 +6,6 @@ from typing import Any
 
 from app.db.oper.transferhistory import TransferHistoryOper
 from app.plugins import _PluginBase
-from app.schemas.query import QueryPageRequest, QuerySort, QuerySortDirection, QuerySortField, TransferHistoryFilter
 from app.schemas.types import EventType
 from app.sdk.events import Event, eventmanager, snapshot_event_data
 
@@ -19,7 +18,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理（S3 全量审计与预览）"
     plugin_desc = "默认关闭：回溯失败整理历史、归并诊断队列，并可作零写入硬链接预览。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.3.3"
+    plugin_version = "0.3.4"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -123,7 +122,8 @@ class MediaGovernor(_PluginBase):
                 "props": {
                     "type": "info",
                     "variant": "tonal",
-                    "text": f"S3 当前{state}。仅归并整理结果；真实整理入口在本版本中不存在。",
+                    "text": f"S3 当前{state}。仅归并整理结果；真实整理入口在本版本中不存在。"
+                    "历史全量回溯会按当前宿主支持情况自动启用或降级。",
                 },
             },
             {
@@ -173,6 +173,16 @@ class MediaGovernor(_PluginBase):
         del minutes
         if not self.get_state():
             return
+        query_contract = self._history_query_contract()
+        if query_contract is None:
+            self._audit = {
+                "schema": "mediagovernor-s3-audit/v1",
+                "state": "unsupported_host_contract",
+                "detail": "history_query_unavailable",
+            }
+            self.save_data(self._AUDIT_KEY, self._audit)
+            return
+        QueryPageRequest, QuerySort, QuerySortDirection, QuerySortField, TransferHistoryFilter = query_contract
         state = getattr(self, "_audit", {})
         next_page = state.get("next_page", 1) if isinstance(state, dict) else 1
         page_number = next_page if isinstance(next_page, int) and next_page > 0 else 1
@@ -213,6 +223,23 @@ class MediaGovernor(_PluginBase):
         }
         self.save_data(self._QUEUE_KEY, queue.to_data())
         self.save_data(self._AUDIT_KEY, self._audit)
+
+    @staticmethod
+    def _history_query_contract() -> tuple[Any, Any, Any, Any, Any] | None:
+        """按需读取较新 V3 的历史分页合同，避免旧稳定宿主在加载期失败。"""
+        try:
+            from app.schemas.query import (
+                QueryPageRequest,
+                QuerySort,
+                QuerySortDirection,
+                QuerySortField,
+                TransferHistoryFilter,
+            )
+        except ModuleNotFoundError as exc:
+            if exc.name == "app.schemas.query":
+                return None
+            raise
+        return QueryPageRequest, QuerySort, QuerySortDirection, QuerySortField, TransferHistoryFilter
 
     @staticmethod
     def _transfer_chain() -> Any:
