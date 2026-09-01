@@ -15,10 +15,10 @@ from .governor import EventObservation, GovernanceQueue, NativePreviewGateway
 class MediaGovernor(_PluginBase):
     """以通用事件归并发现问题，绝不替代 MoviePilot 的原生整理器。"""
 
-    plugin_name = "媒体治理（S3 全量审计与预览）"
-    plugin_desc = "默认关闭：回溯失败整理历史、归并诊断队列，并可作零写入硬链接预览。"
+    plugin_name = "媒体治理（S3 增量观察与预览）"
+    plugin_desc = "默认关闭：只观察启用后的整理结果；既有失败历史仅可显式一次性回溯。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.3.4"
+    plugin_version = "0.3.5"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -30,14 +30,24 @@ class MediaGovernor(_PluginBase):
     _AUDIT_PAGE_SIZE = 100
     _AUDIT_PAGES_PER_RUN = 5
     _enabled = False
+    _backfill_existing_failures = False
 
     def init_plugin(self, config: dict[str, Any] | None = None) -> None:
-        """仅在启用后恢复插件自身的脱敏队列，不创建后台任务。"""
-        self._enabled = bool((config or {}).get("enabled"))
+        """默认仅观察启用后的事件；历史回溯必须由用户显式请求一次。"""
+        config = config or {}
+        self._enabled = bool(config.get("enabled"))
+        self._backfill_existing_failures = bool(config.get("backfill_existing_failures"))
         self._queue = GovernanceQueue.from_data(self.get_data(self._QUEUE_KEY)) if self._enabled else GovernanceQueue()
         self._audit = self.get_data(self._AUDIT_KEY) if self._enabled else {}
-        if self._enabled:
+        if self._enabled and self._backfill_existing_failures:
             self.reconcile_history()
+        elif self._enabled:
+            self._audit = {
+                "schema": "mediagovernor-s3-audit/v1",
+                "state": "incremental_only",
+                "detail": "historical_backfill_disabled",
+            }
+            self.save_data(self._AUDIT_KEY, self._audit)
 
     def get_state(self) -> bool:
         """当前实例被显式启用时才观察事件。"""
@@ -78,8 +88,14 @@ class MediaGovernor(_PluginBase):
         }
 
     def get_service(self) -> list[dict[str, Any]]:
-        """每 15 分钟只读补扫一批失败历史，直至覆盖全部历史页。"""
-        if not self.get_state():
+        """仅在显式的一次性回溯尚未完成时补扫失败历史。"""
+        state = getattr(self, "_audit", {})
+        if (
+            not self.get_state()
+            or not self._backfill_existing_failures
+            or not isinstance(state, dict)
+            or state.get("state") in {"complete", "unsupported_host_contract"}
+        ):
             return []
         return [
             {
@@ -106,12 +122,27 @@ class MediaGovernor(_PluginBase):
                         "props": {
                             "type": "warning",
                             "variant": "tonal",
-                            "text": "启用后只观察整理完成/失败事件并建立脱敏队列；不会移动、改名、删除、重试或创建硬链接。",
+                            "text": "默认只观察启用后的整理完成/失败事件并建立脱敏队列；不会移动、改名、删除、重试或创建硬链接。",
+                        },
+                    },
+                    {
+                        "component": "VSwitch",
+                        "props": {
+                            "model": "backfill_existing_failures",
+                            "label": "一次性回溯既有失败历史（会读取旧记录）",
+                        },
+                    },
+                    {
+                        "component": "VAlert",
+                        "props": {
+                            "type": "info",
+                            "variant": "tonal",
+                            "text": "默认关闭历史回溯。仅在没有可继承基线时显式开启；回溯完成后自动停止，不会每 15 分钟重复扫描旧历史。",
                         },
                     },
                 ],
             }
-        ], {"enabled": False}
+        ], {"enabled": False, "backfill_existing_failures": False}
 
     def get_page(self) -> list[dict[str, Any]]:
         """以最小页面呈现 S3 的状态与队列，不泄露路径。"""
@@ -123,7 +154,7 @@ class MediaGovernor(_PluginBase):
                     "type": "info",
                     "variant": "tonal",
                     "text": f"S3 当前{state}。仅归并整理结果；真实整理入口在本版本中不存在。"
-                    "历史全量回溯会按当前宿主支持情况自动启用或降级。",
+                    "历史回溯默认关闭，只有显式开启时才会进行一次性只读回溯。",
                 },
             },
             {
@@ -169,9 +200,12 @@ class MediaGovernor(_PluginBase):
             self.save_data(self._QUEUE_KEY, queue.to_data())
 
     def reconcile_history(self, minutes: int | None = None) -> None:
-        """分批读取失败历史；任何错误只标记稍后重试，不影响宿主整理流程。"""
+        """显式的一次性失败历史回溯；完成后永久停止，不重复扫旧账。"""
         del minutes
-        if not self.get_state():
+        if not self.get_state() or not self._backfill_existing_failures:
+            return
+        state = getattr(self, "_audit", {})
+        if isinstance(state, dict) and state.get("state") in {"complete", "unsupported_host_contract"}:
             return
         query_contract = self._history_query_contract()
         if query_contract is None:
@@ -183,7 +217,6 @@ class MediaGovernor(_PluginBase):
             self.save_data(self._AUDIT_KEY, self._audit)
             return
         QueryPageRequest, QuerySort, QuerySortDirection, QuerySortField, TransferHistoryFilter = query_contract
-        state = getattr(self, "_audit", {})
         next_page = state.get("next_page", 1) if isinstance(state, dict) else 1
         page_number = next_page if isinstance(next_page, int) and next_page > 0 else 1
         queue = getattr(self, "_queue", GovernanceQueue())

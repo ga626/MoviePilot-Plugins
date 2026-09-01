@@ -46,11 +46,11 @@ def test_v3_directory_manifest_and_version_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
 
-    assert manifest["version"] == "0.3.4"
+    assert manifest["version"] == "0.3.5"
     assert manifest["system_version"] == ">=3.0.0"
     assert manifest["release"] is True
     assert "class MediaGovernor(_PluginBase):" in source
-    assert 'plugin_version = "0.3.4"' in source
+    assert 'plugin_version = "0.3.5"' in source
 
 
 def test_observation_groups_a_work_and_deduplicates_at_least_once_events() -> None:
@@ -153,13 +153,15 @@ def test_s3_uses_only_public_contracts_and_has_no_execution_api() -> None:
     assert "def reconcile_history" in source
     assert "TransferHistoryFilter(status=False)" in source
     assert '"id": "MediaGovernor.HistoryReconcile"' in source
+    assert "backfill_existing_failures" in source
+    assert "historical_backfill_disabled" in source
     assert "def do_transfer" not in source
     assert "preview=True" in GOVERNOR_SOURCE.read_text(encoding="utf-8")
     assert 'transfer_type="link"' in GOVERNOR_SOURCE.read_text(encoding="utf-8")
 
 
-def test_plugin_loads_and_reports_history_degradation_when_old_host_lacks_query_contract() -> None:
-    """旧稳定宿主没有历史分页模型时，插件仍可加载且不触碰宿主历史。"""
+def test_incremental_default_never_imports_history_and_backfill_stops_on_old_host() -> None:
+    """默认增量不碰旧历史；显式回溯在旧宿主降级后也不再尝试读取。"""
     original_modules = {name: sys.modules[name] for name in tuple(sys.modules) if name.startswith(("app", "mediagovernor_hostcompat"))}
     for name in tuple(sys.modules):
         if name.startswith(("app", "mediagovernor_hostcompat")):
@@ -218,9 +220,23 @@ def test_plugin_loads_and_reports_history_degradation_when_old_host_lacks_query_
 
         assert instance.saved_data[instance._AUDIT_KEY] == {
             "schema": "mediagovernor-s3-audit/v1",
+            "state": "incremental_only",
+            "detail": "historical_backfill_disabled",
+        }
+        assert instance.get_service() == []
+
+        instance.init_plugin({"enabled": True, "backfill_existing_failures": True})
+
+        assert instance.saved_data[instance._AUDIT_KEY] == {
+            "schema": "mediagovernor-s3-audit/v1",
             "state": "unsupported_host_contract",
             "detail": "history_query_unavailable",
         }
+        assert instance.get_service() == []
+        instance._audit = {"state": "complete"}
+        instance._history_query_contract = lambda: (_ for _ in ()).throw(AssertionError("must not query completed backfill"))
+        instance.reconcile_history()
+        assert instance.get_service() == []
     finally:
         for name in tuple(sys.modules):
             if name.startswith(("app", "mediagovernor_hostcompat")):
