@@ -33,9 +33,9 @@ def _payload(history_id: int, event_key: str, *, mode: str | None = "link", titl
 def test_v3_manifest_version_and_frontend_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
-    assert manifest["version"] == "0.5.0"
+    assert manifest["version"] == "0.6.0"
     assert manifest["release"] is True
-    assert 'plugin_version = "0.5.0"' in source
+    assert 'plugin_version = "0.6.0"' in source
     assert 'return "vue", "dist/assets"' in source
     assert "def get_sidebar_nav" in source
     assert 'return []' in source
@@ -88,6 +88,32 @@ def test_failed_history_records_a_path_free_preview_outcome_even_when_rejected()
     assert outcome == {"history_id": 11, "status": "rejected", "mode": "preview", "transfer_type": "link", "checked_at": 100, "detail": "preview_rejected"}
     assert item["last_preview"] == outcome
     assert "path" not in json.dumps(queue.to_data(), ensure_ascii=False)
+
+
+def test_rejected_new_check_supersedes_old_ready_plan() -> None:
+    governor = _governor_module()
+    queue = governor.GovernanceQueue()
+    failed = governor.EventObservation.from_contract("failed", _payload(13, "stale-plan"))
+    assert failed and queue.observe(failed)
+    plan = queue.record_preview(13, {"ok": True, "detail": "preview_ready"}, now=100)
+    assert plan and queue.public_plan(plan["plan_id"], now=101)["status"] == "ready"
+    queue.record_preview_outcome(13, {"ok": False, "detail": "preview_rejected"}, now=101)
+    assert queue.public_plan(plan["plan_id"], now=102)["status"] == "superseded"
+    assert queue.begin_repair(plan["plan_id"], now=102) is None
+
+
+def test_a_new_successful_check_replaces_an_older_ready_plan() -> None:
+    governor = _governor_module()
+    queue = governor.GovernanceQueue()
+    failed = governor.EventObservation.from_contract("failed", _payload(14, "newer-plan"))
+    assert failed and queue.observe(failed)
+    first = queue.record_preview(14, {"ok": True, "detail": "preview_ready"}, now=100)
+    assert first and queue.record_preview_outcome(14, {"ok": True, "detail": "preview_ready"}, now=101)
+    second = queue.record_preview(14, {"ok": True, "detail": "preview_ready"}, now=102)
+    assert second and second["plan_id"] != first["plan_id"]
+    assert queue.public_plan(first["plan_id"], now=102)["status"] == "superseded"
+    assert queue.public_plan(second["plan_id"], now=102)["status"] == "ready"
+    assert queue.begin_repair(first["plan_id"], now=102) is None
 
 
 def test_identity_conflict_never_becomes_automatic_repair() -> None:

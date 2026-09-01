@@ -16,9 +16,9 @@ class MediaGovernor(_PluginBase):
     """以通用事件归并发现问题，不替代 MoviePilot 的原生整理器。"""
 
     plugin_name = "媒体治理"
-    plugin_desc = "核对整理结果，归集媒体问题，并提供不改文件的硬链接预演。"
+    plugin_desc = "用中文问题卡核对整理记录；确认后才创建硬链接，不改动原文件。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.5.0"
+    plugin_version = "0.6.0"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
