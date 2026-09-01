@@ -18,7 +18,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "核对整理结果，归集媒体问题，并提供不改文件的硬链接预演。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.4.1"
+    plugin_version = "0.4.2"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -200,10 +200,11 @@ class MediaGovernor(_PluginBase):
         from app.schemas.file import FileItem
         result = self.preview_hardlink(FileItem(**raw_fileitem))
         plan = queue.record_preview(history_id, result)
-        if plan is not None:
+        outcome = queue.record_preview_outcome(history_id, result)
+        if outcome is not None:
             self._queue = queue
             self.save_data(self._QUEUE_KEY, queue.to_data())
-        return {**result, "plan": plan}
+        return {**result, "plan": plan, "outcome": outcome}
 
     def stop_service(self) -> None:
         self._enabled = False

@@ -7,7 +7,6 @@ const loading = ref(false)
 const error = ref('')
 const result = ref({ items: [], summary: {} })
 const plans = ref([])
-const selected = ref(null)
 const statuses = {
   verified: ['已验证', '记录彼此一致，尚未发现可证明的问题。'],
   needs_attention: ['需要处理', '原生记录失败或出现可证明的不一致。'],
@@ -15,6 +14,15 @@ const statuses = {
   awaiting_host_information: ['等待宿主信息', 'MoviePilot 未提供足够公开字段，插件不会猜测。'],
 }
 const cards = computed(() => result.value.items || [])
+const previewDetails = {
+  preview_ready: '可以继续：MoviePilot 已生成硬链接预演计划，但本插件不会执行写入。',
+  preview_rejected: '暂不能继续：MoviePilot 未能为这条记录生成安全的硬链接预演。请保留该问题，等待更多宿主信息或在原生整理页面核对。',
+  history_fileitem_unavailable: '暂不能继续：原始失败记录没有提供可用于预演的文件信息。',
+  history_not_previewable: '暂不能继续：这条历史记录已不适合再次预演。',
+  history_not_in_failure_queue: '暂不能继续：这条记录不在当前失败问题队列中。',
+  plugin_disabled: '暂不能继续：媒体治理当前未启用。',
+}
+function describePreview(detail) { return previewDetails[detail] || '暂不能继续：MoviePilot 没有返回可安全执行的预演结果。' }
 async function refresh() {
   if (typeof props.api?.get !== 'function') { error.value = '当前 MoviePilot 未提供插件数据接口'; return }
   loading.value = true; error.value = ''
@@ -35,10 +43,9 @@ async function preview(card) {
   try {
     const response = await props.api.post(`plugin/${props.pluginId}/packages/${historyId}/preview`)
     const data = response?.data ?? response
-    if (!data?.ok) throw new Error(data?.detail || '预演未通过')
-    selected.value = data.plan || null
-    toast?.success?.('已生成零写入预演计划')
     await refresh()
+    if (!data?.ok) { error.value = describePreview(data?.detail); return }
+    toast?.success?.('已生成零写入预演计划')
   } catch (cause) { error.value = cause?.message || '生成预演失败' }
   finally { loading.value = false }
 }
@@ -50,8 +57,8 @@ onMounted(refresh)
     <header><div><p class="eyebrow">MEDIA GOVERNOR</p><h1>媒体治理</h1><p>核对整理结果，归集问题；所有预演都不会改动文件。</p></div><button :disabled="loading" @click="refresh">{{ loading ? '刷新中…' : '刷新' }}</button></header>
     <p v-if="error" class="notice error">{{ error }}</p>
     <section class="summary" aria-label="问题概览"><article v-for="(count, key) in result.summary || {}" :key="key"><strong>{{ count }}</strong><span>{{ statuses[key]?.[0] || key }}</span></article></section>
-    <section class="panel"><h2>问题与结果</h2><p class="muted">“已验证”表示公开记录一致，不代表媒体服务器最终展示已被验证。</p><div v-if="!cards.length" class="empty">还没有可展示的整理记录。启用后，新的整理事件会自动进入这里。</div><article v-for="card in cards" :key="card.package_id" class="card"><div><span class="badge" :class="card.status">{{ statuses[card.status]?.[0] || card.status }}</span><h3>{{ card.title || '未取得媒体身份' }} <small v-if="card.year">({{ card.year }})</small></h3><p>{{ statuses[card.status]?.[1] }}</p><p class="muted">原因：{{ (card.reason_codes || []).join('、') || '公开记录一致' }}</p></div><button v-if="card.failure_count" :disabled="loading" @click="preview(card)">查看硬链接预演</button></article></section>
-    <section v-if="selected || plans.length" class="panel"><h2>预演计划</h2><p class="muted">计划只证明预演可以继续；它不会创建、移动、改名、覆盖或删除任何文件。</p><article v-for="plan in (selected ? [selected] : plans)" :key="plan.plan_id" class="plan"><strong>{{ plan.status === 'ready' ? '预演已准备好' : '预演已过期' }}</strong><span>方式：{{ plan.transfer_type }} · {{ plan.detail }}</span></article></section>
+    <section class="panel"><h2>问题与结果</h2><p class="muted">“已验证”表示公开记录一致，不代表媒体服务器最终展示已被验证。</p><div v-if="!cards.length" class="empty">还没有可展示的整理记录。启用后，新的整理事件会自动进入这里。</div><article v-for="card in cards" :key="card.package_id" class="card"><div><span class="badge" :class="card.status">{{ statuses[card.status]?.[0] || card.status }}</span><h3>{{ card.title || '未取得媒体身份' }} <small v-if="card.year">({{ card.year }})</small></h3><p>{{ statuses[card.status]?.[1] }}</p><p class="muted">原因：{{ (card.reason_codes || []).join('、') || '公开记录一致' }}</p><p v-if="card.last_preview" class="muted">最近预演：{{ card.last_preview.status === 'ready' ? '可以继续' : '暂不能继续' }}。{{ describePreview(card.last_preview.detail) }}</p></div><button v-if="card.failure_count" :disabled="loading" @click="preview(card)">查看硬链接预演</button></article></section>
+    <section v-if="plans.length" class="panel"><h2>预演计划</h2><p class="muted">计划只证明预演可以继续；它不会创建、移动、改名、覆盖或删除任何文件。</p><article v-for="plan in plans" :key="plan.plan_id" class="plan"><strong>{{ plan.status === 'ready' ? '预演已准备好' : '预演已过期' }}</strong><span>方式：{{ plan.transfer_type }} · {{ plan.detail }}</span></article></section>
   </main>
 </template>
 

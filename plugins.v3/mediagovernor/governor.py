@@ -237,7 +237,7 @@ class GovernanceQueue:
         fields = (
             "package_id", "media_source", "media_id", "media_type", "title", "year", "season",
             "history_ids", "event_count", "success_count", "failure_count", "status", "reason_codes",
-            "transfer_modes", "receipt_version",
+            "transfer_modes", "receipt_version", "last_preview",
         )
         return {field: package.get(field) for field in fields}
 
@@ -278,6 +278,23 @@ class GovernanceQueue:
         }
         self._plans[plan_id] = plan
         return dict(plan)
+
+    def record_preview_outcome(self, history_id: int, result: Mapping[str, Any], now: int | None = None) -> dict[str, Any] | None:
+        """把最近一次零写入预演的结果归回对应问题卡，不保存路径或宿主对象。"""
+        package = next((item for item in self._packages.values() if history_id in item.get("failed_history_ids", [])), None)
+        if package is None:
+            return None
+        outcome = {
+            "history_id": history_id,
+            "status": "ready" if bool(result.get("ok")) else "rejected",
+            "mode": "preview",
+            "transfer_type": "link",
+            "checked_at": _now() if now is None else now,
+            "detail": str(result.get("detail") or ("preview_ready" if result.get("ok") else "preview_rejected")),
+        }
+        package["last_preview"] = outcome
+        package["receipt_version"] += 1
+        return dict(outcome)
 
     def public_plans(self) -> list[dict[str, Any]]:
         return [dict(plan) for plan in sorted(self._plans.values(), key=lambda item: item["plan_id"])]
