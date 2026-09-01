@@ -308,6 +308,26 @@ class GovernanceQueue:
             public["status"] = "expired"
         return public
 
+    def begin_repair(self, plan_id: str, now: int | None = None) -> dict[str, Any] | None:
+        """原子地占用已验证的计划，避免一次确认被重复执行。"""
+        public = self.public_plan(plan_id, now=now)
+        if public is None or public.get("status") != "ready":
+            return None
+        plan = self._plans[plan_id]
+        plan["status"] = "executing"
+        plan["repair_started_at"] = _now() if now is None else now
+        return dict(plan)
+
+    def complete_repair(self, plan_id: str, result: Mapping[str, Any], now: int | None = None) -> dict[str, Any] | None:
+        """只保留执行状态和时间，不保存目标路径或宿主返回对象。"""
+        plan = self._plans.get(plan_id)
+        if plan is None or plan.get("status") != "executing":
+            return None
+        plan["status"] = "completed" if bool(result.get("ok")) else "failed"
+        plan["repair_finished_at"] = _now() if now is None else now
+        plan["repair_detail"] = str(result.get("detail") or ("repair_completed" if result.get("ok") else "repair_failed"))
+        return dict(plan)
+
 
 class NativePreviewGateway:
     """唯一允许的原生整理调用：强制硬链接预演，且不返回路径。"""
@@ -327,3 +347,17 @@ class NativePreviewGateway:
             sync_extra_files=False,
         )
         return {"mode": "preview", "transfer_type": "link", "ok": bool(state), "detail": "preview_ready" if state else "preview_rejected"}
+
+    def repair(self, fileitem: Any) -> dict[str, str | bool]:
+        """只允许用户确认后的单计划硬链接修复，绝不删除、覆盖或重整。"""
+        state, _result = self._chain_factory().manual_transfer(
+            fileitem=fileitem,
+            transfer_type="link",
+            preview=False,
+            background=False,
+            force=False,
+            scrape=False,
+            reorganize=False,
+            sync_extra_files=False,
+        )
+        return {"mode": "repair", "transfer_type": "link", "ok": bool(state), "detail": "repair_completed" if state else "repair_failed"}

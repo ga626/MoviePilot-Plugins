@@ -33,9 +33,9 @@ def _payload(history_id: int, event_key: str, *, mode: str | None = "link", titl
 def test_v3_manifest_version_and_frontend_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
-    assert manifest["version"] == "0.4.2"
+    assert manifest["version"] == "0.5.0"
     assert manifest["release"] is True
-    assert 'plugin_version = "0.4.2"' in source
+    assert 'plugin_version = "0.5.0"' in source
     assert 'return "vue", "dist/assets"' in source
     assert "def get_sidebar_nav" in source
     assert 'return []' in source
@@ -103,7 +103,7 @@ def test_identity_conflict_never_becomes_automatic_repair() -> None:
     assert "identity_conflict" in item["reason_codes"]
 
 
-def test_preview_gateway_is_fixed_and_source_has_no_execution_api() -> None:
+def test_preview_and_confirmed_repair_gate_keep_transfer_options_fixed() -> None:
     governor = _governor_module()
     calls: list[dict[str, object]] = []
     class FakeChain:
@@ -112,9 +112,28 @@ def test_preview_gateway_is_fixed_and_source_has_no_execution_api() -> None:
     result = governor.NativePreviewGateway(FakeChain).preview(object())
     assert calls[0]["transfer_type"] == "link" and calls[0]["preview"] is True
     assert result["ok"] is True and "dest" not in result
+    repaired = governor.NativePreviewGateway(FakeChain).repair(object())
+    assert calls[1]["transfer_type"] == "link" and calls[1]["preview"] is False
+    assert calls[1]["force"] is False and calls[1]["reorganize"] is False
+    assert repaired["ok"] is True and "dest" not in repaired
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     modules = {node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
     assert not any(module.startswith(("app.core.", "app.helper.", "app.utils.", "app.db.models", "app.sdk._legacy")) for module in modules)
     source = SOURCE.read_text(encoding="utf-8")
-    assert '"path": "/plans"' in source
+    assert '"path": "/plans"' in source and '"path": "/plans/{plan_id}/repair"' in source
     assert "def do_transfer" not in source
+
+
+def test_repair_requires_a_ready_unexpired_plan_and_records_no_path() -> None:
+    governor = _governor_module()
+    queue = governor.GovernanceQueue()
+    failed = governor.EventObservation.from_contract("failed", _payload(12, "repairable"))
+    assert failed and queue.observe(failed)
+    plan = queue.record_preview(12, {"ok": True, "detail": "preview_ready"}, now=100)
+    assert plan
+    started = queue.begin_repair(plan["plan_id"], now=101)
+    assert started and started["status"] == "executing"
+    assert queue.begin_repair(plan["plan_id"], now=102) is None
+    completed = queue.complete_repair(plan["plan_id"], {"ok": True, "detail": "repair_completed"}, now=103)
+    assert completed and completed["status"] == "completed"
+    assert "path" not in json.dumps(queue.to_data(), ensure_ascii=False)

@@ -30,6 +30,7 @@ const _hoisted_11 = {
   key: 1,
   class: "panel"
 };
+const _hoisted_12 = ["disabled", "onClick"];
 
 const {computed,inject,onMounted,ref} = await importShared('vue');
 
@@ -53,6 +54,7 @@ const statuses = {
   awaiting_host_information: ['等待宿主信息', 'MoviePilot 未提供足够公开字段，插件不会猜测。'],
 };
 const cards = computed(() => result.value.items || []);
+function planTitle(plan) { return cards.value.find(card => card.package_id === plan.package_id)?.title || '原问题' }
 const previewDetails = {
   preview_ready: '可以继续：MoviePilot 已生成硬链接预演计划，但本插件不会执行写入。',
   preview_rejected: '暂不能继续：MoviePilot 未能为这条记录生成安全的硬链接预演。请保留该问题，等待更多宿主信息或在原生整理页面核对。',
@@ -62,6 +64,13 @@ const previewDetails = {
   plugin_disabled: '暂不能继续：媒体治理当前未启用。',
 };
 function describePreview(detail) { return previewDetails[detail] || '暂不能继续：MoviePilot 没有返回可安全执行的预演结果。' }
+const repairDetails = {
+  repair_completed: '已完成：MoviePilot 已确认本次硬链接修复完成。',
+  repair_failed: '未完成：MoviePilot 没有确认本次硬链接修复成功。',
+  repair_source_unavailable: '未执行：原始失败记录已无法提供修复所需信息。',
+  plan_not_repairable: '未执行：预演计划已过期、已执行或不再适合修复。',
+};
+function describeRepair(detail) { return repairDetails[detail] || '未完成：MoviePilot 没有返回可确认的修复结果。' }
 async function refresh() {
   if (typeof props.api?.get !== 'function') { error.value = '当前 MoviePilot 未提供插件数据接口'; return }
   loading.value = true; error.value = '';
@@ -86,6 +95,18 @@ async function preview(card) {
     if (!data?.ok) { error.value = describePreview(data?.detail); return }
     toast?.success?.('已生成零写入预演计划');
   } catch (cause) { error.value = cause?.message || '生成预演失败'; }
+  finally { loading.value = false; }
+}
+async function repair(plan) {
+  if (!window.confirm('这会按已通过的预演创建硬链接。不会删除、覆盖、移动、改名或修改下载器。确定继续吗？')) return
+  loading.value = true; error.value = '';
+  try {
+    const response = await props.api.post(`plugin/${props.pluginId}/plans/${plan.plan_id}/repair`);
+    const data = response?.data ?? response;
+    await refresh();
+    if (!data?.ok) { error.value = describeRepair(data?.detail); return }
+    toast?.success?.('硬链接修复已完成');
+  } catch (cause) { error.value = cause?.message || '执行硬链接修复失败'; }
   finally { loading.value = false; }
 }
 onMounted(refresh);
@@ -154,14 +175,23 @@ return (_ctx, _cache) => {
     (plans.value.length)
       ? (_openBlock(), _createElementBlock("section", _hoisted_11, [
           _cache[3] || (_cache[3] = _createElementVNode("h2", null, "预演计划", -1)),
-          _cache[4] || (_cache[4] = _createElementVNode("p", { class: "muted" }, "计划只证明预演可以继续；它不会创建、移动、改名、覆盖或删除任何文件。", -1)),
+          _cache[4] || (_cache[4] = _createElementVNode("p", { class: "muted" }, "只有“预演已准备好”的计划可以在你确认后执行。执行只创建硬链接，不会删除、覆盖、移动、改名或修改下载器。", -1)),
           (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(plans.value, (plan) => {
             return (_openBlock(), _createElementBlock("article", {
               key: plan.plan_id,
               class: "plan"
             }, [
-              _createElementVNode("strong", null, _toDisplayString(plan.status === 'ready' ? '预演已准备好' : '预演已过期'), 1),
-              _createElementVNode("span", null, "方式：" + _toDisplayString(plan.transfer_type) + " · " + _toDisplayString(plan.detail), 1)
+              _createElementVNode("div", null, [
+                _createElementVNode("strong", null, _toDisplayString(planTitle(plan)) + " · " + _toDisplayString(plan.status === 'ready' ? '预演已准备好' : plan.status === 'completed' ? '已完成修复' : plan.status === 'executing' ? '正在修复' : plan.status === 'failed' ? '修复未完成' : '预演已过期'), 1),
+                _createElementVNode("span", null, "方式：" + _toDisplayString(plan.transfer_type) + " · " + _toDisplayString(plan.repair_detail || plan.detail), 1)
+              ]),
+              (plan.status === 'ready')
+                ? (_openBlock(), _createElementBlock("button", {
+                    key: 0,
+                    disabled: loading.value,
+                    onClick: $event => (repair(plan))
+                  }, "确认一键修复", 8, _hoisted_12))
+                : _createCommentVNode("", true)
             ]))
           }), 128))
         ]))
@@ -171,6 +201,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-24d7f8f5"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-ecff4e14"]]);
 
 export { AppPage as default };
