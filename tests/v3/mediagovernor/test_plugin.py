@@ -7,6 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+from types import ModuleType
 from types import SimpleNamespace
 
 
@@ -45,11 +46,11 @@ def test_v3_directory_manifest_and_version_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
 
-    assert manifest["version"] == "0.3.3"
+    assert manifest["version"] == "0.3.4"
     assert manifest["system_version"] == ">=3.0.0"
     assert manifest["release"] is True
     assert "class MediaGovernor(_PluginBase):" in source
-    assert 'plugin_version = "0.3.3"' in source
+    assert 'plugin_version = "0.3.4"' in source
 
 
 def test_observation_groups_a_work_and_deduplicates_at_least_once_events() -> None:
@@ -137,9 +138,11 @@ def test_s3_uses_only_public_contracts_and_has_no_execution_api() -> None:
     """禁止 ORM/legacy/私有核心导入；仅公开只读队列 API。"""
     source = SOURCE.read_text(encoding="utf-8")
     tree = ast.parse(source)
+    startup_modules = {node.module or "" for node in tree.body if isinstance(node, ast.ImportFrom)}
     modules = {node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
 
-    assert {"app.plugins", "app.sdk.events", "app.schemas.types", "app.schemas.query", "app.db.oper.transferhistory"} <= modules
+    assert {"app.plugins", "app.sdk.events", "app.schemas.types", "app.db.oper.transferhistory"} <= startup_modules
+    assert "app.schemas.query" not in startup_modules
     assert not any(module.startswith(("app.core.", "app.helper.", "app.utils.", "app.db.models", "app.sdk._legacy")) for module in modules)
     assert '"path": "/packages"' in source
     assert '"methods": ["GET"]' in source
@@ -153,3 +156,73 @@ def test_s3_uses_only_public_contracts_and_has_no_execution_api() -> None:
     assert "def do_transfer" not in source
     assert "preview=True" in GOVERNOR_SOURCE.read_text(encoding="utf-8")
     assert 'transfer_type="link"' in GOVERNOR_SOURCE.read_text(encoding="utf-8")
+
+
+def test_plugin_loads_and_reports_history_degradation_when_old_host_lacks_query_contract() -> None:
+    """旧稳定宿主没有历史分页模型时，插件仍可加载且不触碰宿主历史。"""
+    original_modules = {name: sys.modules[name] for name in tuple(sys.modules) if name.startswith(("app", "mediagovernor_hostcompat"))}
+    for name in tuple(sys.modules):
+        if name.startswith(("app", "mediagovernor_hostcompat")):
+            del sys.modules[name]
+    try:
+        def module(name: str) -> ModuleType:
+            value = ModuleType(name)
+            sys.modules[name] = value
+            return value
+
+        app = module("app")
+        app.__path__ = []
+        db = module("app.db")
+        db.__path__ = []
+        oper = module("app.db.oper")
+        oper.__path__ = []
+        transferhistory = module("app.db.oper.transferhistory")
+        transferhistory.TransferHistoryOper = type("TransferHistoryOper", (), {})
+        plugins = module("app.plugins")
+
+        class FakePluginBase:
+            def get_data(self, _key):
+                return None
+
+            def save_data(self, key, value):
+                self.saved_data[key] = value
+
+        plugins._PluginBase = FakePluginBase
+        schemas = module("app.schemas")
+        schemas.__path__ = []
+        types = module("app.schemas.types")
+        types.EventType = SimpleNamespace(TransferComplete="complete", TransferFailed="failed")
+        sdk = module("app.sdk")
+        sdk.__path__ = []
+        events = module("app.sdk.events")
+        events.Event = object
+        events.eventmanager = SimpleNamespace(register=lambda _event_type: (lambda func: func))
+        events.snapshot_event_data = lambda *_args: SimpleNamespace(valid=False, payload=None)
+
+        package = module("mediagovernor_hostcompat")
+        package.__path__ = []
+        sys.modules["mediagovernor_hostcompat.governor"] = _governor_module()
+        spec = importlib.util.spec_from_file_location(
+            "mediagovernor_hostcompat",
+            SOURCE,
+            submodule_search_locations=[],
+        )
+        assert spec and spec.loader
+        plugin_module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = plugin_module
+        spec.loader.exec_module(plugin_module)
+
+        instance = plugin_module.MediaGovernor()
+        instance.saved_data = {}
+        instance.init_plugin({"enabled": True})
+
+        assert instance.saved_data[instance._AUDIT_KEY] == {
+            "schema": "mediagovernor-s3-audit/v1",
+            "state": "unsupported_host_contract",
+            "detail": "history_query_unavailable",
+        }
+    finally:
+        for name in tuple(sys.modules):
+            if name.startswith(("app", "mediagovernor_hostcompat")):
+                del sys.modules[name]
+        sys.modules.update(original_modules)
