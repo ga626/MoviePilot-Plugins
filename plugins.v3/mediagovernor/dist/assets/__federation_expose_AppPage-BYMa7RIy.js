@@ -21,8 +21,12 @@ const _hoisted_6 = {
 };
 const _hoisted_7 = { key: 0 };
 const _hoisted_8 = { class: "muted" };
-const _hoisted_9 = ["disabled", "onClick"];
-const _hoisted_10 = {
+const _hoisted_9 = {
+  key: 0,
+  class: "muted"
+};
+const _hoisted_10 = ["disabled", "onClick"];
+const _hoisted_11 = {
   key: 1,
   class: "panel"
 };
@@ -42,7 +46,6 @@ const loading = ref(false);
 const error = ref('');
 const result = ref({ items: [], summary: {} });
 const plans = ref([]);
-const selected = ref(null);
 const statuses = {
   verified: ['已验证', '记录彼此一致，尚未发现可证明的问题。'],
   needs_attention: ['需要处理', '原生记录失败或出现可证明的不一致。'],
@@ -50,6 +53,15 @@ const statuses = {
   awaiting_host_information: ['等待宿主信息', 'MoviePilot 未提供足够公开字段，插件不会猜测。'],
 };
 const cards = computed(() => result.value.items || []);
+const previewDetails = {
+  preview_ready: '可以继续：MoviePilot 已生成硬链接预演计划，但本插件不会执行写入。',
+  preview_rejected: '暂不能继续：MoviePilot 未能为这条记录生成安全的硬链接预演。请保留该问题，等待更多宿主信息或在原生整理页面核对。',
+  history_fileitem_unavailable: '暂不能继续：原始失败记录没有提供可用于预演的文件信息。',
+  history_not_previewable: '暂不能继续：这条历史记录已不适合再次预演。',
+  history_not_in_failure_queue: '暂不能继续：这条记录不在当前失败问题队列中。',
+  plugin_disabled: '暂不能继续：媒体治理当前未启用。',
+};
+function describePreview(detail) { return previewDetails[detail] || '暂不能继续：MoviePilot 没有返回可安全执行的预演结果。' }
 async function refresh() {
   if (typeof props.api?.get !== 'function') { error.value = '当前 MoviePilot 未提供插件数据接口'; return }
   loading.value = true; error.value = '';
@@ -70,10 +82,9 @@ async function preview(card) {
   try {
     const response = await props.api.post(`plugin/${props.pluginId}/packages/${historyId}/preview`);
     const data = response?.data ?? response;
-    if (!data?.ok) throw new Error(data?.detail || '预演未通过')
-    selected.value = data.plan || null;
-    toast?.success?.('已生成零写入预演计划');
     await refresh();
+    if (!data?.ok) { error.value = describePreview(data?.detail); return }
+    toast?.success?.('已生成零写入预演计划');
   } catch (cause) { error.value = cause?.message || '生成预演失败'; }
   finally { loading.value = false; }
 }
@@ -125,23 +136,26 @@ return (_ctx, _cache) => {
                 : _createCommentVNode("", true)
             ]),
             _createElementVNode("p", null, _toDisplayString(statuses[card.status]?.[1]), 1),
-            _createElementVNode("p", _hoisted_8, "原因：" + _toDisplayString((card.reason_codes || []).join('、') || '公开记录一致'), 1)
+            _createElementVNode("p", _hoisted_8, "原因：" + _toDisplayString((card.reason_codes || []).join('、') || '公开记录一致'), 1),
+            (card.last_preview)
+              ? (_openBlock(), _createElementBlock("p", _hoisted_9, "最近预演：" + _toDisplayString(card.last_preview.status === 'ready' ? '可以继续' : '暂不能继续') + "。" + _toDisplayString(describePreview(card.last_preview.detail)), 1))
+              : _createCommentVNode("", true)
           ]),
           (card.failure_count)
             ? (_openBlock(), _createElementBlock("button", {
                 key: 0,
                 disabled: loading.value,
                 onClick: $event => (preview(card))
-              }, "查看硬链接预演", 8, _hoisted_9))
+              }, "查看硬链接预演", 8, _hoisted_10))
             : _createCommentVNode("", true)
         ]))
       }), 128))
     ]),
-    (selected.value || plans.value.length)
-      ? (_openBlock(), _createElementBlock("section", _hoisted_10, [
+    (plans.value.length)
+      ? (_openBlock(), _createElementBlock("section", _hoisted_11, [
           _cache[3] || (_cache[3] = _createElementVNode("h2", null, "预演计划", -1)),
           _cache[4] || (_cache[4] = _createElementVNode("p", { class: "muted" }, "计划只证明预演可以继续；它不会创建、移动、改名、覆盖或删除任何文件。", -1)),
-          (_openBlock(true), _createElementBlock(_Fragment, null, _renderList((selected.value ? [selected.value] : plans.value), (plan) => {
+          (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(plans.value, (plan) => {
             return (_openBlock(), _createElementBlock("article", {
               key: plan.plan_id,
               class: "plan"
@@ -157,6 +171,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-66b17a25"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-24d7f8f5"]]);
 
 export { AppPage as default };

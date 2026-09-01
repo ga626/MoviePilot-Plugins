@@ -33,9 +33,9 @@ def _payload(history_id: int, event_key: str, *, mode: str | None = "link", titl
 def test_v3_manifest_version_and_frontend_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
-    assert manifest["version"] == "0.4.1"
+    assert manifest["version"] == "0.4.2"
     assert manifest["release"] is True
-    assert 'plugin_version = "0.4.1"' in source
+    assert 'plugin_version = "0.4.2"' in source
     assert 'return "vue", "dist/assets"' in source
     assert "def get_sidebar_nav" in source
     assert 'return []' in source
@@ -76,6 +76,18 @@ def test_failed_history_can_generate_an_expiring_zero_write_plan() -> None:
     assert queue.public_plan(plan["plan_id"], now=1000)["status"] == "expired"
     saved = json.dumps(queue.to_data(), ensure_ascii=False)
     assert "path" not in saved and "src_fileitem" not in saved
+
+
+def test_failed_history_records_a_path_free_preview_outcome_even_when_rejected() -> None:
+    governor = _governor_module()
+    queue = governor.GovernanceQueue()
+    failed = governor.EventObservation.from_contract("failed", _payload(11, "rejected"))
+    assert failed and queue.observe(failed)
+    outcome = queue.record_preview_outcome(11, {"ok": False, "detail": "preview_rejected"}, now=100)
+    item = queue.public_items()[0]
+    assert outcome == {"history_id": 11, "status": "rejected", "mode": "preview", "transfer_type": "link", "checked_at": 100, "detail": "preview_rejected"}
+    assert item["last_preview"] == outcome
+    assert "path" not in json.dumps(queue.to_data(), ensure_ascii=False)
 
 
 def test_identity_conflict_never_becomes_automatic_repair() -> None:
