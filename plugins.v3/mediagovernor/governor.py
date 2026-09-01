@@ -263,6 +263,12 @@ class GovernanceQueue:
         if package is None:
             return None
         issued_at = _now() if now is None else now
+        # 每次新的模拟检查都以本次结果为准。即使本次同样通过，旧计划
+        # 也不能继续代表当前状态，避免用户误点早先的处理方案。
+        for previous in self._plans.values():
+            if previous.get("history_id") == history_id and previous.get("status") == "ready":
+                previous["status"] = "superseded"
+                previous["repair_detail"] = "superseded_by_latest_check"
         plan_id = f"mgp-{_digest({'package_id': package['package_id'], 'history_id': history_id, 'receipt_version': package['receipt_version']})[:16]}"
         plan = {
             "plan_id": plan_id,
@@ -293,11 +299,19 @@ class GovernanceQueue:
             "detail": str(result.get("detail") or ("preview_ready" if result.get("ok") else "preview_rejected")),
         }
         package["last_preview"] = outcome
+        # 一次新的模拟检查若不能安全继续，之前为同一条历史记录准备的
+        # 旧计划就不再能代表当前状态。显式作废，避免界面把旧的“可修复”
+        # 误展示成仍可执行的操作。
+        if outcome["status"] != "ready":
+            for plan in self._plans.values():
+                if plan.get("history_id") == history_id and plan.get("status") == "ready":
+                    plan["status"] = "superseded"
+                    plan["repair_detail"] = "superseded_by_latest_check"
         package["receipt_version"] += 1
         return dict(outcome)
 
     def public_plans(self) -> list[dict[str, Any]]:
-        return [dict(plan) for plan in sorted(self._plans.values(), key=lambda item: item["plan_id"])]
+        return [self.public_plan(plan["plan_id"]) for plan in sorted(self._plans.values(), key=lambda item: item["plan_id"]) if self.public_plan(plan["plan_id"]) is not None]
 
     def public_plan(self, plan_id: str, now: int | None = None) -> dict[str, Any] | None:
         plan = self._plans.get(plan_id)
