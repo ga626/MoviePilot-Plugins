@@ -14,6 +14,7 @@ const statuses = {
   awaiting_host_information: ['等待宿主信息', 'MoviePilot 未提供足够公开字段，插件不会猜测。'],
 }
 const cards = computed(() => result.value.items || [])
+function planTitle(plan) { return cards.value.find(card => card.package_id === plan.package_id)?.title || '原问题' }
 const previewDetails = {
   preview_ready: '可以继续：MoviePilot 已生成硬链接预演计划，但本插件不会执行写入。',
   preview_rejected: '暂不能继续：MoviePilot 未能为这条记录生成安全的硬链接预演。请保留该问题，等待更多宿主信息或在原生整理页面核对。',
@@ -23,6 +24,13 @@ const previewDetails = {
   plugin_disabled: '暂不能继续：媒体治理当前未启用。',
 }
 function describePreview(detail) { return previewDetails[detail] || '暂不能继续：MoviePilot 没有返回可安全执行的预演结果。' }
+const repairDetails = {
+  repair_completed: '已完成：MoviePilot 已确认本次硬链接修复完成。',
+  repair_failed: '未完成：MoviePilot 没有确认本次硬链接修复成功。',
+  repair_source_unavailable: '未执行：原始失败记录已无法提供修复所需信息。',
+  plan_not_repairable: '未执行：预演计划已过期、已执行或不再适合修复。',
+}
+function describeRepair(detail) { return repairDetails[detail] || '未完成：MoviePilot 没有返回可确认的修复结果。' }
 async function refresh() {
   if (typeof props.api?.get !== 'function') { error.value = '当前 MoviePilot 未提供插件数据接口'; return }
   loading.value = true; error.value = ''
@@ -49,6 +57,18 @@ async function preview(card) {
   } catch (cause) { error.value = cause?.message || '生成预演失败' }
   finally { loading.value = false }
 }
+async function repair(plan) {
+  if (!window.confirm('这会按已通过的预演创建硬链接。不会删除、覆盖、移动、改名或修改下载器。确定继续吗？')) return
+  loading.value = true; error.value = ''
+  try {
+    const response = await props.api.post(`plugin/${props.pluginId}/plans/${plan.plan_id}/repair`)
+    const data = response?.data ?? response
+    await refresh()
+    if (!data?.ok) { error.value = describeRepair(data?.detail); return }
+    toast?.success?.('硬链接修复已完成')
+  } catch (cause) { error.value = cause?.message || '执行硬链接修复失败' }
+  finally { loading.value = false }
+}
 onMounted(refresh)
 </script>
 
@@ -58,7 +78,7 @@ onMounted(refresh)
     <p v-if="error" class="notice error">{{ error }}</p>
     <section class="summary" aria-label="问题概览"><article v-for="(count, key) in result.summary || {}" :key="key"><strong>{{ count }}</strong><span>{{ statuses[key]?.[0] || key }}</span></article></section>
     <section class="panel"><h2>问题与结果</h2><p class="muted">“已验证”表示公开记录一致，不代表媒体服务器最终展示已被验证。</p><div v-if="!cards.length" class="empty">还没有可展示的整理记录。启用后，新的整理事件会自动进入这里。</div><article v-for="card in cards" :key="card.package_id" class="card"><div><span class="badge" :class="card.status">{{ statuses[card.status]?.[0] || card.status }}</span><h3>{{ card.title || '未取得媒体身份' }} <small v-if="card.year">({{ card.year }})</small></h3><p>{{ statuses[card.status]?.[1] }}</p><p class="muted">原因：{{ (card.reason_codes || []).join('、') || '公开记录一致' }}</p><p v-if="card.last_preview" class="muted">最近预演：{{ card.last_preview.status === 'ready' ? '可以继续' : '暂不能继续' }}。{{ describePreview(card.last_preview.detail) }}</p></div><button v-if="card.failure_count" :disabled="loading" @click="preview(card)">查看硬链接预演</button></article></section>
-    <section v-if="plans.length" class="panel"><h2>预演计划</h2><p class="muted">计划只证明预演可以继续；它不会创建、移动、改名、覆盖或删除任何文件。</p><article v-for="plan in plans" :key="plan.plan_id" class="plan"><strong>{{ plan.status === 'ready' ? '预演已准备好' : '预演已过期' }}</strong><span>方式：{{ plan.transfer_type }} · {{ plan.detail }}</span></article></section>
+    <section v-if="plans.length" class="panel"><h2>预演计划</h2><p class="muted">只有“预演已准备好”的计划可以在你确认后执行。执行只创建硬链接，不会删除、覆盖、移动、改名或修改下载器。</p><article v-for="plan in plans" :key="plan.plan_id" class="plan"><div><strong>{{ planTitle(plan) }} · {{ plan.status === 'ready' ? '预演已准备好' : plan.status === 'completed' ? '已完成修复' : plan.status === 'executing' ? '正在修复' : plan.status === 'failed' ? '修复未完成' : '预演已过期' }}</strong><span>方式：{{ plan.transfer_type }} · {{ plan.repair_detail || plan.detail }}</span></div><button v-if="plan.status === 'ready'" :disabled="loading" @click="repair(plan)">确认一键修复</button></article></section>
   </main>
 </template>
 

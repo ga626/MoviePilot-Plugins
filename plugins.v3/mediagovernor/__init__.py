@@ -18,7 +18,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "核对整理结果，归集媒体问题，并提供不改文件的硬链接预演。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.4.2"
+    plugin_version = "0.5.0"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -74,6 +74,7 @@ class MediaGovernor(_PluginBase):
             {"path": "/plans", "endpoint": self.get_plans, "methods": ["GET"], "auth": "bear", "summary": "查询零写入预演计划"},
             {"path": "/plans/{plan_id}", "endpoint": self.get_plan, "methods": ["GET"], "auth": "bear", "summary": "查询预演计划详情"},
             {"path": "/packages/{history_id}/preview", "endpoint": self.preview_history, "methods": ["POST"], "auth": "bear", "summary": "生成硬链接预演计划（不执行）"},
+            {"path": "/plans/{plan_id}/repair", "endpoint": self.repair_plan, "methods": ["POST"], "auth": "bear", "summary": "执行已确认的硬链接修复"},
         ]
 
     def get_packages(self) -> dict[str, Any]:
@@ -185,6 +186,9 @@ class MediaGovernor(_PluginBase):
             return {"mode": "preview", "transfer_type": "link", "ok": False, "detail": "plugin_disabled"}
         return NativePreviewGateway(self._transfer_chain).preview(fileitem)
 
+    def repair_hardlink(self, fileitem: Any) -> dict[str, str | bool]:
+        return NativePreviewGateway(self._transfer_chain).repair(fileitem)
+
     def preview_history(self, history_id: int) -> dict[str, Any]:
         queue = getattr(self, "_queue", GovernanceQueue())
         if not self.get_state():
@@ -205,6 +209,29 @@ class MediaGovernor(_PluginBase):
             self._queue = queue
             self.save_data(self._QUEUE_KEY, queue.to_data())
         return {**result, "plan": plan, "outcome": outcome}
+
+    def repair_plan(self, plan_id: str) -> dict[str, Any]:
+        """只执行已通过预演、未过期且由用户明确点击确认的单个计划。"""
+        queue = getattr(self, "_queue", GovernanceQueue())
+        plan = queue.begin_repair(plan_id)
+        if plan is None:
+            return {"mode": "repair", "transfer_type": "link", "ok": False, "detail": "plan_not_repairable"}
+        self._queue = queue
+        self.save_data(self._QUEUE_KEY, queue.to_data())
+        history = TransferHistoryOper().get(plan["history_id"])
+        raw_fileitem = getattr(history, "src_fileitem", None) if history is not None else None
+        if history is None or getattr(history, "status", None) is True or not isinstance(raw_fileitem, dict):
+            result = {"mode": "repair", "transfer_type": "link", "ok": False, "detail": "repair_source_unavailable"}
+        else:
+            try:
+                from app.schemas.file import FileItem
+                result = self.repair_hardlink(FileItem(**raw_fileitem))
+            except Exception:
+                result = {"mode": "repair", "transfer_type": "link", "ok": False, "detail": "repair_failed"}
+        receipt = queue.complete_repair(plan_id, result)
+        self._queue = queue
+        self.save_data(self._QUEUE_KEY, queue.to_data())
+        return {**result, "receipt": receipt}
 
     def stop_service(self) -> None:
         self._enabled = False
