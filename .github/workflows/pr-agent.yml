@@ -38,7 +38,23 @@ jobs:
     timeout-minutes: 20
 
     steps:
+      - name: Detect AI review configuration
+        id: provider
+        env:
+          OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
+        run: |
+          if [ -n "$OPENAI_KEY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip review when no provider key is configured
+        if: ${{ steps.provider.outputs.configured != 'true' }}
+        run: echo "PR-Agent skipped because OPENAI_KEY is not configured for this repository."
+
       - name: Run PR Review
+        if: ${{ steps.provider.outputs.configured == 'true' }}
         uses: docker://ghcr.io/infinitypacer/pr-review-runner:latest
         env:
           GITHUB_TOKEN: ${{ github.token }}
