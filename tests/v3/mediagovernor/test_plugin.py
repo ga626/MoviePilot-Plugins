@@ -33,11 +33,12 @@ def _payload(history_id: int, event_key: str, *, mode: str | None = "link", titl
 def test_v3_manifest_version_and_frontend_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
-    assert manifest["version"] == "0.4.0"
+    assert manifest["version"] == "0.4.1"
     assert manifest["release"] is True
-    assert 'plugin_version = "0.4.0"' in source
+    assert 'plugin_version = "0.4.1"' in source
     assert 'return "vue", "dist/assets"' in source
     assert "def get_sidebar_nav" in source
+    assert 'return []' in source
     assert (ROOT / "plugins.v3/mediagovernor/dist/assets/remoteEntry.js").is_file()
 
 

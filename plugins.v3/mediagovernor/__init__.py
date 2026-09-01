@@ -18,7 +18,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "核对整理结果，归集媒体问题，并提供不改文件的硬链接预演。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.4.0"
+    plugin_version = "0.4.1"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -65,9 +65,8 @@ class MediaGovernor(_PluginBase):
         return "vue", "dist/assets"
 
     def get_sidebar_nav(self) -> List[Dict[str, Any]]:
-        if not self.get_state():
-            return []
-        return [{"nav_key": "main", "title": "媒体治理", "icon": "mdi-shield-check", "section": "organize", "permission": "manage", "order": 50}]
+        """使用通用插件详情页入口，避免旧宿主暴露无法打开的全页侧栏项。"""
+        return []
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [
