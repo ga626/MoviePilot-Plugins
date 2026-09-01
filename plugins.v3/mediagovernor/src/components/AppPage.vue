@@ -5,39 +5,35 @@ const props = defineProps({ api: { type: Object, default: () => ({}) }, pluginId
 const toast = inject('moviepilot:toast', null)
 const loading = ref(false)
 const notice = ref('')
-const result = ref({ items: [], summary: {} })
+const result = ref({ items: [], summary: { state: 'idle', total: 0, checked: 0, pending: 0 } })
 const plans = ref([])
 const selected = ref(null)
 const previewResult = ref(null)
 const pendingRepair = ref(null)
 const cards = computed(() => result.value.items || [])
-const issueCards = computed(() => cards.value.filter(card => card.status !== 'verified'))
-const verifiedCards = computed(() => cards.value.filter(card => card.status === 'verified'))
-const activeCount = computed(() => issueCards.value.length)
+const summary = computed(() => result.value.summary || {})
+const hasChecked = computed(() => summary.value.state === 'complete' || summary.value.state === 'partial')
+const completed = computed(() => summary.value.state === 'complete')
 
-const typeGuide = {
-  transfer_failed: { label: '整理没有完成', detail: 'MoviePilot 曾记录这次整理没有完成。先做一次模拟检查，确认现在是否还可以安全处理。' },
-  unexpected_transfer_mode: { label: '整理方式不符合预期', detail: '这次整理使用的方式和硬链接规则不一致，需要先核对。' },
-  identity_conflict: { label: '作品信息有冲突', detail: '同一条记录出现了不同作品信息，程序不会替你猜测正确答案。' },
-  missing_media_identity: { label: '影片尚未识别', detail: '历史记录没有可靠的作品身份，不能自动把原始名称当成影片名。' },
-  missing_transfer_mode: { label: '缺少整理信息', detail: 'MoviePilot 没有提供足够的整理信息，当前不能安全自动处理。' },
+const auditGuide = {
+  ready_to_plan: { label: '可以处理', detail: '已经识别作品，并确认目前可以安全创建硬链接。' },
+  preview_rejected: { label: '暂不能处理', detail: '已经识别作品，但这次检查不能安全创建硬链接。' },
+  identity_unresolved: { label: '无法自动识别', detail: '历史记录的信息不足，暂时不能可靠确定这是什么作品。' },
 }
-const fallbackGuide = { label: '需要人工核对', detail: '这条记录需要先核对，程序不会猜测或直接改动文件。' }
+const fallbackGuide = { label: '需要进一步核对', detail: '这条记录需要进一步核对；系统不会猜测作品或改动文件。' }
 
-function hasChinese(text) { return /[\u3400-\u9fff]/.test(String(text || '')) }
-function hasReliableIdentity(card) { return Boolean(card?.media_source && card?.media_id && card?.media_type) }
 function titleFor(card) {
-  if (hasChinese(card?.title) || (hasReliableIdentity(card) && card?.title)) return `${card.title}${card.year ? `（${card.year}）` : ''}`
-  return '待确认影片'
+  if (!card?.title) return '无法自动识别的整理记录'
+  return `${card.title}${card.year ? `（${card.year}）` : ''}`
 }
-function sourceName(card) { return card?.title && titleFor(card) === '待确认影片' ? card.title : '' }
-function guideFor(card) { return typeGuide[(card?.reason_codes || []).find(item => typeGuide[item])] || fallbackGuide }
+function guideFor(card) { return auditGuide[card?.status] || fallbackGuide }
+function planFor(card) { return plans.value.find(plan => plan.history_id === card?.history_id && plan.status === 'ready') || null }
 function latestCheck(card) {
-  if (!card?.last_preview) return { tone: 'neutral', label: '尚未模拟检查', detail: '还没有核对现在能否安全处理。' }
-  if (card.last_preview.status === 'ready') return { tone: 'ready', label: '可以继续处理', detail: '最近一次模拟检查已通过；仍需你在确认窗口里核对后再执行。' }
-  return { tone: 'blocked', label: '暂不能自动处理', detail: '最近一次模拟检查没有生成安全方案，请按下方人工处理说明核对。' }
+  if (previewResult.value) return previewResult.value
+  if (card?.status === 'ready_to_plan') return { tone: 'ready', title: '可以创建硬链接', detail: '批量检查已通过。生成处理方案后，仍需你确认才会真正创建硬链接。' }
+  if (card?.status === 'preview_rejected') return { tone: 'blocked', title: '现在不能安全处理', detail: '这次检查没有通过；没有创建、删除、移动或改名任何文件。' }
+  return { tone: 'blocked', title: '无法自动识别', detail: '没有可靠作品身份时，系统不会把原始任务名当成影片名，也不会自动处理。' }
 }
-function planFor(card) { return plans.value.find(plan => plan.package_id === card?.package_id && plan.status === 'ready') || null }
 
 async function refresh() {
   if (typeof props.api?.get !== 'function') { notice.value = '当前 MoviePilot 未提供插件数据接口'; return }
@@ -47,21 +43,36 @@ async function refresh() {
     result.value = packages?.data ?? packages ?? { items: [], summary: {} }
     plans.value = (nextPlans?.data ?? nextPlans ?? {}).items || []
     notice.value = ''
-  } catch (cause) { notice.value = cause?.message || '暂时无法读取整理问题' }
+  } catch (cause) { notice.value = cause?.message || '暂时无法读取检查结果' }
   finally { loading.value = false }
 }
-function openIssue(card) { selected.value = card; previewResult.value = null }
-function closeIssue() { selected.value = null; previewResult.value = null }
-async function checkPlan(card) {
-  const historyId = (card.history_ids || [])[0]
-  if (!historyId || typeof props.api?.post !== 'function') { previewResult.value = { ok: false, detail: '这条记录没有可用于检查的历史信息。' }; return }
+
+async function auditAll() {
+  if (typeof props.api?.post !== 'function') { notice.value = '当前 MoviePilot 未提供检查接口'; return }
   loading.value = true
+  notice.value = ''
   try {
-    const response = await props.api.post(`plugin/${props.pluginId}/packages/${historyId}/preview`)
+    const response = await props.api.post(`plugin/${props.pluginId}/audit`)
     const data = response?.data ?? response
     await refresh()
-    previewResult.value = data?.ok ? { ok: true, detail: '模拟检查通过。系统已生成一份仅创建硬链接的计划，等待你确认。' } : { ok: false, detail: '模拟检查未能生成安全方案。不会改动任何文件，请按人工处理说明核对。' }
-  } catch (cause) { previewResult.value = { ok: false, detail: cause?.message || '模拟检查没有完成，未改动任何文件。' } }
+    notice.value = data?.ok ? '检查完成：没有改动影片文件、下载器或现有整理规则。' : '检查没有完成，未改动任何文件。'
+  } catch (cause) { notice.value = cause?.message || '检查没有完成，未改动任何文件。' }
+  finally { loading.value = false }
+}
+
+function openIssue(card) { selected.value = card; previewResult.value = null }
+function closeIssue() { selected.value = null; previewResult.value = null }
+async function preparePlan(card) {
+  if (!card?.history_id || typeof props.api?.post !== 'function') return
+  loading.value = true
+  try {
+    const response = await props.api.post(`plugin/${props.pluginId}/packages/${card.history_id}/preview`)
+    const data = response?.data ?? response
+    await refresh()
+    previewResult.value = data?.ok
+      ? { tone: 'ready', title: '处理方案已准备好', detail: '系统只准备了创建硬链接的方案；请确认作品和结论后再执行。' }
+      : { tone: 'blocked', title: '现在不能安全处理', detail: '没有生成处理方案，也没有改动任何文件。' }
+  } catch (cause) { previewResult.value = { tone: 'blocked', title: '检查没有完成', detail: cause?.message || '没有生成处理方案，也没有改动任何文件。' } }
   finally { loading.value = false }
 }
 function requestRepair(plan) { pendingRepair.value = plan }
@@ -73,9 +84,9 @@ async function repair() {
     const response = await props.api.post(`plugin/${props.pluginId}/plans/${plan.plan_id}/repair`)
     const data = response?.data ?? response
     await refresh()
-    notice.value = data?.ok ? '已完成硬链接创建；原文件、下载器和原有整理规则都没有改动。' : '这次没有完成硬链接创建，原文件没有被删除或移动。'
+    notice.value = data?.ok ? '已创建硬链接；原文件、下载器和既有整理规则没有改动。' : '没有完成硬链接创建；原文件没有被删除或移动。'
     if (data?.ok) toast?.success?.('已完成硬链接创建')
-  } catch (cause) { notice.value = cause?.message || '这次没有完成硬链接创建，原文件没有被删除或移动。' }
+  } catch (cause) { notice.value = cause?.message || '没有完成硬链接创建；原文件没有被删除或移动。' }
   finally { loading.value = false; pendingRepair.value = null }
 }
 onMounted(refresh)
@@ -83,17 +94,26 @@ onMounted(refresh)
 
 <template>
   <main class="governor-page">
-    <header class="page-header"><div><h1>整理问题</h1><p>这里列出 MoviePilot 真实记录过的异常。每张卡都需要先核对，再决定是否处理。</p></div><button class="secondary" :disabled="loading" @click="refresh">{{ loading ? '正在更新' : '更新列表' }}</button></header>
-    <p v-if="notice" class="notice">{{ notice }}</p>
-    <section class="overview" aria-label="问题概览"><article><strong>{{ activeCount }}</strong><span>需要核对</span></article><article><strong>{{ verifiedCards.length }}</strong><span>历史记录一致</span></article><article><strong>{{ issueCards.filter(card => planFor(card)).length }}</strong><span>可确认处理</span></article></section>
-    <section class="issues" aria-label="整理问题列表"><div class="section-heading"><h2>待处理问题</h2><p>“待确认影片”表示历史记录没有可靠片名；不会把英文或乱码硬说成中文片名。</p></div><div v-if="!issueCards.length" class="empty">目前没有需要核对的整理记录。</div><article v-for="card in issueCards" :key="card.package_id" class="issue-card"><div class="issue-copy"><span class="issue-type">{{ guideFor(card).label }}</span><h3>{{ titleFor(card) }}</h3><p>{{ guideFor(card).detail }}</p></div><button class="primary" @click="openIssue(card)">查看并核对</button></article></section>
-    <details v-if="verifiedCards.length" class="verified-history"><summary>查看历史记录一致的项目（{{ verifiedCards.length }}）</summary><p>这里只表示 MoviePilot 保存的公开记录彼此一致，不表示媒体库最终展示已经人工核对。</p><article v-for="card in verifiedCards" :key="card.package_id" class="issue-card verified"><div class="issue-copy"><span class="issue-type">历史记录一致</span><h3>{{ titleFor(card) }}</h3><p>当前没有发现需要处理的公开记录冲突。</p></div><button class="secondary" @click="openIssue(card)">查看记录</button></article></details>
-
-    <div v-if="selected" class="modal-backdrop" @click.self="closeIssue"><section class="modal" role="dialog" aria-modal="true" aria-label="核对整理问题"><header class="modal-header"><div><p class="modal-label">整理问题核对</p><h2>{{ titleFor(selected) }}</h2><p>{{ guideFor(selected).label }}</p></div><button class="icon-button" aria-label="关闭" @click="closeIssue">×</button></header><section class="modal-section"><h3>这是什么问题？</h3><p>{{ guideFor(selected).detail }}</p><p class="quiet">这条卡来自 MoviePilot 的历史整理记录。它说明当时发生过异常，不代表现在一定还没有入库。</p></section><section class="modal-section"><h3>现在怎么处理？</h3><div class="check-state" :class="latestCheck(selected).tone"><strong>{{ latestCheck(selected).label }}</strong><p>{{ previewResult?.detail || latestCheck(selected).detail }}</p></div><button v-if="selected.failure_count" class="primary wide" :disabled="loading" @click="checkPlan(selected)">{{ loading ? '正在模拟检查' : '模拟检查，不改文件' }}</button><button v-if="planFor(selected)" class="primary wide" :disabled="loading" @click="requestRepair(planFor(selected))">确认创建硬链接</button></section><section class="manual-guide"><h3>暂不能自动处理时怎么办？</h3><ol><li>用下方的原始任务名称到 MoviePilot 的“搜索结果”中核对影片、年份和类型。</li><li>到“整理”或“历史记录”确认它是否已经入库；已经入库就不需要再处理。</li><li>确认仍未入库后，回到这里重新做一次模拟检查。只有检查通过，才会出现确认按钮。</li></ol><p v-if="sourceName(selected)" class="source-name">原始任务名称：{{ sourceName(selected) }}</p></section></section></div>
-    <div v-if="pendingRepair" class="modal-backdrop" @click.self="pendingRepair = null"><section class="modal confirm" role="dialog" aria-modal="true" aria-label="确认创建硬链接"><h2>确认创建硬链接？</h2><p>系统只会为已通过模拟检查的这一条记录创建硬链接。</p><ul><li>不会删除、移动、改名或覆盖原文件</li><li>不会修改下载器、代理或既有整理规则</li><li>完成后会回到此页面显示结果</li></ul><div class="actions"><button class="secondary" :disabled="loading" @click="pendingRepair = null">返回核对</button><button class="primary" :disabled="loading" @click="repair">确认创建</button></div></section></div>
+    <header class="page-header">
+      <div><h1>整理检查</h1><p>一次核查所有历史异常。检查只读取记录、识别作品并模拟硬链接，不会改动文件。</p></div>
+      <button class="secondary" :disabled="loading" @click="refresh">{{ loading ? '正在更新…' : '更新页面' }}</button>
+    </header>
+    <p v-if="notice" class="notice" role="status">{{ notice }}</p>
+    <section v-if="!hasChecked" class="start-panel" aria-label="开始整理检查">
+      <div class="start-copy"><h2>{{ summary.total ? `有 ${summary.total} 条历史记录等待检查` : '还没有需要检查的历史记录' }}</h2><p>{{ summary.total ? '先让系统逐条查明影片、年份和当前能否安全处理；只有检查后仍有问题的记录才会显示出来。' : 'MoviePilot 尚未提供需要处理的失败记录。' }}</p></div>
+      <button v-if="summary.total" class="primary primary-large" :disabled="loading" @click="auditAll">{{ loading ? '正在检查全部记录…' : '一键检查全部（不改文件）' }}</button>
+    </section>
+    <section v-else class="result-panel" aria-label="检查结果">
+      <div class="result-heading"><div><h2>{{ completed ? '检查完成' : '检查尚未完成' }}</h2><p>已检查 {{ summary.checked || 0 }} / {{ summary.total || 0 }} 条历史记录。只显示仍需你决定的项目。</p></div><button v-if="!completed" class="primary" :disabled="loading" @click="auditAll">继续检查</button></div>
+      <div class="overview" aria-label="检查结果概览"><article><strong>{{ summary.actionable || 0 }}</strong><span>可以处理</span></article><article><strong>{{ summary.needs_attention || 0 }}</strong><span>需要你查看</span></article><article><strong>{{ summary.pending || 0 }}</strong><span>尚未检查</span></article></div>
+      <div v-if="!cards.length" class="empty"><h3>目前没有需要处理的记录</h3><p>已检查的历史异常没有发现需要你继续处理的问题。</p></div>
+      <div v-else class="issues"><article v-for="card in cards" :key="card.history_id" class="issue-card"><div class="issue-copy"><span class="issue-type">{{ guideFor(card).label }}</span><h3>{{ titleFor(card) }}</h3><p>{{ guideFor(card).detail }}</p></div><button class="primary" @click="openIssue(card)">查看结论</button></article></div>
+    </section>
+    <div v-if="selected" class="modal-backdrop" @click.self="closeIssue"><section class="modal" role="dialog" aria-modal="true" aria-label="整理检查结论"><header class="modal-header"><div><span class="modal-label">检查结论</span><h2>{{ titleFor(selected) }}</h2></div><button class="icon-button" aria-label="关闭" @click="closeIssue">×</button></header><section class="modal-section"><h3>{{ latestCheck(selected).title }}</h3><p>{{ latestCheck(selected).detail }}</p></section><section v-if="selected.status === 'ready_to_plan'" class="modal-section"><h3>下一步</h3><p>先生成一份即时处理方案。它仍然不会改文件；只有你在下一步确认后才会创建硬链接。</p><button v-if="!planFor(selected)" class="primary wide" :disabled="loading" @click="preparePlan(selected)">{{ loading ? '正在准备方案…' : '生成处理方案（不改文件）' }}</button><button v-else class="primary wide" :disabled="loading" @click="requestRepair(planFor(selected))">确认创建硬链接</button></section><details v-if="selected.status !== 'ready_to_plan'" class="manual-guide"><summary>仍无法处理？查看人工步骤</summary><ol><li>在 MoviePilot 的搜索页确认作品、年份和类型。</li><li>在整理或历史记录中确认它是否已经入库；已入库就不需要处理。</li><li>确认仍未入库后，修正可识别的名称，再重新执行“一键检查全部”。</li></ol></details></section></div>
+    <div v-if="pendingRepair" class="modal-backdrop" @click.self="pendingRepair = null"><section class="modal confirm" role="dialog" aria-modal="true" aria-label="确认创建硬链接"><h2>确认创建硬链接？</h2><p>系统只会为这一个已检查通过的项目创建硬链接。</p><ul><li>不会删除、移动、改名或覆盖原文件</li><li>不会修改下载器、代理或既有整理规则</li><li>完成后会回到此页面显示结果</li></ul><div class="actions"><button class="secondary" :disabled="loading" @click="pendingRepair = null">返回</button><button class="primary" :disabled="loading" @click="repair">确认创建</button></div></section></div>
   </main>
 </template>
 
 <style scoped>
-.governor-page{min-height:100%;box-sizing:border-box;padding:36px;color:rgb(var(--v-theme-on-background,232,231,241));background:rgb(var(--v-theme-background,16,16,24))}.page-header,.modal-header{display:flex;justify-content:space-between;gap:24px;align-items:flex-start}.page-header{margin-bottom:28px}.page-header h1{margin:0;font-size:34px;line-height:1.2}.page-header p,.section-heading p,.quiet,.verified-history>p{margin:8px 0 0;color:rgba(var(--v-theme-on-surface,232,231,241),.68);font-size:15px;line-height:1.65}.primary,.secondary{border:0;border-radius:10px;padding:11px 16px;font-size:15px;font-weight:700;cursor:pointer}.primary{background:rgb(var(--v-theme-primary,139,92,246));color:#fff}.secondary{background:rgba(var(--v-theme-on-surface,232,231,241),.09);color:rgb(var(--v-theme-on-surface,232,231,241))}.primary:disabled,.secondary:disabled{opacity:.55;cursor:default}.overview{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:30px}.overview article,.issue-card,.modal{border:1px solid rgba(var(--v-border-color,232,231,241),.16);background:rgba(var(--v-theme-surface,23,23,34),.88);border-radius:16px}.overview article{padding:18px}.overview strong{display:block;font-size:30px;line-height:1.1}.overview span{display:block;margin-top:7px;color:rgba(var(--v-theme-on-surface,232,231,241),.68);font-size:15px}.section-heading h2{margin:0;font-size:24px}.issues{max-width:980px}.issue-card{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:24px;margin-top:14px}.issue-card.verified{opacity:.78}.issue-copy{min-width:0}.issue-type,.modal-label{display:inline-block;margin-bottom:10px;color:rgb(var(--v-theme-primary,139,92,246));font-size:15px;font-weight:750}.issue-copy h3{margin:0;font-size:23px;line-height:1.35}.issue-copy p{margin:9px 0 0;font-size:16px;line-height:1.6;color:rgba(var(--v-theme-on-surface,232,231,241),.86)}.issue-copy .quiet{font-size:14px}.notice{margin:0 0 20px;padding:13px 15px;border-radius:10px;background:rgba(251,140,0,.16);color:rgb(var(--v-theme-on-surface,232,231,241));font-size:15px}.empty{padding:36px 0;color:rgba(var(--v-theme-on-surface,232,231,241),.65);font-size:16px}.verified-history{max-width:980px;margin-top:32px}.verified-history summary{cursor:pointer;font-size:16px;font-weight:700;color:rgba(var(--v-theme-on-surface,232,231,241),.86)}.modal-backdrop{position:fixed;inset:0;z-index:20;display:grid;place-items:center;padding:20px;background:rgba(0,0,0,.5)}.modal{width:min(100%,720px);max-height:calc(100vh - 40px);overflow:auto;padding:28px}.modal h2{margin:0;font-size:28px}.modal h3{margin:0 0 8px;font-size:19px}.modal-header>div>p:last-child{margin:8px 0 0;color:rgba(var(--v-theme-on-surface,232,231,241),.72);font-size:16px}.icon-button{border:0;background:transparent;color:rgb(var(--v-theme-on-surface,232,231,241));font-size:32px;line-height:1;cursor:pointer}.modal-section,.manual-guide{padding-top:22px;margin-top:22px;border-top:1px solid rgba(var(--v-border-color,232,231,241),.14)}.modal-section p,.manual-guide p,.manual-guide li{font-size:16px;line-height:1.65;color:rgba(var(--v-theme-on-surface,232,231,241),.86)}.check-state{margin:12px 0;padding:14px 16px;border-radius:12px}.check-state strong{font-size:17px}.check-state p{margin:5px 0 0}.neutral{background:rgba(33,150,243,.14)}.ready{background:rgba(76,175,80,.16)}.blocked{background:rgba(251,140,0,.16)}.wide{width:100%;margin-top:10px}.manual-guide ol{margin:10px 0;padding-left:24px}.source-name{padding:11px 13px;border-radius:9px;background:rgba(255,255,255,.06);word-break:break-word}.confirm{width:min(100%,520px)}.confirm>p,.confirm li{font-size:16px;line-height:1.6}.actions{display:flex;justify-content:flex-end;gap:10px;margin-top:24px}@media(max-width:760px){.governor-page{padding:22px}.page-header,.issue-card{flex-direction:column;align-items:stretch}.overview{grid-template-columns:1fr}.issue-card{padding:20px}.page-header h1{font-size:30px}.modal{padding:22px}.modal h2{font-size:24px}}
+.governor-page{min-height:100%;box-sizing:border-box;padding:44px;max-width:1180px;margin:0 auto;color:rgb(var(--v-theme-on-background,232,231,241));background:rgb(var(--v-theme-background,16,16,24))}.page-header,.modal-header,.result-heading{display:flex;justify-content:space-between;gap:24px;align-items:flex-start}.page-header{margin-bottom:32px}.page-header h1{margin:0;font-size:38px;line-height:1.2}.page-header p,.result-heading p,.start-copy p{max-width:700px;margin:10px 0 0;color:rgba(var(--v-theme-on-surface,232,231,241),.72);font-size:18px;line-height:1.65}.primary,.secondary{border:0;border-radius:12px;padding:12px 18px;font-size:16px;font-weight:750;cursor:pointer}.primary{background:rgb(var(--v-theme-primary,139,92,246));color:#fff}.secondary{background:rgba(var(--v-theme-on-surface,232,231,241),.09);color:rgb(var(--v-theme-on-surface,232,231,241))}.primary:disabled,.secondary:disabled{opacity:.55;cursor:default}.notice{margin:0 0 22px;padding:15px 18px;border-radius:12px;background:rgba(251,140,0,.16);font-size:16px;line-height:1.5}.start-panel,.result-panel,.modal,.issue-card{border:1px solid rgba(var(--v-border-color,232,231,241),.16);background:rgba(var(--v-theme-surface,23,23,34),.9);border-radius:18px}.start-panel{padding:38px;display:flex;align-items:center;justify-content:space-between;gap:32px}.start-copy h2,.result-heading h2{margin:0;font-size:29px;line-height:1.3}.primary-large{flex:0 0 auto;padding:16px 22px;font-size:18px}.result-panel{padding:30px}.overview{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:28px 0}.overview article{padding:20px;border-radius:14px;background:rgba(255,255,255,.045)}.overview strong{display:block;font-size:34px;line-height:1.05}.overview span{display:block;margin-top:8px;color:rgba(var(--v-theme-on-surface,232,231,241),.72);font-size:16px}.issues{display:grid;gap:14px}.issue-card{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:26px}.issue-copy{min-width:0}.issue-type,.modal-label{display:inline-block;margin-bottom:10px;color:rgb(var(--v-theme-primary,139,92,246));font-size:16px;font-weight:750}.issue-copy h3{margin:0;font-size:25px;line-height:1.35}.issue-copy p{margin:9px 0 0;color:rgba(var(--v-theme-on-surface,232,231,241),.86);font-size:17px;line-height:1.6}.empty{padding:46px 18px;text-align:center}.empty h3{margin:0;font-size:24px}.empty p{margin:10px 0 0;color:rgba(var(--v-theme-on-surface,232,231,241),.72);font-size:17px}.modal-backdrop{position:fixed;inset:0;z-index:20;display:grid;place-items:center;padding:24px;background:rgba(0,0,0,.58)}.modal{width:min(100%,780px);max-height:calc(100vh - 48px);overflow:auto;padding:34px}.modal h2{margin:4px 0 0;font-size:32px;line-height:1.3}.modal h3{margin:0;font-size:23px;line-height:1.4}.icon-button{border:0;background:transparent;color:rgb(var(--v-theme-on-surface,232,231,241));font-size:36px;line-height:1;cursor:pointer}.modal-section,.manual-guide{padding-top:24px;margin-top:24px;border-top:1px solid rgba(var(--v-border-color,232,231,241),.14)}.modal-section p,.manual-guide li{font-size:18px;line-height:1.7;color:rgba(var(--v-theme-on-surface,232,231,241),.9)}.wide{width:100%;margin-top:18px;padding:15px 18px;font-size:17px}.manual-guide summary{cursor:pointer;font-size:18px;font-weight:750}.manual-guide ol{padding-left:26px;margin:16px 0 0}.confirm{width:min(100%,560px)}.confirm>p,.confirm li{font-size:18px;line-height:1.65}.actions{display:flex;justify-content:flex-end;gap:12px;margin-top:26px}@media(max-width:760px){.governor-page{padding:24px 18px}.page-header,.result-heading,.start-panel,.issue-card{flex-direction:column;align-items:stretch}.page-header h1{font-size:32px}.page-header p,.result-heading p,.start-copy p{font-size:17px}.start-panel,.result-panel{padding:25px}.overview{grid-template-columns:1fr}.issue-card{padding:22px}.issue-copy h3{font-size:22px}.modal{padding:25px}.modal h2{font-size:27px}.modal h3{font-size:21px}.modal-section p,.manual-guide li{font-size:17px}}
 </style>

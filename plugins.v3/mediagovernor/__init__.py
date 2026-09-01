@@ -6,10 +6,12 @@ from typing import Any, Dict, List, Tuple
 
 from app.db.oper.transferhistory import TransferHistoryOper
 from app.plugins import _PluginBase
+from app.sdk.logging import logger
+from app.sdk.media import MetaInfo
 from app.schemas.types import EventType
 from app.sdk.events import Event, eventmanager, snapshot_event_data
 
-from .governor import EventObservation, GovernanceQueue, NativePreviewGateway
+from .governor import BatchAudit, EventObservation, GovernanceQueue, NativePreviewGateway
 
 
 class MediaGovernor(_PluginBase):
@@ -18,7 +20,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "用中文问题卡核对整理记录；确认后才创建硬链接，不改动原文件。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.6.0"
+    plugin_version = "0.7.0"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -28,6 +30,7 @@ class MediaGovernor(_PluginBase):
     _QUEUE_KEY = "queue"
     _LEGACY_QUEUE_KEY = "s3_queue"
     _AUDIT_KEY = "history_audit"
+    _INSPECTION_KEY = "batch_inspection"
     _LEGACY_AUDIT_KEY = "s3_audit"
     _AUDIT_PAGE_SIZE = 100
     _AUDIT_PAGES_PER_RUN = 5
@@ -43,9 +46,11 @@ class MediaGovernor(_PluginBase):
             queue_data = self.get_data(self._QUEUE_KEY) or self.get_data(self._LEGACY_QUEUE_KEY)
             self._queue = GovernanceQueue.from_data(queue_data)
             self._audit = self.get_data(self._AUDIT_KEY) or self.get_data(self._LEGACY_AUDIT_KEY) or {}
+            self._inspection = BatchAudit.from_data(self.get_data(self._INSPECTION_KEY))
         else:
             self._queue = GovernanceQueue()
             self._audit = {}
+            self._inspection = BatchAudit()
         if self._enabled and self._backfill_existing_failures:
             self.reconcile_history()
         elif self._enabled:
@@ -73,15 +78,18 @@ class MediaGovernor(_PluginBase):
             {"path": "/packages", "endpoint": self.get_packages, "methods": ["GET"], "auth": "bear", "summary": "查询媒体治理问题"},
             {"path": "/plans", "endpoint": self.get_plans, "methods": ["GET"], "auth": "bear", "summary": "查询零写入预演计划"},
             {"path": "/plans/{plan_id}", "endpoint": self.get_plan, "methods": ["GET"], "auth": "bear", "summary": "查询预演计划详情"},
+            {"path": "/audit", "endpoint": self.audit_all, "methods": ["POST"], "auth": "bear", "summary": "一键检查全部历史异常（不改文件）"},
             {"path": "/packages/{history_id}/preview", "endpoint": self.preview_history, "methods": ["POST"], "auth": "bear", "summary": "生成硬链接预演计划（不执行）"},
             {"path": "/plans/{plan_id}/repair", "endpoint": self.repair_plan, "methods": ["POST"], "auth": "bear", "summary": "执行已确认的硬链接修复"},
         ]
 
     def get_packages(self) -> dict[str, Any]:
         queue = getattr(self, "_queue", GovernanceQueue())
+        history_ids = queue.failed_history_ids()
+        inspection = getattr(self, "_inspection", BatchAudit())
         return {
-            "items": queue.public_items(),
-            "summary": queue.public_summary(),
+            "items": inspection.public_items(history_ids),
+            "summary": inspection.summary(history_ids),
             "mode": "observe_and_preview",
             "enabled": self.get_state(),
             "history_audit": getattr(self, "_audit", {}),
@@ -209,6 +217,71 @@ class MediaGovernor(_PluginBase):
             self._queue = queue
             self.save_data(self._QUEUE_KEY, queue.to_data())
         return {**result, "plan": plan, "outcome": outcome}
+
+    @staticmethod
+    def _media_identity(mediainfo: Any) -> dict[str, Any]:
+        """把宿主识别结果压缩为可展示的稳定身份，不保存原始文件名或路径。"""
+        def text(value: Any) -> str | None:
+            raw = getattr(value, "value", value)
+            cleaned = str(raw).strip() if raw is not None else ""
+            return cleaned[:160] if cleaned else None
+        return {
+            "title": text(getattr(mediainfo, "title", None)),
+            "year": text(getattr(mediainfo, "year", None)),
+            "media_source": text(getattr(mediainfo, "media_source", None)),
+            "media_id": text(getattr(mediainfo, "media_id", None)),
+            "media_type": text(getattr(mediainfo, "type", None)),
+        }
+
+    @staticmethod
+    def _history_title(history: Any) -> str | None:
+        """从本次宿主历史对象取识别输入；该原始名称绝不写入插件状态。"""
+        for candidate in (getattr(history, "title", None), (getattr(history, "src_fileitem", None) or {}).get("name")):
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return None
+
+    def audit_all(self) -> dict[str, Any]:
+        """批量识别并做零写入硬链接检查；不移动、删除或创建媒体文件。"""
+        queue = getattr(self, "_queue", GovernanceQueue())
+        inspection = getattr(self, "_inspection", BatchAudit())
+        if not self.get_state():
+            return {"ok": False, "detail": "plugin_disabled", "summary": inspection.summary(queue.failed_history_ids())}
+        for history_id in queue.failed_history_ids():
+            history = TransferHistoryOper().get(history_id)
+            if history is None or getattr(history, "status", None) is True:
+                inspection.record(history_id, None, source_available=False)
+                continue
+            title = self._history_title(history)
+            mediainfo = None
+            if title:
+                try:
+                    from app.chain.media import MediaChain
+                    mediainfo = MediaChain().recognize_by_meta(MetaInfo(title=title), obtain_images=False)
+                except Exception as exc:
+                    logger.warning(f"媒体治理无法完成第 {history_id} 条历史记录的作品识别：{exc.__class__.__name__}")
+                    mediainfo = None
+            identity = self._media_identity(mediainfo) if mediainfo is not None else None
+            preview = None
+            if identity and all(identity.get(field) for field in ("title", "media_source", "media_id", "media_type")):
+                raw_fileitem = getattr(history, "src_fileitem", None)
+                if isinstance(raw_fileitem, dict):
+                    try:
+                        from app.schemas.file import FileItem
+                        preview = self.preview_hardlink(FileItem(**raw_fileitem))
+                    except Exception as exc:
+                        logger.warning(f"媒体治理无法完成第 {history_id} 条历史记录的硬链接模拟：{exc.__class__.__name__}")
+                        preview = {"ok": False, "detail": "preview_rejected"}
+                else:
+                    preview = {"ok": False, "detail": "history_fileitem_unavailable"}
+                outcome = queue.record_preview_outcome(history_id, preview)
+                if outcome is not None:
+                    self._queue = queue
+            inspection.record(history_id, identity, preview)
+        self._inspection = inspection
+        self.save_data(self._QUEUE_KEY, queue.to_data())
+        self.save_data(self._INSPECTION_KEY, inspection.to_data())
+        return {"ok": True, "summary": inspection.summary(queue.failed_history_ids())}
 
     def repair_plan(self, plan_id: str) -> dict[str, Any]:
         """只执行已通过预演、未过期且由用户明确点击确认的单个计划。"""

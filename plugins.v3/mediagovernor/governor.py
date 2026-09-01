@@ -252,6 +252,10 @@ class GovernanceQueue:
                 summary[status] += 1
         return summary
 
+    def failed_history_ids(self) -> list[int]:
+        """返回可批量检查的失败历史编号，绝不包含文件信息。"""
+        return sorted({history_id for package in self._packages.values() for history_id in package.get("failed_history_ids", []) if isinstance(history_id, int)})
+
     def allows_preview(self, history_id: int) -> bool:
         return any(history_id in package.get("failed_history_ids", []) for package in self._packages.values())
 
@@ -341,6 +345,88 @@ class GovernanceQueue:
         plan["repair_finished_at"] = _now() if now is None else now
         plan["repair_detail"] = str(result.get("detail") or ("repair_completed" if result.get("ok") else "repair_failed"))
         return dict(plan)
+
+
+class BatchAudit:
+    """批量检查的脱敏结果投影；未检查的记录不会作为问题卡公开。"""
+
+    _SCHEMA = "mediagovernor-batch-audit/v1"
+
+    def __init__(self, records: dict[str, dict[str, Any]] | None = None) -> None:
+        self._records = records or {}
+
+    @classmethod
+    def from_data(cls, raw: Any) -> "BatchAudit":
+        if not isinstance(raw, Mapping) or raw.get("schema") != cls._SCHEMA:
+            return cls()
+        records = raw.get("records")
+        return cls(dict(records) if isinstance(records, Mapping) else {})
+
+    @staticmethod
+    def _identity(identity: Mapping[str, Any] | None) -> dict[str, str | None]:
+        identity = identity or {}
+        return {
+            "title": _text(identity.get("title")),
+            "year": _text(identity.get("year"), 12),
+            "media_source": _text(identity.get("media_source"), 32),
+            "media_id": _text(identity.get("media_id"), 64),
+            "media_type": _text(identity.get("media_type"), 32),
+        }
+
+    @staticmethod
+    def _is_reliable(identity: Mapping[str, str | None]) -> bool:
+        return bool(identity.get("title") and identity.get("media_source") and identity.get("media_id") and identity.get("media_type"))
+
+    def record(
+        self,
+        history_id: int,
+        identity: Mapping[str, Any] | None,
+        preview: Mapping[str, Any] | None = None,
+        *,
+        source_available: bool = True,
+        checked_at: int | None = None,
+    ) -> dict[str, Any]:
+        """记录一次真实检查结论，只保存可展示身份和安全结论。"""
+        fields = self._identity(identity)
+        if not source_available:
+            status, detail = "source_unavailable", "该历史记录已不可用于检查"
+        elif not self._is_reliable(fields):
+            status, detail = "identity_unresolved", "未能可靠识别作品"
+        elif preview and bool(preview.get("ok")):
+            status, detail = "ready_to_plan", "可以创建硬链接"
+        else:
+            status, detail = "preview_rejected", "目前不能安全创建硬链接"
+        record = {
+            "history_id": history_id,
+            "status": status,
+            "detail": detail,
+            "checked_at": _now() if checked_at is None else checked_at,
+            **fields,
+        }
+        self._records[str(history_id)] = record
+        return dict(record)
+
+    def summary(self, history_ids: list[int]) -> dict[str, int | str]:
+        known = {str(history_id) for history_id in history_ids}
+        records = [record for key, record in self._records.items() if key in known]
+        checked = len(records)
+        return {
+            "state": "complete" if known and checked == len(known) else "idle" if not checked else "partial",
+            "total": len(known),
+            "checked": checked,
+            "pending": max(0, len(known) - checked),
+            "actionable": sum(record.get("status") == "ready_to_plan" for record in records),
+            "needs_attention": sum(record.get("status") in {"identity_unresolved", "preview_rejected"} for record in records),
+        }
+
+    def public_items(self, history_ids: list[int]) -> list[dict[str, Any]]:
+        """只返回已经检查且仍需处理的记录，避免把待检查项伪装成问题。"""
+        allowed = {str(history_id) for history_id in history_ids}
+        visible = [dict(record) for key, record in self._records.items() if key in allowed and record.get("status") in {"identity_unresolved", "preview_rejected", "ready_to_plan"}]
+        return sorted(visible, key=lambda record: int(record.get("history_id") or 0), reverse=True)
+
+    def to_data(self) -> dict[str, Any]:
+        return {"schema": self._SCHEMA, "records": self._records}
 
 
 class NativePreviewGateway:

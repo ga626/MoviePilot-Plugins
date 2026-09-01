@@ -33,13 +33,40 @@ def _payload(history_id: int, event_key: str, *, mode: str | None = "link", titl
 def test_v3_manifest_version_and_frontend_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
-    assert manifest["version"] == "0.6.0"
+    assert manifest["version"] == "0.7.0"
     assert manifest["release"] is True
-    assert 'plugin_version = "0.6.0"' in source
+    assert 'plugin_version = "0.7.0"' in source
     assert 'return "vue", "dist/assets"' in source
     assert "def get_sidebar_nav" in source
     assert 'return []' in source
     assert (ROOT / "plugins.v3/mediagovernor/dist/assets/remoteEntry.js").is_file()
+    frontend = (ROOT / "plugins.v3/mediagovernor/src/components/AppPage.vue").read_text(encoding="utf-8")
+    assert "一键检查全部（不改文件）" in frontend
+    assert "待确认影片" not in frontend
+    assert '"path": "/audit"' in source
+
+
+def test_batch_audit_hides_unchecked_records_and_keeps_only_safe_identity() -> None:
+    governor = _governor_module()
+    audit = governor.BatchAudit()
+    assert audit.summary([21]) == {"state": "idle", "total": 1, "checked": 0, "pending": 1, "actionable": 0, "needs_attention": 0}
+    assert audit.public_items([21]) == []
+    record = audit.record(21, {"title": "示例作品", "year": "2026", "media_source": "tmdb", "media_id": "42", "media_type": "电视剧"}, {"ok": True}, checked_at=100)
+    assert record["status"] == "ready_to_plan"
+    assert audit.summary([21])["state"] == "complete"
+    assert audit.public_items([21])[0]["title"] == "示例作品"
+    saved = json.dumps(audit.to_data(), ensure_ascii=False)
+    assert "path" not in saved and "src_fileitem" not in saved
+
+
+def test_batch_audit_only_exposes_unresolved_after_real_check() -> None:
+    governor = _governor_module()
+    audit = governor.BatchAudit()
+    audit.record(22, None, checked_at=100)
+    audit.record(23, {"title": "已识别作品", "media_source": "tmdb", "media_id": "43", "media_type": "电影"}, {"ok": False}, checked_at=100)
+    records = audit.public_items([22, 23])
+    assert [record["status"] for record in records] == ["preview_rejected", "identity_unresolved"]
+    assert records[1]["title"] is None
 
 
 def test_complete_event_is_verified_only_with_identity_and_link_mode() -> None:
