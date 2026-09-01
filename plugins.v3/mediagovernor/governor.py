@@ -1,7 +1,7 @@
-"""S3 的纯内存媒体治理模型。
+"""MediaGovernor 的纯领域模型、问题台状态机与零写入计划闸门。
 
 本模块不导入 MoviePilot 宿主，也不访问文件、网络或数据库。宿主适配仅在
-``__init__.py`` 中发生；这样可以用脱敏夹具验证归并、去重和预览闸门。
+``__init__.py`` 中发生；这样可用脱敏夹具验证归并、状态、去重与计划安全边界。
 """
 
 from __future__ import annotations
@@ -9,14 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import time
 from typing import Any, Callable, Mapping
 
 
 def _value(source: Any, name: str, default: Any = None) -> Any:
     """同时读取宿主模型、夹具对象和字典，绝不读取文件路径。"""
-    if isinstance(source, Mapping):
-        return source.get(name, default)
-    return getattr(source, name, default)
+    return source.get(name, default) if isinstance(source, Mapping) else getattr(source, name, default)
 
 
 def _text(value: Any, limit: int = 160) -> str | None:
@@ -34,6 +33,10 @@ def _digest(parts: Mapping[str, Any]) -> str:
     return sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _now() -> int:
+    return int(time.time())
+
+
 @dataclass(frozen=True)
 class EventObservation:
     """整理结果的最小、无路径观察投影。"""
@@ -47,18 +50,11 @@ class EventObservation:
     title: str | None
     year: str | None
     season: str | None
+    transfer_mode: str | None
 
     @classmethod
-    def from_contract(
-        cls,
-        event_kind: str,
-        payload: Any,
-        history: Any = None,
-    ) -> "EventObservation | None":
-        """从稳定事件合同和可选的只读历史记录构造投影。
-
-        缺少历史 ID 与事件幂等键时直接拒绝观察，避免以源文件路径充当去重键。
-        """
+    def from_contract(cls, event_kind: str, payload: Any, history: Any = None) -> "EventObservation | None":
+        """从公开事件合同和只读历史记录构造投影。"""
         history_id = _value(payload, "transfer_history_id")
         try:
             history_id = int(history_id) if history_id is not None else None
@@ -67,7 +63,6 @@ class EventObservation:
         event_key = _text(_value(payload, "idempotency_key"), 256)
         if history_id is None and event_key is None:
             return None
-
         media = _value(payload, "mediainfo") or history
         return cls(
             event_kind=event_kind,
@@ -79,30 +74,15 @@ class EventObservation:
             title=_text(_value(media, "title")),
             year=_text(_value(media, "year")),
             season=_text(_value(media, "season") or _value(media, "seasons")),
+            transfer_mode=_text(
+                _value(payload, "transfer_mode")
+                or _value(payload, "transfer_type")
+                or _value(history, "transfer_mode")
+                or _value(history, "transfer_type")
+            ),
         )
 
-    @property
-    def package_id(self) -> str:
-        """按规范媒体身份优先的通用作品包指纹。"""
-        identity = {
-            "media_source": self.media_source,
-            "media_id": self.media_id,
-            "media_type": self.media_type,
-            "title": self.title,
-            "year": self.year,
-            "season": self.season,
-        }
-        return f"mg-{_digest(identity)[:16]}"
-
-    @property
-    def dedup_key(self) -> str:
-        """只以稳定历史号或上游幂等键去重。"""
-        if self.history_id is not None:
-            return f"history:{self.history_id}"
-        return f"event:{_digest({'idempotency_key': self.event_key})[:24]}"
-
-    def public_fields(self) -> dict[str, str | int | None]:
-        """返回可持久化及展示的脱敏字段。"""
+    def identity_fields(self) -> dict[str, str | None]:
         return {
             "media_source": self.media_source,
             "media_id": self.media_id,
@@ -110,96 +90,215 @@ class EventObservation:
             "title": self.title,
             "year": self.year,
             "season": self.season,
-            "history_id": self.history_id,
         }
+
+    @property
+    def package_id(self) -> str:
+        return f"mg-{_digest(self.identity_fields())[:16]}"
+
+    @property
+    def dedup_key(self) -> str:
+        if self.history_id is not None:
+            return f"history:{self.history_id}"
+        return f"event:{_digest({'idempotency_key': self.event_key})[:24]}"
+
+    def public_fields(self) -> dict[str, str | int | None]:
+        return {**self.identity_fields(), "history_id": self.history_id, "transfer_mode": self.transfer_mode}
 
 
 class GovernanceQueue:
-    """作品包聚合与至少一次事件去重；不含文件名、路径或宿主对象。"""
+    """作品包聚合、后置对账与零写入计划；不含文件名、路径或宿主对象。"""
 
-    _SCHEMA = "mediagovernor-s3-queue/v1"
+    _SCHEMA = "mediagovernor-queue/v2"
+    _PLAN_TTL_SECONDS = 15 * 60
 
-    def __init__(self, packages: dict[str, dict[str, Any]] | None = None) -> None:
+    def __init__(self, packages: dict[str, dict[str, Any]] | None = None, plans: dict[str, dict[str, Any]] | None = None, dedup_index: dict[str, dict[str, str]] | None = None) -> None:
         self._packages = packages or {}
+        self._plans = plans or {}
+        self._dedup_index = dedup_index or {}
 
     @classmethod
     def from_data(cls, raw: Any) -> "GovernanceQueue":
-        """只接受本插件此前保存的受限结构。"""
-        if not isinstance(raw, Mapping) or raw.get("schema") != cls._SCHEMA:
+        if not isinstance(raw, Mapping) or raw.get("schema") not in {cls._SCHEMA, "mediagovernor-s3-queue/v1"}:
             return cls()
         packages = raw.get("packages")
-        return cls(dict(packages) if isinstance(packages, Mapping) else {})
+        plans = raw.get("plans") if raw.get("schema") == cls._SCHEMA else {}
+        dedup_index = raw.get("dedup_index") if raw.get("schema") == cls._SCHEMA else {}
+        return cls(dict(packages) if isinstance(packages, Mapping) else {}, dict(plans) if isinstance(plans, Mapping) else {}, dict(dedup_index) if isinstance(dedup_index, Mapping) else {})
 
-    def observe(self, observation: EventObservation) -> bool:
-        """归并一条事件；重复事件不改变队列。"""
+    @staticmethod
+    def _identity_complete(observation: EventObservation) -> bool:
+        return bool(observation.media_source and observation.media_id and observation.media_type and observation.title)
+
+    @staticmethod
+    def _normalise_mode(value: str | None) -> str | None:
+        if not value:
+            return None
+        lowered = value.lower()
+        return "link" if lowered in {"link", "hardlink", "hard_link"} else lowered
+
+    @staticmethod
+    def _add_reason(package: dict[str, Any], reason: str) -> None:
+        if reason not in package.setdefault("reason_codes", []):
+            package["reason_codes"].append(reason)
+
+    def _package_for(self, observation: EventObservation) -> dict[str, Any]:
         package = self._packages.get(observation.package_id)
         if package is None:
             package = {
                 "package_id": observation.package_id,
                 "dedup_keys": [],
+                "dedup_identities": {},
                 "history_ids": [],
                 "failed_history_ids": [],
                 "event_count": 0,
                 "success_count": 0,
                 "failure_count": 0,
-                "status": "observed",
+                "status": "awaiting_host_information",
+                "reason_codes": [],
+                "transfer_modes": [],
+                "receipt_version": 0,
                 **observation.public_fields(),
             }
             self._packages[observation.package_id] = package
-        if observation.dedup_key in package["dedup_keys"]:
-            return False
+        return package
 
+    def _reconcile(self, package: dict[str, Any], observation: EventObservation) -> None:
+        """只基于已公开字段做后置结论；信息不足时明确降级。"""
+        reasons = package.setdefault("reason_codes", [])
+        if package.get("failure_count", 0):
+            package["status"] = "needs_attention"
+            self._add_reason(package, "transfer_failed")
+            return
+        if "identity_conflict" in reasons:
+            package["status"] = "needs_selection"
+            return
+        mode = self._normalise_mode(observation.transfer_mode)
+        if mode and mode != "link":
+            package["status"] = "needs_attention"
+            self._add_reason(package, "unexpected_transfer_mode")
+            return
+        missing: list[str] = []
+        if not self._identity_complete(observation):
+            missing.append("media_identity")
+        if mode is None:
+            missing.append("transfer_mode")
+        if missing:
+            package["status"] = "awaiting_host_information"
+            for field in missing:
+                self._add_reason(package, f"missing_{field}")
+            return
+        package["status"] = "verified"
+        package["reason_codes"] = [reason for reason in reasons if not reason.startswith("missing_")]
+
+    def observe(self, observation: EventObservation) -> bool:
+        """归并事件；同一去重键的身份改变会变成通用冲突问题。"""
+        identity_digest = _digest(observation.identity_fields())
+        known = self._dedup_index.get(observation.dedup_key)
+        if known:
+            if known.get("identity") != identity_digest:
+                package = self._packages.get(known.get("package_id", ""))
+                if package:
+                    self._add_reason(package, "identity_conflict")
+                    package["status"] = "needs_selection"
+                    package["receipt_version"] += 1
+                    return True
+            return False
+        package = self._package_for(observation)
         package["dedup_keys"].append(observation.dedup_key)
+        package["dedup_identities"][observation.dedup_key] = identity_digest
+        self._dedup_index[observation.dedup_key] = {"identity": identity_digest, "package_id": package["package_id"]}
         package["event_count"] += 1
+        package["receipt_version"] += 1
+        mode = self._normalise_mode(observation.transfer_mode)
+        if mode and mode not in package["transfer_modes"]:
+            package["transfer_modes"].append(mode)
         if observation.history_id is not None and observation.history_id not in package["history_ids"]:
             package["history_ids"].append(observation.history_id)
         if observation.event_kind == "failed":
             package["failure_count"] += 1
-            package["status"] = "needs_review"
             if observation.history_id is not None and observation.history_id not in package["failed_history_ids"]:
                 package["failed_history_ids"].append(observation.history_id)
         else:
             package["success_count"] += 1
+        self._reconcile(package, observation)
         return True
 
     def observe_failed_history(self, history: Any) -> bool:
-        """把一条宿主失败历史投影为观察事件；不读取或保存历史路径字段。"""
         history_id = _value(history, "id")
-        observation = EventObservation.from_contract(
-            "failed",
-            {"transfer_history_id": history_id},
-            history,
-        )
+        observation = EventObservation.from_contract("failed", {"transfer_history_id": history_id}, history)
         return bool(observation) and self.observe(observation)
 
     def to_data(self) -> dict[str, Any]:
-        """序列化插件自己的状态；不包含源路径、目标路径或 FileItem。"""
-        return {"schema": self._SCHEMA, "packages": self._packages}
+        return {"schema": self._SCHEMA, "packages": self._packages, "plans": self._plans, "dedup_index": self._dedup_index}
+
+    @staticmethod
+    def _public_package(package: Mapping[str, Any]) -> dict[str, Any]:
+        fields = (
+            "package_id", "media_source", "media_id", "media_type", "title", "year", "season",
+            "history_ids", "event_count", "success_count", "failure_count", "status", "reason_codes",
+            "transfer_modes", "receipt_version",
+        )
+        return {field: package.get(field) for field in fields}
 
     def public_items(self) -> list[dict[str, Any]]:
-        """返回页面/API 所需的最小队列卡片。"""
-        fields = (
-            "package_id", "media_source", "media_id", "media_type", "title", "year",
-            "season", "history_ids", "event_count", "success_count", "failure_count", "status",
-        )
-        return [
-            {field: package.get(field) for field in fields}
-            for package in sorted(self._packages.values(), key=lambda item: item["package_id"])
-        ]
+        return [self._public_package(package) for package in sorted(self._packages.values(), key=lambda item: item["package_id"])]
+
+    def public_summary(self) -> dict[str, int]:
+        summary = {"verified": 0, "needs_attention": 0, "needs_selection": 0, "awaiting_host_information": 0}
+        for package in self._packages.values():
+            status = package.get("status")
+            if status in summary:
+                summary[status] += 1
+        return summary
 
     def allows_preview(self, history_id: int) -> bool:
-        """仅允许队列中已出现过的失败作品包请求预览。"""
         return any(history_id in package.get("failed_history_ids", []) for package in self._packages.values())
+
+    def record_preview(self, history_id: int, result: Mapping[str, Any], now: int | None = None) -> dict[str, Any] | None:
+        """登记一份有时效、可审计、零写入的补救计划。"""
+        if not self.allows_preview(history_id) or not bool(result.get("ok")):
+            return None
+        package = next((item for item in self._packages.values() if history_id in item.get("failed_history_ids", [])), None)
+        if package is None:
+            return None
+        issued_at = _now() if now is None else now
+        plan_id = f"mgp-{_digest({'package_id': package['package_id'], 'history_id': history_id, 'receipt_version': package['receipt_version']})[:16]}"
+        plan = {
+            "plan_id": plan_id,
+            "package_id": package["package_id"],
+            "history_id": history_id,
+            "status": "ready",
+            "mode": "preview",
+            "transfer_type": "link",
+            "issued_at": issued_at,
+            "expires_at": issued_at + self._PLAN_TTL_SECONDS,
+            "receipt_version": package["receipt_version"],
+            "detail": str(result.get("detail") or "preview_ready"),
+        }
+        self._plans[plan_id] = plan
+        return dict(plan)
+
+    def public_plans(self) -> list[dict[str, Any]]:
+        return [dict(plan) for plan in sorted(self._plans.values(), key=lambda item: item["plan_id"])]
+
+    def public_plan(self, plan_id: str, now: int | None = None) -> dict[str, Any] | None:
+        plan = self._plans.get(plan_id)
+        if plan is None:
+            return None
+        public = dict(plan)
+        if (now if now is not None else _now()) >= public["expires_at"]:
+            public["status"] = "expired"
+        return public
 
 
 class NativePreviewGateway:
-    """唯一允许的原生整理调用：强制为硬链接预览，且不会返回路径。"""
+    """唯一允许的原生整理调用：强制硬链接预演，且不返回路径。"""
 
     def __init__(self, chain_factory: Callable[[], Any]) -> None:
         self._chain_factory = chain_factory
 
     def preview(self, fileitem: Any) -> dict[str, str | bool]:
-        """调用宿主预览，不提供任何可执行参数给调用方。"""
         state, _result = self._chain_factory().manual_transfer(
             fileitem=fileitem,
             transfer_type="link",
@@ -210,9 +309,4 @@ class NativePreviewGateway:
             reorganize=False,
             sync_extra_files=False,
         )
-        return {
-            "mode": "preview",
-            "transfer_type": "link",
-            "ok": bool(state),
-            "detail": "preview_ready" if state else "preview_rejected",
-        }
+        return {"mode": "preview", "transfer_type": "link", "ok": bool(state), "detail": "preview_ready" if state else "preview_rejected"}
