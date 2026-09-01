@@ -13,15 +13,17 @@ MediaGovernor 是 MoviePilot V3 的整理结果质检插件。它仅在原生整
 - `needs_selection`：同一稳定事件的身份发生冲突；
 - `awaiting_host_information`：公开字段不足，插件不猜测。
 
+`BatchAudit` 是面向问题台的第二层投影。它不会把尚未检查的历史记录伪装成问题卡：用户点击“一键检查全部（不改文件）”后，插件逐条调用 MoviePilot 已公开的 `app.sdk.media.MetaInfo` 与 `app.chain.media.MediaChain` 识别能力，再执行一次零写入硬链接模拟。它只保存已识别的作品身份和检查结论；用于识别的原始任务名称、`FileItem` 与路径只在当前调用中短暂使用，不写入插件状态。
+
 ## 预演计划
 
-失败记录可以调用 MoviePilot 原生 `manual_transfer`，但网关把参数固定为 `transfer_type="link"` 与 `preview=True`。计划只保存状态、时效、历史号、作品包指纹和回执版本；它不包含目标路径，也没有对应的执行 API。
+失败记录可以调用 MoviePilot 原生 `manual_transfer`，但网关把参数固定为 `transfer_type="link"` 与 `preview=True`。计划只保存状态、时效、历史号、作品包指纹和回执版本；它不包含目标路径。只有用户在界面中对单条已通过预演的计划再次确认，插件才会把同样受限的调用切换为 `preview=False` 创建硬链接。
 
-任何未来的真实补建都必须先有公开稳定合同、独立测试副本验证、幂等与用户确认。删除、覆盖、移动和改名必须永远与补建分离。
+任何真实补建都必须先有公开稳定合同、独立测试副本验证、幂等与用户确认。删除、覆盖、移动和改名必须永远与补建分离。
 
 ## 用户界面
 
-插件使用官方 Vue 模块联邦，暴露 `Page`、`Config` 与 `AppPage`。页面只调用当前实例的 bearer API，并复用 MoviePilot 宿主的通知和确认能力；不创建独立登录、全局 HTTP 客户端或弹窗容器。
+插件使用官方 Vue 模块联邦，暴露 `Page`、`Config` 与 `AppPage`。初始页面只显示历史记录数量和“一键检查全部（不改文件）”；检查完成后才显示仍需处理的卡片。卡片和核对窗口只使用中文的作品名、结论和下一步，并将人工步骤折叠。页面只调用当前实例的 bearer API，并复用 MoviePilot 宿主的通知和确认能力；不创建独立登录、全局 HTTP 客户端或弹窗容器。
 
 ## 上游边界
 
