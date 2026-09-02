@@ -13,7 +13,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "找对作品并核对整理：包级识别、可见进度、官方预览和受控硬链接重整。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -35,7 +35,7 @@ class MediaGovernor(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> tuple[str, str]:
-        return "vue", "dist/v1.1.0/assets"
+        return "vue", "dist/v1.2.0/assets"
 
     def get_sidebar_nav(self) -> list[dict[str, Any]]:
         return []

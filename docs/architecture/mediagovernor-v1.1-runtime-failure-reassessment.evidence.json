@@ -1,0 +1,440 @@
+{
+  "schema": "knowledgeradar-research-evidence/v1",
+  "artifact": {
+    "report_path": "docs/architecture/mediagovernor-v1.1-runtime-failure-reassessment.md",
+    "created_at": "2026-09-03T00:00:00+08:00",
+    "scope": "readonly_runtime_reassessment"
+  },
+  "boundaries": {
+    "code_modified": false,
+    "nas_modified": false,
+    "media_or_hardlinks_modified": false,
+    "live_media_content_read": false,
+    "reason": "用户要求先考古和报告，不修改。"
+  },
+  "tool_calls": [
+    {
+      "id": "T001",
+      "tool": "mcp__knowledgeradar__health_check",
+      "args_summary": {
+        "mode": "summary"
+      },
+      "status": "ok"
+    },
+    {
+      "id": "T002",
+      "tool": "mcp__knowledgeradar__get_capabilities",
+      "args_summary": {
+        "summary": true
+      },
+      "status": "ok"
+    },
+    {
+      "id": "T003",
+      "tool": "mcp__knowledgeradar__kr_research",
+      "args_summary": {
+        "task": "MediaGovernor 候选重复和不可靠性核验",
+        "mode": "first_wave",
+        "budget": "deep"
+      },
+      "status": "ok",
+      "receipt_id": "receipt-dd2238d7c7a84b86"
+    },
+    {
+      "id": "T004",
+      "tool": "mcp__knowledgeradar__extract_web_page",
+      "args_summary": {
+        "url": "https://wiki.movie-pilot.org/agent"
+      },
+      "status": "ok",
+      "receipt_id": "receipt-48019f6ac3dcfec4"
+    },
+    {
+      "id": "T005",
+      "tool": "existing_MoviePilot_UI_readonly",
+      "args_summary": {
+        "surface": "已打开插件页面",
+        "observation": "47/47、6分48秒、1 confirmed、45 selection、1 insufficient"
+      },
+      "status": "ok"
+    },
+    {
+      "id": "T006",
+      "tool": "local_source_read",
+      "args_summary": {
+        "surfaces": [
+          "MediaGovernor AppPage",
+          "MoviePilot history/media APIs and schemas",
+          "AIRecognizerEnhancer"
+        ]
+      },
+      "status": "ok"
+    }
+  ],
+  "evidence_items": [
+    {
+      "id": "E001",
+      "type": "runtime_probe",
+      "summary": "实际插件结果显示 47/47、6分48秒、已确认 1、待选择 45、资料不足 1、来源不可用 0。",
+      "strength": "strong"
+    },
+    {
+      "id": "E002",
+      "type": "local_code",
+      "local_path": "plugins.v3/mediagovernor/src/components/AppPage.vue",
+      "summary": "范围为 history/transfer?status=false；每包目录抽样、路径/标题识别、多来源搜索、前十候选详情查询；候选对象仅保留少量字段，卡片不展示原名或输入证据。",
+      "strength": "strong"
+    },
+    {
+      "id": "E003",
+      "type": "local_code",
+      "local_path": "app/api/endpoints/history.py;app/application/history.py;app/schemas/history.py",
+      "summary": "status=false 是失败整理历史筛选；历史模型有来源、目标、标题、年份和失败原因字段。",
+      "strength": "strong"
+    },
+    {
+      "id": "E004",
+      "type": "local_code",
+      "local_path": "app/api/endpoints/media.py;app/schemas/context.py",
+      "summary": "搜索、来源发现、路径识别和详情查询是分离接口；MediaInfo 有原名、英文名、别名、原语种和季集字段。",
+      "strength": "strong"
+    },
+    {
+      "id": "E005",
+      "type": "local_code",
+      "local_path": "plugins/airecognizerenhancer/README.md;plugins/airecognizerenhancer/__init__.py",
+      "summary": "AI识别增强接收标题和可选路径，返回结构化标题/年份/类型/季集并交回原生链；不读取视频、音轨或字幕正文。",
+      "strength": "strong"
+    },
+    {
+      "id": "E006",
+      "type": "web",
+      "url": "https://wiki.movie-pilot.org/agent",
+      "summary": "官方文档说明智能助手可查询失败历史、失败原因、来源路径、目录内容并对失败记录做智能助手整理；实际能力仍取决于当前实例。",
+      "strength": "strong",
+      "receipt_id": "receipt-48019f6ac3dcfec4"
+    },
+    {
+      "id": "E007",
+      "type": "web",
+      "url": "https://developer.themoviedb.org/docs/search-and-query-for-details",
+      "summary": "搜索用于发现候选，按 ID 查询详情用于确认候选信息。",
+      "strength": "strong",
+      "receipt_id": "receipt-4a194c308bc66d1f"
+    },
+    {
+      "id": "E008",
+      "type": "web",
+      "url": "https://github.com/liuyuexi1987/MoviePilot-Plugins/blob/main/plugins/airecognizerenhancer/README.md",
+      "summary": "公开 README 与本地实现关于 AI识别增强的单标题/路径、结构化回写和失败样本治理定位一致。",
+      "strength": "strong",
+      "receipt_id": "receipt-97bdb36df0bf2941"
+    }
+  ],
+  "claims": [
+    {
+      "id": "C001",
+      "text": "47 条是当前失败整理历史范围，不是插件硬编码或候选倒推。",
+      "importance": "critical",
+      "supporting_evidence_ids": [
+        "E001",
+        "E002",
+        "E003"
+      ]
+    },
+    {
+      "id": "C002",
+      "text": "6分48秒的主要解释是每包多层远程请求和串行详情查询，而非可归责于 NAS 性能。",
+      "importance": "high",
+      "supporting_evidence_ids": [
+        "E001",
+        "E002"
+      ]
+    },
+    {
+      "id": "C003",
+      "text": "当前候选无可靠用户核验依据，因为候选对象和界面丢弃了原名、输入证据、来源及差异字段。",
+      "importance": "critical",
+      "supporting_evidence_ids": [
+        "E002",
+        "E004"
+      ]
+    },
+    {
+      "id": "C004",
+      "text": "AI识别增强不是整包或视频内容识别器，不能证明 45 条已被 AI 充分检查。",
+      "importance": "high",
+      "supporting_evidence_ids": [
+        "E005",
+        "E008"
+      ]
+    }
+  ],
+  "coverage": {
+    "required_surfaces": [
+      "runtime_probe",
+      "local_code",
+      "upstream_code",
+      "external_web"
+    ],
+    "covered_surfaces": [
+      "runtime_probe",
+      "local_code",
+      "upstream_code",
+      "external_web"
+    ],
+    "skipped_surfaces": [
+      {
+        "surface": "live_media_content",
+        "reason": "不读取真实媒体、字幕或目录，避免扩大隐私和操作边界。"
+      },
+      {
+        "surface": "live_write_validation",
+        "reason": "本轮只读，不执行重整、删除或硬链接写入。"
+      },
+      {
+        "surface": "academic_literature_ecology",
+        "reason": "具体插件运行时和宿主 API 合同问题，学术资料不能增加决定性证据。"
+      },
+      {
+        "surface": "social_video_discussion",
+        "reason": "用户演示和讨论不能证明当前实例或公开接口合同。"
+      }
+    ]
+  },
+  "questioner_checkpoints": [
+    {
+      "stage": "after_local_archaeology",
+      "decision": "继续检查范围、请求链和候选字段",
+      "reason": "运行结果与先前产品预期不一致。"
+    },
+    {
+      "stage": "after_first_external_round",
+      "decision": "以本地运行与源码作为主证据，外部文档只做能力边界交叉核验",
+      "reason": "外部搜索摘要不足以解释本机候选重复。"
+    },
+    {
+      "stage": "before_final_report",
+      "decision": "不对 45 条逐条下身份结论，也不实施修复",
+      "reason": "当前产品没有保留逐包证据，且用户明确要求先调查。"
+    }
+  ],
+  "known_issues": {
+    "schema": "knowledgeradar-known-issues/v1",
+    "issues": [
+      {
+        "id": "KI-001",
+        "description": "当前范围说明不清，用户无法知道 47 是失败历史而非全库扫描。",
+        "discovered_at": "2026-09-03",
+        "status": "未解决",
+        "resolved_in_report": false,
+        "next_action": "P0 在开始前展示范围、筛选和总数。"
+      },
+      {
+        "id": "KI-002",
+        "description": "候选卡丢失原名、输入证据、数据源和差异，用户不能可靠选择。",
+        "discovered_at": "2026-09-03",
+        "status": "未解决",
+        "resolved_in_report": false,
+        "next_action": "P1 建立可核验候选卡并阻止无证据确认。"
+      },
+      {
+        "id": "KI-003",
+        "description": "45 条没有逐包可审计记录，不能判定具体失败根因。",
+        "discovered_at": "2026-09-03",
+        "status": "未解决",
+        "resolved_in_report": false,
+        "next_action": "P2 完成只读分桶后再对每类处理。"
+      }
+    ],
+    "report_path": "docs/architecture/mediagovernor-v1.1-runtime-failure-reassessment.md"
+  },
+  "decision_register": {
+    "schema": "knowledgeradar-decision-register/v1",
+    "decisions": [
+      {
+        "id": "D-001",
+        "title": "候选展示门槛",
+        "status": "pending_user_decision",
+        "options": [
+          "保持只有中文标题和年份",
+          "展示候选与包级的全部可判断证据"
+        ],
+        "recommended_action": "只有可判断证据齐全的候选才能允许用户确认。",
+        "decision_record_location": "mediagovernor-v1.1-runtime-failure-reassessment.md#用户现在该如何判断答案是目前无法可靠判断",
+        "next_review": "P1 设计冻结前"
+      },
+      {
+        "id": "D-002",
+        "title": "错误身份进入整理的门槛",
+        "status": "pending_user_decision",
+        "options": [
+          "待选择候选也可进入整理",
+          "仅已确认身份可进入官方预览"
+        ],
+        "recommended_action": "本轮 45 条不得进入整理正确。",
+        "decision_record_location": "mediagovernor-v1.1-runtime-failure-reassessment.md#后续修复前必须冻结的验收标准",
+        "next_review": "P3 授权前"
+      }
+    ]
+  },
+  "roadmap": [
+    {
+      "phase": "P0",
+      "task": "解释范围与逐包证据",
+      "method": "范围提示、可见阶段和脱敏时间线",
+      "input": "失败整理历史和只读目录摘要",
+      "output": "可解释的逐包进度卡",
+      "dependency": "历史和存储读取接口",
+      "acceptance": "首条结果即显示进度，且零写入"
+    },
+    {
+      "phase": "P1",
+      "task": "合并同包并核验候选",
+      "method": "包指纹去重、来源搜索、详情交叉核验",
+      "input": "名称线索、季集和结构摘要",
+      "output": "带原名和冲突原因的候选卡",
+      "dependency": "P0",
+      "acceptance": "同包不重复造候选；详情失败不可确认"
+    },
+    {
+      "phase": "P2",
+      "task": "47 条只读分桶验收",
+      "method": "按可确认、冲突、名称不足、无视频、来源不可读、宿主失败分桶",
+      "input": "P1 结果",
+      "output": "逐包根因统计",
+      "dependency": "P1",
+      "acceptance": "每项有证据、候选或明确失败原因"
+    },
+    {
+      "phase": "P3",
+      "task": "冻结整理正确候选",
+      "method": "官方历史、目标路径、零写入预览、单次确认",
+      "input": "P2 已确认身份",
+      "output": "独立预览和回执",
+      "dependency": "P2 和单独变更授权",
+      "acceptance": "缺身份、预览或确认时零写入"
+    }
+  ],
+  "claim_evidence_chains": [
+    {
+      "claim_id": "C001",
+      "tool_call_ids": [
+        "T005",
+        "T006"
+      ],
+      "evidence_ids": [
+        "E001",
+        "E002",
+        "E003"
+      ],
+      "sources": [
+        "已安装页面",
+        "MediaGovernor",
+        "MoviePilot 历史 API"
+      ],
+      "extracted_facts": [
+        "运行页为 47/47",
+        "插件固定请求 status=false",
+        "宿主把 status=false 定义为失败"
+      ],
+      "inference": "47 是失败整理历史范围。",
+      "limitations": "未读取数据库，依赖 API 返回和运行时页面。",
+      "strength": "strong"
+    },
+    {
+      "claim_id": "C003",
+      "tool_call_ids": [
+        "T006"
+      ],
+      "evidence_ids": [
+        "E002",
+        "E004"
+      ],
+      "sources": [
+        "MediaGovernor 候选对象和模板",
+        "MoviePilot MediaInfo 模型"
+      ],
+      "extracted_facts": [
+        "插件仅存少量候选字段",
+        "模板仅展示标题、年份、支持/冲突",
+        "宿主有原名和季集等字段"
+      ],
+      "inference": "用户无法从当前候选卡可靠判断作品。",
+      "limitations": "未取得所有 45 条的原始响应。",
+      "strength": "strong"
+    }
+  ],
+  "process_quality": {
+    "schema": "knowledgeradar-process-quality/v1",
+    "selected_profile": "deep",
+    "quality_status": "pending_local_check",
+    "research_task_id": "kr-research-5c8d9364523705db",
+    "preflight_ref": "D:/Projects/NAS docker/media-next/plugins/moviepilot-media-governor/docs/architecture/mediagovernor-v1.1-runtime-failure-reassessment.preflight.json",
+    "capability_handshake": {
+      "health_check": "ok",
+      "get_capabilities": "ok"
+    },
+    "local_archaeology": {
+      "performed": true,
+      "surfaces": [
+        "installed UI",
+        "MediaGovernor",
+        "MoviePilot V3",
+        "AIRecognizerEnhancer"
+      ]
+    },
+    "source_ecology_plan": {
+      "considered": [
+        "github_repository_ecology",
+        "generic_web_ecology",
+        "academic_literature_ecology",
+        "social_video_discussion"
+      ],
+      "selected": [
+        "github_repository_ecology",
+        "generic_web_ecology"
+      ],
+      "skipped": [
+        {
+          "source_ecology": "academic_literature_ecology",
+          "reason": "不能增加本机运行时合同的决定性证据。"
+        },
+        {
+          "source_ecology": "social_video_discussion",
+          "reason": "不能证明当前实例的行为。"
+        }
+      ]
+    },
+    "validation_ladder": {
+      "selected_profile": "deep",
+      "commands": [
+        "JSON parse",
+        "research_preflight",
+        "check_research_quality"
+      ],
+      "results": "待完成本轮质量复核"
+    },
+    "presentation": {
+      "report": "中文 Markdown",
+      "audience": "用户决策和后续实现"
+    },
+    "known_issue_inheritance": {
+      "schema": "knowledgeradar-known-issue-inheritance/v1",
+      "previous_evidence": [
+        "D:/Projects/NAS docker/media-next/plugins/moviepilot-media-governor/docs/architecture/mediagovernor-v1.1-readonly-reassessment.evidence.json"
+      ],
+      "unresolved_count": 2,
+      "required_issue_ids": [
+        "KI-001",
+        "KI-002"
+      ],
+      "present_issue_ids": [
+        "KI-001",
+        "KI-002"
+      ],
+      "missing_issue_ids": [],
+      "rule": "上一份 sidecar 中 status 为 新发现/未解决/已延后 的 known_issues 必须复制到下一份 sidecar，直到显式标记为 已解决。"
+    }
+  }
+}

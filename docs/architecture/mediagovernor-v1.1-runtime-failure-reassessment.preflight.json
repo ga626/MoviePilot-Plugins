@@ -1,0 +1,95 @@
+{
+  "schema": "knowledgeradar-research-preflight/v1",
+  "generated_at": "2026-09-02T22:48:57.344500+00:00",
+  "report_path": "D:/Projects/NAS docker/media-next/plugins/moviepilot-media-governor/docs/architecture/mediagovernor-v1.1-runtime-failure-reassessment.md",
+  "evidence_path": "D:/Projects/NAS docker/media-next/plugins/moviepilot-media-governor/docs/architecture/mediagovernor-v1.1-runtime-failure-reassessment.evidence.json",
+  "task_type": "governance_research",
+  "requires_preflight": true,
+  "status": "PASS",
+  "capability_handshake": {
+    "required": true,
+    "observed_tools": [],
+    "health_check": true,
+    "get_capabilities": true
+  },
+  "local_archaeology": {
+    "performed": true,
+    "surfaces": [
+      "installed UI",
+      "MediaGovernor",
+      "MoviePilot V3",
+      "AIRecognizerEnhancer"
+    ]
+  },
+  "source_ecology_plan": {
+    "selected": [
+      "github_repository_ecology",
+      "generic_web_ecology"
+    ],
+    "skipped": [
+      {
+        "source_ecology": "academic_literature_ecology",
+        "reason": "不能增加本机运行时合同的决定性证据。"
+      },
+      {
+        "source_ecology": "social_video_discussion",
+        "reason": "不能证明当前实例的行为。"
+      }
+    ]
+  },
+  "recommended_probes": [
+    {
+      "id": "boundary_probe",
+      "command": "scripts/probe_source_ecology_boundaries.py --plan-only --json",
+      "reason": "报告涉及平台能力边界、来源生态或工具能力声明时使用。"
+    },
+    {
+      "id": "decision_log_feedback",
+      "command": "call KnowledgeRadar analyze_decision_logs(limit=50, compact=true)",
+      "reason": "报告使用失败率、降级、工具选择或能力图谱反哺作为依据时使用。"
+    }
+  ],
+  "required_artifacts": [
+    {
+      "name": "known_issues",
+      "present": true
+    },
+    {
+      "name": "decision_register",
+      "present": true
+    },
+    {
+      "name": "process_quality",
+      "present": true
+    },
+    {
+      "name": "questioner_checkpoints",
+      "present": true
+    },
+    {
+      "name": "mermaid_planning_diagram",
+      "present": true
+    },
+    {
+      "name": "detailed_execution_steps",
+      "present": true
+    }
+  ],
+  "known_issue_inheritance": {
+    "schema": "knowledgeradar-known-issue-inheritance/v1",
+    "previous_evidence": [
+      "D:/Projects/NAS docker/media-next/plugins/moviepilot-media-governor/docs/architecture/mediagovernor-v1.1-readonly-reassessment.evidence.json"
+    ],
+    "unresolved_count": 2,
+    "required_issue_ids": [
+      "KI-001",
+      "KI-002"
+    ],
+    "present_issue_ids": [
+      "KI-001",
+      "KI-002"
+    ],
+    "missing_issue_ids": [],
+    "rule": "上一份 sidecar 中 status 为 新发现/未解决/已延后 的 known_issues 必须复制到下一份 sidecar，直到显式标记为 已解决。"
+  }
+}
