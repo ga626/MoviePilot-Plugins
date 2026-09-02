@@ -17,62 +17,69 @@ const _hoisted_5 = {
   "aria-label": "检查结果"
 };
 const _hoisted_6 = { class: "result-heading" };
-const _hoisted_7 = { class: "header-actions" };
-const _hoisted_8 = ["disabled"];
-const _hoisted_9 = ["disabled"];
+const _hoisted_7 = { key: 0 };
+const _hoisted_8 = { key: 1 };
+const _hoisted_9 = { class: "header-actions" };
 const _hoisted_10 = ["disabled"];
-const _hoisted_11 = {
+const _hoisted_11 = ["disabled"];
+const _hoisted_12 = ["disabled"];
+const _hoisted_13 = {
   class: "progress-wrap",
   "aria-label": "检查进度"
 };
-const _hoisted_12 = { class: "progress-copy" };
-const _hoisted_13 = { key: 0 };
-const _hoisted_14 = { key: 1 };
-const _hoisted_15 = { key: 2 };
-const _hoisted_16 = { class: "progress-track" };
-const _hoisted_17 = {
+const _hoisted_14 = { class: "progress-copy" };
+const _hoisted_15 = { key: 0 };
+const _hoisted_16 = { key: 1 };
+const _hoisted_17 = { key: 2 };
+const _hoisted_18 = { key: 3 };
+const _hoisted_19 = { class: "progress-track" };
+const _hoisted_20 = {
+  key: 0,
+  class: "notice"
+};
+const _hoisted_21 = {
   class: "overview",
   "aria-label": "检查结果概览"
 };
-const _hoisted_18 = {
-  key: 0,
+const _hoisted_22 = {
+  key: 1,
   class: "unresolved"
 };
-const _hoisted_19 = {
-  key: 1,
+const _hoisted_23 = {
+  key: 2,
   class: "empty"
 };
-const _hoisted_20 = {
-  key: 2,
+const _hoisted_24 = {
+  key: 3,
   class: "issues"
 };
-const _hoisted_21 = { class: "issue-copy" };
-const _hoisted_22 = { class: "issue-type" };
-const _hoisted_23 = { class: "finding-list" };
-const _hoisted_24 = ["onClick"];
-const _hoisted_25 = {
+const _hoisted_25 = { class: "issue-copy" };
+const _hoisted_26 = { class: "issue-type" };
+const _hoisted_27 = { class: "finding-list" };
+const _hoisted_28 = ["onClick"];
+const _hoisted_29 = {
   class: "modal",
   role: "dialog",
   "aria-modal": "true",
   "aria-label": "整理检查结论"
 };
-const _hoisted_26 = { class: "modal-header" };
-const _hoisted_27 = { class: "modal-section" };
-const _hoisted_28 = {
+const _hoisted_30 = { class: "modal-header" };
+const _hoisted_31 = { class: "modal-section" };
+const _hoisted_32 = {
   key: 0,
   class: "modal-section"
 };
-const _hoisted_29 = ["disabled"];
-const _hoisted_30 = ["disabled"];
-const _hoisted_31 = {
+const _hoisted_33 = ["disabled"];
+const _hoisted_34 = ["disabled"];
+const _hoisted_35 = {
   class: "modal confirm",
   role: "dialog",
   "aria-modal": "true",
   "aria-label": "确认批量创建硬链接"
 };
-const _hoisted_32 = { class: "actions" };
-const _hoisted_33 = ["disabled"];
-const _hoisted_34 = ["disabled"];
+const _hoisted_36 = { class: "actions" };
+const _hoisted_37 = ["disabled"];
+const _hoisted_38 = ["disabled"];
 
 const {computed,nextTick,onMounted,ref} = await importShared('vue');
 
@@ -96,7 +103,11 @@ const summary = computed(() => result.value.summary || {});
 const completed = computed(() => summary.value.state === 'complete');
 const running = computed(() => summary.value.state === 'running');
 const paused = computed(() => summary.value.state === 'paused');
-const progress = computed(() => summary.value.total ? Math.round((summary.value.checked || 0) * 100 / summary.value.total) : 0);
+const scopeChanged = computed(() => Boolean(summary.value.scope_changed));
+const stale = computed(() => summary.value.state === 'stale');
+const displayedTotal = computed(() => stale.value ? (summary.value.run_total || 0) : (summary.value.total || 0));
+const displayedChecked = computed(() => stale.value ? (summary.value.run_checked || 0) : (summary.value.checked || 0));
+const progress = computed(() => displayedTotal.value ? Math.round(displayedChecked.value * 100 / displayedTotal.value) : 0);
 
 function titleFor(card) {
   if (!card?.title) return '作品信息不足，无法合并展示'
@@ -152,6 +163,7 @@ async function runNextItems() {
     await nextTick();
   }
   if (summary.value.state === 'complete') notice.value = '本轮检查完成。你可以随时点击“再次检查全部”开始新一轮；期间没有改动影片文件、下载器或既有整理规则。';
+  else if (summary.value.state === 'stale') notice.value = '历史记录范围发生了变化；上一轮结果仍被保留，但不能代表当前全部记录。开始新一轮检查后才会重新核对全部。';
   else if (summary.value.state === 'paused') notice.value = '检查已暂停。进度已保存，稍后点击“继续检查”会从下一条开始。';
 }
 
@@ -229,49 +241,56 @@ return (_ctx, _cache) => {
     _createElementVNode("section", _hoisted_5, [
       _createElementVNode("div", _hoisted_6, [
         _createElementVNode("div", null, [
-          _createElementVNode("h2", null, _toDisplayString(completed.value ? '本轮检查完成' : (running.value ? '正在检查' : (paused.value ? '检查已暂停' : '准备开始检查'))), 1),
-          _createElementVNode("p", null, "已检查 " + _toDisplayString(summary.value.checked || 0) + " / " + _toDisplayString(summary.value.total || 0) + " 条历史记录。暂停后可以继续；完成后可以随时重新检查全部记录。", 1)
+          _createElementVNode("h2", null, _toDisplayString(stale.value ? '检查范围已变化' : (completed.value ? '本轮检查完成' : (running.value ? '正在检查' : (paused.value ? '检查已暂停' : '准备开始检查')))), 1),
+          (stale.value)
+            ? (_openBlock(), _createElementBlock("p", _hoisted_7, "上一轮已检查 " + _toDisplayString(displayedChecked.value) + " / " + _toDisplayString(displayedTotal.value) + " 条；当前共有 " + _toDisplayString(summary.value.total || 0) + " 条历史记录。上次结论不会丢失，但新增或变动的记录尚未检查。", 1))
+            : (_openBlock(), _createElementBlock("p", _hoisted_8, "已检查 " + _toDisplayString(displayedChecked.value) + " / " + _toDisplayString(displayedTotal.value) + " 条历史记录。暂停后可以继续；完成后可以随时重新检查全部记录。", 1))
         ]),
-        _createElementVNode("div", _hoisted_7, [
+        _createElementVNode("div", _hoisted_9, [
           (running.value)
             ? (_openBlock(), _createElementBlock("button", {
                 key: 0,
                 class: "secondary",
                 disabled: loading.value,
                 onClick: pauseAudit
-              }, "暂停检查", 8, _hoisted_8))
-            : (paused.value)
+              }, "暂停检查", 8, _hoisted_10))
+            : (paused.value && !scopeChanged.value)
               ? (_openBlock(), _createElementBlock("button", {
                   key: 1,
                   class: "primary",
                   disabled: loading.value,
                   onClick: resumeAudit
-                }, "继续本轮检查", 8, _hoisted_9))
+                }, "继续本轮检查", 8, _hoisted_11))
               : (_openBlock(), _createElementBlock("button", {
                   key: 2,
                   class: "primary",
                   disabled: loading.value,
                   onClick: auditAll
-                }, _toDisplayString(completed.value ? '再次检查全部' : '开始检查全部'), 9, _hoisted_10))
+                }, _toDisplayString(stale.value ? '重新检查全部' : (completed.value ? '再次检查全部' : '开始检查全部')), 9, _hoisted_12))
         ])
       ]),
-      _createElementVNode("div", _hoisted_11, [
-        _createElementVNode("div", _hoisted_12, [
+      _createElementVNode("div", _hoisted_13, [
+        _createElementVNode("div", _hoisted_14, [
           _createElementVNode("strong", null, _toDisplayString(progress.value) + "%", 1),
-          (running.value)
-            ? (_openBlock(), _createElementBlock("span", _hoisted_13, "正在核对第 " + _toDisplayString((summary.value.checked || 0) + 1) + " 条", 1))
-            : (completed.value)
-              ? (_openBlock(), _createElementBlock("span", _hoisted_14, "本轮已完成，可随时再次检查"))
-              : (_openBlock(), _createElementBlock("span", _hoisted_15, "本轮进度已保存"))
+          (stale.value)
+            ? (_openBlock(), _createElementBlock("span", _hoisted_15, "这是上一轮进度；当前范围已变化"))
+            : (running.value)
+              ? (_openBlock(), _createElementBlock("span", _hoisted_16, "正在核对第 " + _toDisplayString((summary.value.checked || 0) + 1) + " 条", 1))
+              : (completed.value)
+                ? (_openBlock(), _createElementBlock("span", _hoisted_17, "本轮已完成，可随时再次检查"))
+                : (_openBlock(), _createElementBlock("span", _hoisted_18, "本轮进度已保存"))
         ]),
-        _createElementVNode("div", _hoisted_16, [
+        _createElementVNode("div", _hoisted_19, [
           _createElementVNode("div", {
             class: "progress-bar",
             style: _normalizeStyle({ width: `${progress.value}%` })
           }, null, 4)
         ])
       ]),
-      _createElementVNode("div", _hoisted_17, [
+      (stale.value)
+        ? (_openBlock(), _createElementBlock("p", _hoisted_20, "下面是上一轮已完成部分的结论，仅供参考；在重新检查全部前，不能把它当作当前媒体库的完整结论。"))
+        : _createCommentVNode("", true),
+      _createElementVNode("div", _hoisted_21, [
         _createElementVNode("article", null, [
           _createElementVNode("strong", null, _toDisplayString(cards.value.length), 1),
           _cache[5] || (_cache[5] = _createElementVNode("span", null, "部作品需要复核", -1))
@@ -290,26 +309,26 @@ return (_ctx, _cache) => {
         ])
       ]),
       (summary.value.unresolved)
-        ? (_openBlock(), _createElementBlock("section", _hoisted_18, [
+        ? (_openBlock(), _createElementBlock("section", _hoisted_22, [
             _createElementVNode("h3", null, _toDisplayString(summary.value.unresolved) + " 条记录没有查到可靠作品身份", 1),
             _cache[9] || (_cache[9] = _createElementVNode("p", null, "系统已经尝试按原有整理链路识别；因为没有足够证据确认片名，所以不会猜测、不会把原始文件名当成影片名，也不会把它们伪装成可处理的问题卡。", -1))
           ]))
         : _createCommentVNode("", true),
       (!cards.value.length)
-        ? (_openBlock(), _createElementBlock("div", _hoisted_19, [...(_cache[10] || (_cache[10] = [
+        ? (_openBlock(), _createElementBlock("div", _hoisted_23, [...(_cache[10] || (_cache[10] = [
             _createElementVNode("h3", null, "目前没有需要你处理的作品", -1),
             _createElementVNode("p", null, "已检查的历史记录没有发现可展示的问题；你之后仍可再次检查。", -1)
           ]))]))
-        : (_openBlock(), _createElementBlock("div", _hoisted_20, [
+        : (_openBlock(), _createElementBlock("div", _hoisted_24, [
             (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(cards.value, (card) => {
               return (_openBlock(), _createElementBlock("article", {
                 key: card.group_id,
                 class: "issue-card"
               }, [
-                _createElementVNode("div", _hoisted_21, [
-                  _createElementVNode("span", _hoisted_22, "涉及 " + _toDisplayString(card.record_count) + " 条整理记录", 1),
+                _createElementVNode("div", _hoisted_25, [
+                  _createElementVNode("span", _hoisted_26, "涉及 " + _toDisplayString(card.record_count) + " 条整理记录", 1),
                   _createElementVNode("h3", null, _toDisplayString(titleFor(card)), 1),
-                  _createElementVNode("ul", _hoisted_23, [
+                  _createElementVNode("ul", _hoisted_27, [
                     (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(card.findings, (finding) => {
                       return (_openBlock(), _createElementBlock("li", {
                         key: `${finding.status}-${finding.transfer_mode || 'none'}`
@@ -323,7 +342,7 @@ return (_ctx, _cache) => {
                 _createElementVNode("button", {
                   class: "primary",
                   onClick: $event => (openIssue(card))
-                }, "查看详细结论", 8, _hoisted_24)
+                }, "查看详细结论", 8, _hoisted_28)
               ]))
             }), 128))
           ]))
@@ -334,8 +353,8 @@ return (_ctx, _cache) => {
           class: "modal-backdrop",
           onClick: _withModifiers(closeIssue, ["self"])
         }, [
-          _createElementVNode("section", _hoisted_25, [
-            _createElementVNode("header", _hoisted_26, [
+          _createElementVNode("section", _hoisted_29, [
+            _createElementVNode("header", _hoisted_30, [
               _createElementVNode("div", null, [
                 _cache[11] || (_cache[11] = _createElementVNode("span", { class: "modal-label" }, "检查结论", -1)),
                 _createElementVNode("h2", null, _toDisplayString(titleFor(selected.value)), 1)
@@ -346,7 +365,7 @@ return (_ctx, _cache) => {
                 onClick: closeIssue
               }, "×")
             ]),
-            _createElementVNode("section", _hoisted_27, [
+            _createElementVNode("section", _hoisted_31, [
               _createElementVNode("h3", null, "这部作品的 " + _toDisplayString(selected.value.record_count) + " 条整理记录", 1),
               _cache[12] || (_cache[12] = _createElementVNode("p", null, "这里按影片合并展示。下面每项都是检查到的具体事实，不把历史字段当成实际文件状态。", -1))
             ]),
@@ -360,7 +379,7 @@ return (_ctx, _cache) => {
               ]))
             }), 128)),
             (selected.value.repairable_count)
-              ? (_openBlock(), _createElementBlock("section", _hoisted_28, [
+              ? (_openBlock(), _createElementBlock("section", _hoisted_32, [
                   _cache[13] || (_cache[13] = _createElementVNode("h3", null, "可以自动处理什么？", -1)),
                   _createElementVNode("p", null, "其中 " + _toDisplayString(selected.value.repairable_count) + " 条是原整理失败、且身份已确认的记录。整理方式待复核的成功记录不会被错误地拿去自动重建。", 1),
                   (!readyPlansFor(selected.value).length)
@@ -369,13 +388,13 @@ return (_ctx, _cache) => {
                         class: "primary wide",
                         disabled: loading.value,
                         onClick: _cache[0] || (_cache[0] = $event => (prepareGroupPlans(selected.value)))
-                      }, _toDisplayString(loading.value ? '正在生成方案…' : '一键生成修复方案（不改文件）'), 9, _hoisted_29))
+                      }, _toDisplayString(loading.value ? '正在生成方案…' : '一键生成修复方案（不改文件）'), 9, _hoisted_33))
                     : (_openBlock(), _createElementBlock("button", {
                         key: 1,
                         class: "primary wide",
                         disabled: loading.value,
                         onClick: _cache[1] || (_cache[1] = $event => (pendingGroupRepair.value = selected.value))
-                      }, "确认修复 " + _toDisplayString(readyPlansFor(selected.value).length) + " 条记录", 9, _hoisted_30))
+                      }, "确认修复 " + _toDisplayString(readyPlansFor(selected.value).length) + " 条记录", 9, _hoisted_34))
                 ]))
               : _createCommentVNode("", true),
             _cache[14] || (_cache[14] = _createElementVNode("details", { class: "manual-guide" }, [
@@ -395,7 +414,7 @@ return (_ctx, _cache) => {
           class: "modal-backdrop",
           onClick: _cache[3] || (_cache[3] = _withModifiers($event => (pendingGroupRepair.value = null), ["self"]))
         }, [
-          _createElementVNode("section", _hoisted_31, [
+          _createElementVNode("section", _hoisted_35, [
             _createElementVNode("h2", null, "确认修复 " + _toDisplayString(readyPlansFor(pendingGroupRepair.value).length) + " 条记录？", 1),
             _cache[15] || (_cache[15] = _createElementVNode("p", null, "系统只会为这部作品中已通过补建前检查的记录创建硬链接。", -1)),
             _cache[16] || (_cache[16] = _createElementVNode("ul", null, [
@@ -403,17 +422,17 @@ return (_ctx, _cache) => {
               _createElementVNode("li", null, "不会修改下载器、代理或既有整理规则"),
               _createElementVNode("li", null, "整理方式待复核的成功记录不会被包含在内")
             ], -1)),
-            _createElementVNode("div", _hoisted_32, [
+            _createElementVNode("div", _hoisted_36, [
               _createElementVNode("button", {
                 class: "secondary",
                 disabled: loading.value,
                 onClick: _cache[2] || (_cache[2] = $event => (pendingGroupRepair.value = null))
-              }, "返回", 8, _hoisted_33),
+              }, "返回", 8, _hoisted_37),
               _createElementVNode("button", {
                 class: "primary",
                 disabled: loading.value,
                 onClick: repairGroup
-              }, "确认创建硬链接", 8, _hoisted_34)
+              }, "确认创建硬链接", 8, _hoisted_38)
             ])
           ])
         ]))
@@ -423,6 +442,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-c687556c"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-53ba5a23"]]);
 
 export { AppPage as default };

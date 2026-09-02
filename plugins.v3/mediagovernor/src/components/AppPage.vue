@@ -14,7 +14,11 @@ const summary = computed(() => result.value.summary || {})
 const completed = computed(() => summary.value.state === 'complete')
 const running = computed(() => summary.value.state === 'running')
 const paused = computed(() => summary.value.state === 'paused')
-const progress = computed(() => summary.value.total ? Math.round((summary.value.checked || 0) * 100 / summary.value.total) : 0)
+const scopeChanged = computed(() => Boolean(summary.value.scope_changed))
+const stale = computed(() => summary.value.state === 'stale')
+const displayedTotal = computed(() => stale.value ? (summary.value.run_total || 0) : (summary.value.total || 0))
+const displayedChecked = computed(() => stale.value ? (summary.value.run_checked || 0) : (summary.value.checked || 0))
+const progress = computed(() => displayedTotal.value ? Math.round(displayedChecked.value * 100 / displayedTotal.value) : 0)
 
 function titleFor(card) {
   if (!card?.title) return '作品信息不足，无法合并展示'
@@ -70,6 +74,7 @@ async function runNextItems() {
     await nextTick()
   }
   if (summary.value.state === 'complete') notice.value = '本轮检查完成。你可以随时点击“再次检查全部”开始新一轮；期间没有改动影片文件、下载器或既有整理规则。'
+  else if (summary.value.state === 'stale') notice.value = '历史记录范围发生了变化；上一轮结果仍被保留，但不能代表当前全部记录。开始新一轮检查后才会重新核对全部。'
   else if (summary.value.state === 'paused') notice.value = '检查已暂停。进度已保存，稍后点击“继续检查”会从下一条开始。'
 }
 
@@ -137,8 +142,9 @@ onMounted(refresh)
     </header>
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>
     <section class="result-panel" aria-label="检查结果">
-      <div class="result-heading"><div><h2>{{ completed ? '本轮检查完成' : (running ? '正在检查' : (paused ? '检查已暂停' : '准备开始检查')) }}</h2><p>已检查 {{ summary.checked || 0 }} / {{ summary.total || 0 }} 条历史记录。暂停后可以继续；完成后可以随时重新检查全部记录。</p></div><div class="header-actions"><button v-if="running" class="secondary" :disabled="loading" @click="pauseAudit">暂停检查</button><button v-else-if="paused" class="primary" :disabled="loading" @click="resumeAudit">继续本轮检查</button><button v-else class="primary" :disabled="loading" @click="auditAll">{{ completed ? '再次检查全部' : '开始检查全部' }}</button></div></div>
-      <div class="progress-wrap" aria-label="检查进度"><div class="progress-copy"><strong>{{ progress }}%</strong><span v-if="running">正在核对第 {{ (summary.checked || 0) + 1 }} 条</span><span v-else-if="completed">本轮已完成，可随时再次检查</span><span v-else>本轮进度已保存</span></div><div class="progress-track"><div class="progress-bar" :style="{ width: `${progress}%` }"></div></div></div>
+      <div class="result-heading"><div><h2>{{ stale ? '检查范围已变化' : (completed ? '本轮检查完成' : (running ? '正在检查' : (paused ? '检查已暂停' : '准备开始检查'))) }}</h2><p v-if="stale">上一轮已检查 {{ displayedChecked }} / {{ displayedTotal }} 条；当前共有 {{ summary.total || 0 }} 条历史记录。上次结论不会丢失，但新增或变动的记录尚未检查。</p><p v-else>已检查 {{ displayedChecked }} / {{ displayedTotal }} 条历史记录。暂停后可以继续；完成后可以随时重新检查全部记录。</p></div><div class="header-actions"><button v-if="running" class="secondary" :disabled="loading" @click="pauseAudit">暂停检查</button><button v-else-if="paused && !scopeChanged" class="primary" :disabled="loading" @click="resumeAudit">继续本轮检查</button><button v-else class="primary" :disabled="loading" @click="auditAll">{{ stale ? '重新检查全部' : (completed ? '再次检查全部' : '开始检查全部') }}</button></div></div>
+      <div class="progress-wrap" aria-label="检查进度"><div class="progress-copy"><strong>{{ progress }}%</strong><span v-if="stale">这是上一轮进度；当前范围已变化</span><span v-else-if="running">正在核对第 {{ (summary.checked || 0) + 1 }} 条</span><span v-else-if="completed">本轮已完成，可随时再次检查</span><span v-else>本轮进度已保存</span></div><div class="progress-track"><div class="progress-bar" :style="{ width: `${progress}%` }"></div></div></div>
+      <p v-if="stale" class="notice">下面是上一轮已完成部分的结论，仅供参考；在重新检查全部前，不能把它当作当前媒体库的完整结论。</p>
       <div class="overview" aria-label="检查结果概览"><article><strong>{{ cards.length }}</strong><span>部作品需要复核</span></article><article><strong>{{ summary.strategy_review || 0 }}</strong><span>整理方式待复核</span></article><article><strong>{{ summary.ready_for_preview || 0 }}</strong><span>可做补建前检查</span></article><article><strong>{{ summary.unresolved || 0 }}</strong><span>信息不足</span></article></div>
       <section v-if="summary.unresolved" class="unresolved"><h3>{{ summary.unresolved }} 条记录没有查到可靠作品身份</h3><p>系统已经尝试按原有整理链路识别；因为没有足够证据确认片名，所以不会猜测、不会把原始文件名当成影片名，也不会把它们伪装成可处理的问题卡。</p></section>
       <div v-if="!cards.length" class="empty"><h3>目前没有需要你处理的作品</h3><p>已检查的历史记录没有发现可展示的问题；你之后仍可再次检查。</p></div>
