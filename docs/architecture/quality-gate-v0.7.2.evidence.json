@@ -1,0 +1,308 @@
+{
+  "schema": "knowledgeradar-research-evidence/v1",
+  "artifact": {
+    "report_path": "docs/architecture/quality-gate-v0.7.2.md",
+    "task_prompt_hash": "sha256:mediagovernor-quality-gate-v072",
+    "created_at": "2026-09-02T08:00:00Z"
+  },
+  "budget": {
+    "selected_profile": "deep",
+    "selected_by": "agent",
+    "reason": "需要同时核验宿主插件合同、可恢复任务模式与本地实现边界。",
+    "remaining_repair_rounds": 0
+  },
+  "tool_calls": [
+    {
+      "id": "T001",
+      "tool": "mcp__knowledgeradar__kr_research",
+      "args_summary": {
+        "task": "MoviePilot 媒体质量闸门设计"
+      },
+      "elapsed_s": 0.1,
+      "status": "ok"
+    },
+    {
+      "id": "T002",
+      "tool": "mcp__knowledgeradar__extract_web_page",
+      "args_summary": {
+        "source": "MoviePilot V3 Plugin Development"
+      },
+      "elapsed_s": 3.5,
+      "status": "ok"
+    },
+    {
+      "id": "T003",
+      "tool": "local_code_read",
+      "args_summary": {
+        "paths": [
+          "plugins.v3/mediagovernor/governor.py",
+          "plugins.v3/mediagovernor/__init__.py"
+        ]
+      },
+      "elapsed_s": 0.2,
+      "status": "ok"
+    }
+  ],
+  "evidence_items": [
+    {
+      "id": "E001",
+      "type": "web",
+      "title": "MoviePilot V3 插件开发文档",
+      "url": "https://github.com/jxxghp/MoviePilot-Plugins/blob/main/docs/Plugin_Development.md",
+      "receipt_id": "receipt-da4df496872e4da6",
+      "summary": "确认 V3 的持久化、API、Vue 页面、目录和真实宿主验收合同。",
+      "strength": "strong"
+    },
+    {
+      "id": "E002",
+      "type": "web",
+      "title": "River Queue resumable jobs",
+      "url": "https://riverqueue.com/docs/resumable-jobs",
+      "receipt_id": "receipt-01306089513e7cea",
+      "summary": "支持离散步骤、持久游标、checkpoint 和续跑的可恢复批处理模式。",
+      "strength": "strong"
+    },
+    {
+      "id": "E003",
+      "type": "local_code",
+      "title": "MediaGovernor 当前实现",
+      "local_path": "plugins.v3/mediagovernor/governor.py",
+      "summary": "核验本次逐条队列、暂停恢复、脱敏投影和预演边界。",
+      "strength": "strong"
+    }
+  ],
+  "claims": [
+    {
+      "id": "C001",
+      "text": "逐条持久化进度可避免单个慢识别请求阻塞整批检查，并允许暂停和恢复。",
+      "importance": "critical",
+      "supporting_evidence_ids": [
+        "E002",
+        "E003"
+      ]
+    },
+    {
+      "id": "C002",
+      "text": "插件可用宿主数据接口保存小型可序列化状态并通过动态 API 和 Vue 页面呈现进度。",
+      "importance": "critical",
+      "supporting_evidence_ids": [
+        "E001",
+        "E003"
+      ]
+    },
+    {
+      "id": "C003",
+      "text": "没有目标路径比较或连续集数证据时，不能诚实地声称发现放错目录或少集。",
+      "importance": "high",
+      "supporting_evidence_ids": [
+        "E003"
+      ]
+    }
+  ],
+  "coverage": {
+    "required_surfaces": [
+      "web",
+      "local_code",
+      "prior_report"
+    ],
+    "covered_surfaces": [
+      "web",
+      "local_code",
+      "prior_report"
+    ],
+    "missing_surfaces": [],
+    "skipped_surfaces": [
+      {
+        "surface": "media_detail",
+        "reason": "不需要媒体内容或账号资料；任务只涉及插件合同和本地逻辑。"
+      },
+      {
+        "surface": "platform_search",
+        "reason": "用户体验资料不能替代宿主合同和源码事实。"
+      }
+    ]
+  },
+  "questioner_checkpoints": [
+    {
+      "stage": "after_local_archaeology",
+      "questions": [
+        "v0.7.1 为什么产生空卡？",
+        "哪些历史字段可安全持久化？"
+      ],
+      "decision": "保留身份投影，重新启用逐条原生识别，不保存原始文件名或路径。",
+      "reason": "旧状态缺失可靠身份，重读空状态不能改善结果。"
+    },
+    {
+      "stage": "after_first_external_round",
+      "questions": [
+        "V3 是否允许持久任务状态和动态 API？",
+        "怎样避免整批请求卡住？"
+      ],
+      "decision": "用基类数据接口保存队列，并以离散单项 API/checkpoint 运行。",
+      "reason": "官方插件合同与可恢复任务资料均支持该边界。"
+    },
+    {
+      "stage": "before_final_report",
+      "questions": [
+        "哪些错误可诚实确认为错误？",
+        "哪些只能说明无法验证？"
+      ],
+      "decision": "只确认身份、整理方式和预演结果；目录/集数缺证据时明确降级。",
+      "reason": "不以路径或不完整文件集推断错误。"
+    }
+  ],
+  "claim_evidence_chains": [
+    {
+      "claim_id": "C001",
+      "tool_call_ids": [
+        "T001",
+        "T003"
+      ],
+      "evidence_ids": [
+        "E002",
+        "E003"
+      ],
+      "sources": [
+        "River Queue resumable jobs",
+        "MediaGovernor governor.py"
+      ],
+      "extracted_facts": [
+        "可恢复任务使用离散步骤和 checkpoint",
+        "实现为每次只领取一条"
+      ],
+      "inference": "单项持久化可避免批量请求没有可见推进。",
+      "limitations": "单条原生识别仍可能慢，但不会阻塞其余项目。",
+      "strength": "strong"
+    },
+    {
+      "claim_id": "C003",
+      "tool_call_ids": [
+        "T003"
+      ],
+      "evidence_ids": [
+        "E003"
+      ],
+      "sources": [
+        "MediaGovernor NativePreviewGateway"
+      ],
+      "extracted_facts": [
+        "预演网关只输出安全布尔结论且不返回路径"
+      ],
+      "inference": "没有目标路径比较结果时，不能确认归类目录错误。",
+      "limitations": "需要未来宿主提供脱敏比较合同。",
+      "strength": "strong"
+    }
+  ],
+  "known_issues": {
+    "schema": "knowledgeradar-known-issues/v1",
+    "items": [
+      {
+        "id": "KI-001",
+        "description": "宿主未提供脱敏的实际/预期目标目录比较结果。",
+        "discovered_at": "2026-09-02",
+        "status": "未解决",
+        "resolved_in_report": false,
+        "next_action": "等待或推动宿主提供 destination_matches 这类布尔合同。"
+      },
+      {
+        "id": "KI-002",
+        "description": "默认 Python 环境未安装 pytest。",
+        "discovered_at": "2026-09-02",
+        "status": "未解决",
+        "resolved_in_report": false,
+        "next_action": "候选发布前使用 MoviePilot 宿主解释器运行完整 pytest。"
+      }
+    ],
+    "report_path": "docs/architecture/quality-gate-v0.7.2.md",
+    "issues": [
+      {"id": "KI-001", "description": "宿主未提供脱敏的实际/预期目标目录比较结果。", "discovered_at": "2026-09-02", "status": "未解决", "resolved_in_report": false, "next_action": "等待或推动宿主提供 destination_matches 这类布尔合同。"},
+      {"id": "KI-002", "description": "默认 Python 环境未安装 pytest。", "discovered_at": "2026-09-02", "status": "未解决", "resolved_in_report": false, "next_action": "候选发布前使用 MoviePilot 宿主解释器运行完整 pytest。"}
+    ]
+  },
+  "decision_register": {
+    "schema": "knowledgeradar-decision-register/v1",
+    "decisions": [
+      {
+        "id": "D-001",
+        "title": "批处理执行模型",
+        "status": "implemented",
+        "options": [
+          "整批同步识别",
+          "只读旧身份",
+          "逐条可恢复识别"
+        ],
+        "recommended_action": "逐条可恢复识别",
+        "decision_record_location": "docs/architecture/quality-gate-v0.7.2.md#这次修复的真实问题",
+        "next_review": "真实 V3 宿主验收后"
+      },
+      {
+        "id": "D-002",
+        "title": "目录错误的证据边界",
+        "status": "deferred",
+        "options": [
+          "根据路径判断放错目录",
+          "等待脱敏比较合同"
+        ],
+        "recommended_action": "等待脱敏比较合同",
+        "decision_record_location": "docs/architecture/quality-gate-v0.7.2.md#不会假装做到的事",
+        "next_review": "上游公开目标比较合同后"
+      }
+    ]
+  },
+  "process_quality": {
+    "schema": "knowledgeradar-process-quality/v1",
+    "capability_handshake": {"health_check": true, "get_capabilities": true, "access_path": "native_mcp"},
+    "local_archaeology": {"performed": true, "summary": "核对 v0.7.1 状态机、前端请求方式、历史字段与上游本地源码。"},
+    "source_ecology_plan": {"considered": ["github_repository_ecology", "generic_web_ecology"], "selected": ["github_repository_ecology", "generic_web_ecology"], "skipped": ["bilibili_video_ecology", "xiaohongshu_experience_ecology"], "reason": "官方插件合同和可恢复任务资料足以支持本次实现。"},
+    "validation_ladder": {"selected_profile": "deep", "commands": ["py_compile", "focused contract execution", "pnpm build", "check_plugin_versions.py", "check_federation_css.py", "real V3 host load before release"]},
+    "presentation": "用户页仅呈现中文作品名、具体结论、进度和下一步；不呈现路径或内部错误。",
+    "preflight_ref": "D:/Projects/NAS docker/media-next/plugins/moviepilot-media-governor/docs/architecture/quality-gate-v0.7.2.preflight.json",
+    "known_issue_inheritance": {
+      "schema": "knowledgeradar-known-issue-inheritance/v1",
+      "previous_evidence": [],
+      "unresolved_count": 0,
+      "required_issue_ids": [],
+      "present_issue_ids": [],
+      "missing_issue_ids": [],
+      "rule": "上一份 sidecar 中 status 为 新发现/未解决/已延后 的 known_issues 必须复制到下一份 sidecar，直到显式标记为 已解决。"
+    }
+  },
+  "roadmap": [
+    {
+      "phase": "P1",
+      "task": "历史纳入",
+      "method": "按状态分页投影成功和失败历史",
+      "input": "TransferHistoryOper",
+      "output": "脱敏质量记录",
+      "dependency": "历史查询合同",
+      "acceptance": "成功和失败均进入队列"
+    },
+    {
+      "phase": "P2",
+      "task": "逐条检查",
+      "method": "领取一项、保存 checkpoint、暂停后恢复",
+      "input": "历史编号",
+      "output": "进度和单项结论",
+      "dependency": "基类数据接口",
+      "acceptance": "不遗漏中断项"
+    },
+    {
+      "phase": "P3",
+      "task": "呈现和处理",
+      "method": "仅显示已命名的真实问题，方案与执行分离",
+      "input": "脱敏结论",
+      "output": "中文问题卡",
+      "dependency": "Vue API",
+      "acceptance": "空身份不成卡，写入必须二次确认"
+    },
+    {
+      "phase": "P4",
+      "task": "扩展目录/集数验证",
+      "method": "接入宿主脱敏比较事实",
+      "input": "布尔或计数合同",
+      "output": "新增已确认问题类别",
+      "dependency": "未来宿主合同",
+      "acceptance": "无路径保存或泄露"
+    }
+  ]
+}

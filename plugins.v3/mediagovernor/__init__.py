@@ -16,9 +16,9 @@ class MediaGovernor(_PluginBase):
     """以通用事件归并发现问题，不替代 MoviePilot 的原生整理器。"""
 
     plugin_name = "媒体治理"
-    plugin_desc = "用中文问题卡核对整理记录；确认后才创建硬链接，不改动原文件。"
+    plugin_desc = "逐条核查整理结果并显示进度；确认后才创建硬链接，不改动原文件。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.7.1"
+    plugin_version = "0.7.2"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -76,19 +76,21 @@ class MediaGovernor(_PluginBase):
             {"path": "/packages", "endpoint": self.get_packages, "methods": ["GET"], "auth": "bear", "summary": "查询媒体治理问题"},
             {"path": "/plans", "endpoint": self.get_plans, "methods": ["GET"], "auth": "bear", "summary": "查询零写入预演计划"},
             {"path": "/plans/{plan_id}", "endpoint": self.get_plan, "methods": ["GET"], "auth": "bear", "summary": "查询预演计划详情"},
-            {"path": "/audit", "endpoint": self.audit_all, "methods": ["POST"], "auth": "bear", "summary": "一键检查全部历史异常（不改文件）"},
+            {"path": "/audit", "endpoint": self.audit_all, "methods": ["POST"], "auth": "bear", "summary": "开始可恢复的逐条整理检查（不改文件）"},
+            {"path": "/audit/next", "endpoint": self.audit_next, "methods": ["POST"], "auth": "bear", "summary": "处理下一条整理检查（不改文件）"},
+            {"path": "/audit/pause", "endpoint": self.pause_audit, "methods": ["POST"], "auth": "bear", "summary": "暂停整理检查"},
             {"path": "/packages/{history_id}/preview", "endpoint": self.preview_history, "methods": ["POST"], "auth": "bear", "summary": "生成硬链接预演计划（不执行）"},
             {"path": "/plans/{plan_id}/repair", "endpoint": self.repair_plan, "methods": ["POST"], "auth": "bear", "summary": "执行已确认的硬链接修复"},
         ]
 
     def get_packages(self) -> dict[str, Any]:
         queue = getattr(self, "_queue", GovernanceQueue())
-        history_ids = queue.failed_history_ids()
+        history_ids = queue.auditable_history_ids()
         inspection = getattr(self, "_inspection", BatchAudit())
         return {
             "items": inspection.public_items(history_ids),
             "summary": inspection.summary(history_ids),
-            "mode": "observe_and_preview",
+            "mode": "progressive_quality_gate",
             "enabled": self.get_state(),
             "history_audit": getattr(self, "_audit", {}),
         }
@@ -104,7 +106,7 @@ class MediaGovernor(_PluginBase):
         state = getattr(self, "_audit", {})
         if not self.get_state() or not self._backfill_existing_failures or not isinstance(state, dict) or state.get("state") in {"complete", "unsupported_host_contract"}:
             return []
-        return [{"id": "MediaGovernor.HistoryReconcile", "name": "媒体治理旧失败记录回溯", "trigger": "interval", "func": self.reconcile_history, "kwargs": {"minutes": 15}}]
+        return [{"id": "MediaGovernor.HistoryReconcile", "name": "媒体治理历史质量记录回溯", "trigger": "interval", "func": self.reconcile_history, "kwargs": {"minutes": 15}}]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """Vue 配置页接收现有配置；默认关闭且不默认回溯历史。"""
@@ -143,32 +145,39 @@ class MediaGovernor(_PluginBase):
         if not self.get_state() or not self._backfill_existing_failures:
             return
         state = getattr(self, "_audit", {})
+        if not isinstance(state, dict) or state.get("schema") != "mediagovernor-history-audit/v2":
+            state = {}
         if isinstance(state, dict) and state.get("state") in {"complete", "unsupported_host_contract"}:
             return
         query_contract = self._history_query_contract()
         if query_contract is None:
-            self._audit = {"schema": "mediagovernor-history-audit/v1", "state": "unsupported_host_contract", "detail": "history_query_unavailable"}
+            self._audit = {"schema": "mediagovernor-history-audit/v2", "state": "unsupported_host_contract", "detail": "history_query_unavailable"}
             self.save_data(self._AUDIT_KEY, self._audit)
             return
         QueryPageRequest, QuerySort, QuerySortDirection, QuerySortField, TransferHistoryFilter = query_contract
+        phase = state.get("phase", "failed")
+        phase = phase if phase in {"failed", "complete"} else "failed"
         page_number = state.get("next_page", 1) if isinstance(state, dict) else 1
         page_number = page_number if isinstance(page_number, int) and page_number > 0 else 1
         queue, processed, complete = getattr(self, "_queue", GovernanceQueue()), 0, False
         try:
             for _ in range(self._AUDIT_PAGES_PER_RUN):
-                histories, total = TransferHistoryOper().query(filters=TransferHistoryFilter(status=False), page=QueryPageRequest(page=page_number, count=self._AUDIT_PAGE_SIZE, sort=QuerySort(field=QuerySortField.ID, direction=QuerySortDirection.DESC)))
+                histories, total = TransferHistoryOper().query(filters=TransferHistoryFilter(status=phase == "complete"), page=QueryPageRequest(page=page_number, count=self._AUDIT_PAGE_SIZE, sort=QuerySort(field=QuerySortField.ID, direction=QuerySortDirection.DESC)))
                 for history in histories:
-                    processed += int(queue.observe_failed_history(history))
+                    processed += int(queue.observe_history(history))
                 if not histories or page_number * self._AUDIT_PAGE_SIZE >= total:
+                    if phase == "failed":
+                        phase, page_number = "complete", 1
+                        continue
                     page_number, complete = 1, True
                     break
                 page_number += 1
         except Exception:
-            self._audit = {"schema": "mediagovernor-history-audit/v1", "state": "retry_pending"}
+            self._audit = {"schema": "mediagovernor-history-audit/v2", "state": "retry_pending", "phase": phase, "next_page": page_number}
             self.save_data(self._AUDIT_KEY, self._audit)
             return
         self._queue = queue
-        self._audit = {"schema": "mediagovernor-history-audit/v1", "state": "complete" if complete else "in_progress", "next_page": page_number, "added_packages": processed}
+        self._audit = {"schema": "mediagovernor-history-audit/v2", "state": "complete" if complete else "in_progress", "phase": phase, "next_page": page_number, "added_packages": processed}
         self.save_data(self._QUEUE_KEY, queue.to_data())
         self.save_data(self._AUDIT_KEY, self._audit)
 
@@ -222,25 +231,112 @@ class MediaGovernor(_PluginBase):
         return {**result, "plan": plan, "outcome": outcome, "checked": checked}
 
     def audit_all(self) -> dict[str, Any]:
-        """快速核查全部失败历史；不在批量入口发起慢网络识别或文件预演。"""
+        """建立可恢复的检查队列；不在一次请求中阻塞整批识别。"""
         queue = getattr(self, "_queue", GovernanceQueue())
         inspection = getattr(self, "_inspection", BatchAudit())
         if not self.get_state():
-            return {"ok": False, "detail": "plugin_disabled", "summary": inspection.summary(queue.failed_history_ids())}
-        for history_id in queue.failed_history_ids():
-            history = TransferHistoryOper().get(history_id)
-            if history is None or getattr(history, "status", None) is True:
-                inspection.record(history_id, None, source_available=False)
-                continue
-            identity = queue.identity_for_history(history_id)
-            if identity is None:
-                observation = EventObservation.from_contract("failed", {"transfer_history_id": history_id}, history)
-                identity = observation.identity_fields() if observation is not None else None
-            inspection.record(history_id, identity)
+            return {"ok": False, "detail": "plugin_disabled", "summary": inspection.summary(queue.auditable_history_ids())}
+        summary = inspection.resume_or_start(queue.auditable_history_ids())
         self._inspection = inspection
-        self.save_data(self._QUEUE_KEY, queue.to_data())
         self.save_data(self._INSPECTION_KEY, inspection.to_data())
-        return {"ok": True, "summary": inspection.summary(queue.failed_history_ids())}
+        return {"ok": True, "summary": summary}
+
+    @staticmethod
+    def _history_title(history: Any) -> str | None:
+        """只在本次识别调用中使用历史名称，绝不把原始名称或路径写入插件状态。"""
+        candidates = (
+            getattr(history, "title", None),
+            (getattr(history, "src_fileitem", None) or {}).get("name"),
+        )
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return None
+
+    @staticmethod
+    def _media_identity(mediainfo: Any) -> dict[str, Any]:
+        """将识别结果投影为可展示的稳定作品身份，不保存宿主文件数据。"""
+        def text(value: Any) -> str | None:
+            raw = getattr(value, "value", value)
+            cleaned = str(raw).strip() if raw is not None else ""
+            return cleaned[:160] if cleaned else None
+
+        return {
+            "title": text(getattr(mediainfo, "title", None)),
+            "year": text(getattr(mediainfo, "year", None)),
+            "media_source": text(getattr(mediainfo, "media_source", None)),
+            "media_id": text(getattr(mediainfo, "media_id", None)),
+            "media_type": text(getattr(mediainfo, "type", None)),
+        }
+
+    def audit_next(self) -> dict[str, Any]:
+        """只核对一条历史记录，保存结果后再允许页面领取下一条。"""
+        queue = getattr(self, "_queue", GovernanceQueue())
+        inspection = getattr(self, "_inspection", BatchAudit())
+        history_ids = queue.auditable_history_ids()
+        if not self.get_state():
+            return {"ok": False, "detail": "plugin_disabled", "summary": inspection.summary(history_ids)}
+        history_id = inspection.claim_next()
+        if history_id is None:
+            self._inspection = inspection
+            self.save_data(self._INSPECTION_KEY, inspection.to_data())
+            return {"ok": True, "detail": "audit_waiting_or_complete", "summary": inspection.summary(history_ids)}
+        self._inspection = inspection
+        self.save_data(self._INSPECTION_KEY, inspection.to_data())
+        history = TransferHistoryOper().get(history_id)
+        if history is None:
+            context = queue.history_context(history_id)
+            if context and context.get("event_kind") == "complete":
+                inspection.record_complete_quality(history_id, None, None, source_available=False)
+            else:
+                inspection.record(history_id, None, source_available=False)
+        else:
+            context = queue.history_context(history_id) or {}
+            identity = context.get("identity") or queue.identity_for_history(history_id)
+            if context.get("event_kind") == "complete":
+                inspection.record_complete_quality(history_id, identity, context.get("transfer_mode"))
+                self._inspection = inspection
+                self.save_data(self._INSPECTION_KEY, inspection.to_data())
+                return {"ok": True, "summary": inspection.summary(history_ids)}
+            if identity is None:
+                title = self._history_title(history)
+                if title:
+                    try:
+                        from app.chain.media import MediaChain
+                        from app.schemas.context import MetaInfo
+                        mediainfo = MediaChain().recognize_by_meta(MetaInfo(title=title), obtain_images=False)
+                    except Exception:
+                        mediainfo = None
+                    identity = self._media_identity(mediainfo) if mediainfo is not None else None
+            preview = None
+            fields = identity or {}
+            if all(fields.get(field) for field in ("title", "media_source", "media_id", "media_type")):
+                raw_fileitem = getattr(history, "src_fileitem", None)
+                if isinstance(raw_fileitem, dict):
+                    try:
+                        from app.schemas.file import FileItem
+                        preview = self.preview_hardlink(FileItem(**raw_fileitem))
+                    except Exception:
+                        preview = {"ok": False, "detail": "preview_rejected"}
+                else:
+                    preview = {"ok": False, "detail": "history_fileitem_unavailable"}
+                outcome = queue.record_preview_outcome(history_id, preview)
+                if outcome is not None:
+                    self._queue = queue
+                    self.save_data(self._QUEUE_KEY, queue.to_data())
+            inspection.record(history_id, identity, preview)
+        self._inspection = inspection
+        self.save_data(self._INSPECTION_KEY, inspection.to_data())
+        return {"ok": True, "summary": inspection.summary(history_ids)}
+
+    def pause_audit(self) -> dict[str, Any]:
+        """暂停尚未开始的检查项；已经开始的单项由宿主调用自然返回。"""
+        queue = getattr(self, "_queue", GovernanceQueue())
+        inspection = getattr(self, "_inspection", BatchAudit())
+        summary = inspection.pause()
+        self._inspection = inspection
+        self.save_data(self._INSPECTION_KEY, inspection.to_data())
+        return {"ok": True, "summary": summary}
 
     def repair_plan(self, plan_id: str) -> dict[str, Any]:
         """只执行已通过预演、未过期且由用户明确点击确认的单个计划。"""
