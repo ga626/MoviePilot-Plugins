@@ -93,9 +93,11 @@ const hasChecked = computed(() => summary.value.state === 'complete' || summary.
 const completed = computed(() => summary.value.state === 'complete');
 
 const auditGuide = {
+  needs_preview: { label: '已识别，待生成方案', detail: '作品已经确认；打开后可只对这一条模拟硬链接。' },
   ready_to_plan: { label: '可以处理', detail: '已经识别作品，并确认目前可以安全创建硬链接。' },
   preview_rejected: { label: '暂不能处理', detail: '已经识别作品，但这次检查不能安全创建硬链接。' },
   identity_unresolved: { label: '无法自动识别', detail: '历史记录的信息不足，暂时不能可靠确定这是什么作品。' },
+  source_unavailable: { label: '记录已不可用', detail: 'MoviePilot 已无法读取这条历史记录，因此不会尝试处理它。' },
 };
 const fallbackGuide = { label: '需要进一步核对', detail: '这条记录需要进一步核对；系统不会猜测作品或改动文件。' };
 
@@ -108,6 +110,7 @@ function planFor(card) { return plans.value.find(plan => plan.history_id === car
 function latestCheck(card) {
   if (previewResult.value) return previewResult.value
   if (card?.status === 'ready_to_plan') return { tone: 'ready', title: '可以创建硬链接', detail: '批量检查已通过。生成处理方案后，仍需你确认才会真正创建硬链接。' }
+  if (card?.status === 'needs_preview') return { tone: 'ready', title: '可以生成处理方案', detail: '作品身份已经确认。下一步只会模拟这一条记录能否安全创建硬链接，不会改动文件。' }
   if (card?.status === 'preview_rejected') return { tone: 'blocked', title: '现在不能安全处理', detail: '这次检查没有通过；没有创建、删除、移动或改名任何文件。' }
   return { tone: 'blocked', title: '无法自动识别', detail: '没有可靠作品身份时，系统不会把原始任务名当成影片名，也不会自动处理。' }
 }
@@ -132,7 +135,7 @@ async function auditAll() {
     const response = await props.api.post(`plugin/${props.pluginId}/audit`);
     const data = response?.data ?? response;
     await refresh();
-    notice.value = data?.ok ? '检查完成：没有改动影片文件、下载器或现有整理规则。' : '检查没有完成，未改动任何文件。';
+    notice.value = data?.ok ? '检查完成：已核对历史记录；未改动影片文件、下载器或现有整理规则。' : '检查没有完成，未改动任何文件。';
   } catch (cause) { notice.value = cause?.message || '检查没有完成，未改动任何文件。'; }
   finally { loading.value = false; }
 }
@@ -173,13 +176,13 @@ return (_ctx, _cache) => {
     _createElementVNode("header", _hoisted_2, [
       _cache[4] || (_cache[4] = _createElementVNode("div", null, [
         _createElementVNode("h1", null, "整理检查"),
-        _createElementVNode("p", null, "一次核查所有历史异常。检查只读取记录、识别作品并模拟硬链接，不会改动文件。")
+        _createElementVNode("p", null, "一次核查所有历史异常。先读取 MoviePilot 已保存的作品信息；需要处理时再单独模拟硬链接，不会改动文件。")
       ], -1)),
       _createElementVNode("button", {
         class: "secondary",
         disabled: loading.value,
         onClick: refresh
-      }, _toDisplayString(loading.value ? '正在更新…' : '更新页面'), 9, _hoisted_3)
+      }, _toDisplayString(loading.value ? '正在刷新…' : '刷新结果'), 9, _hoisted_3)
     ]),
     (notice.value)
       ? (_openBlock(), _createElementBlock("p", _hoisted_4, _toDisplayString(notice.value), 1))
@@ -188,7 +191,7 @@ return (_ctx, _cache) => {
       ? (_openBlock(), _createElementBlock("section", _hoisted_5, [
           _createElementVNode("div", _hoisted_6, [
             _createElementVNode("h2", null, _toDisplayString(summary.value.total ? `有 ${summary.value.total} 条历史记录等待检查` : '还没有需要检查的历史记录'), 1),
-            _createElementVNode("p", null, _toDisplayString(summary.value.total ? '先让系统逐条查明影片、年份和当前能否安全处理；只有检查后仍有问题的记录才会显示出来。' : 'MoviePilot 尚未提供需要处理的失败记录。'), 1)
+            _createElementVNode("p", null, _toDisplayString(summary.value.total ? '先逐条确认 MoviePilot 已保存的影片信息；只有仍需处理的记录才会显示出来。' : 'MoviePilot 尚未提供需要处理的失败记录。'), 1)
           ]),
           (summary.value.total)
             ? (_openBlock(), _createElementBlock("button", {
@@ -220,16 +223,20 @@ return (_ctx, _cache) => {
               _cache[5] || (_cache[5] = _createElementVNode("span", null, "可以处理", -1))
             ]),
             _createElementVNode("article", null, [
+              _createElementVNode("strong", null, _toDisplayString(summary.value.ready_for_preview || 0), 1),
+              _cache[6] || (_cache[6] = _createElementVNode("span", null, "等待模拟", -1))
+            ]),
+            _createElementVNode("article", null, [
               _createElementVNode("strong", null, _toDisplayString(summary.value.needs_attention || 0), 1),
-              _cache[6] || (_cache[6] = _createElementVNode("span", null, "需要你查看", -1))
+              _cache[7] || (_cache[7] = _createElementVNode("span", null, "需要你查看", -1))
             ]),
             _createElementVNode("article", null, [
               _createElementVNode("strong", null, _toDisplayString(summary.value.pending || 0), 1),
-              _cache[7] || (_cache[7] = _createElementVNode("span", null, "尚未检查", -1))
+              _cache[8] || (_cache[8] = _createElementVNode("span", null, "尚未检查", -1))
             ])
           ]),
           (!cards.value.length)
-            ? (_openBlock(), _createElementBlock("div", _hoisted_12, [...(_cache[8] || (_cache[8] = [
+            ? (_openBlock(), _createElementBlock("div", _hoisted_12, [...(_cache[9] || (_cache[9] = [
                 _createElementVNode("h3", null, "目前没有需要处理的记录", -1),
                 _createElementVNode("p", null, "已检查的历史异常没有发现需要你继续处理的问题。", -1)
               ]))]))
@@ -261,7 +268,7 @@ return (_ctx, _cache) => {
           _createElementVNode("section", _hoisted_17, [
             _createElementVNode("header", _hoisted_18, [
               _createElementVNode("div", null, [
-                _cache[9] || (_cache[9] = _createElementVNode("span", { class: "modal-label" }, "检查结论", -1)),
+                _cache[10] || (_cache[10] = _createElementVNode("span", { class: "modal-label" }, "检查结论", -1)),
                 _createElementVNode("h2", null, _toDisplayString(titleFor(selected.value)), 1)
               ]),
               _createElementVNode("button", {
@@ -274,10 +281,10 @@ return (_ctx, _cache) => {
               _createElementVNode("h3", null, _toDisplayString(latestCheck(selected.value).title), 1),
               _createElementVNode("p", null, _toDisplayString(latestCheck(selected.value).detail), 1)
             ]),
-            (selected.value.status === 'ready_to_plan')
+            (selected.value.status === 'needs_preview' || selected.value.status === 'ready_to_plan')
               ? (_openBlock(), _createElementBlock("section", _hoisted_20, [
-                  _cache[10] || (_cache[10] = _createElementVNode("h3", null, "下一步", -1)),
-                  _cache[11] || (_cache[11] = _createElementVNode("p", null, "先生成一份即时处理方案。它仍然不会改文件；只有你在下一步确认后才会创建硬链接。", -1)),
+                  _cache[11] || (_cache[11] = _createElementVNode("h3", null, "下一步", -1)),
+                  _cache[12] || (_cache[12] = _createElementVNode("p", null, "先生成一份即时处理方案。它仍然不会改文件；只有你在下一步确认后才会创建硬链接。", -1)),
                   (!planFor(selected.value))
                     ? (_openBlock(), _createElementBlock("button", {
                         key: 0,
@@ -293,8 +300,8 @@ return (_ctx, _cache) => {
                       }, "确认创建硬链接", 8, _hoisted_22))
                 ]))
               : _createCommentVNode("", true),
-            (selected.value.status !== 'ready_to_plan')
-              ? (_openBlock(), _createElementBlock("details", _hoisted_23, [...(_cache[12] || (_cache[12] = [
+            (selected.value.status !== 'needs_preview' && selected.value.status !== 'ready_to_plan')
+              ? (_openBlock(), _createElementBlock("details", _hoisted_23, [...(_cache[13] || (_cache[13] = [
                   _createElementVNode("summary", null, "仍无法处理？查看人工步骤", -1),
                   _createElementVNode("ol", null, [
                     _createElementVNode("li", null, "在 MoviePilot 的搜索页确认作品、年份和类型。"),
@@ -313,9 +320,9 @@ return (_ctx, _cache) => {
           onClick: _cache[3] || (_cache[3] = _withModifiers($event => (pendingRepair.value = null), ["self"]))
         }, [
           _createElementVNode("section", _hoisted_24, [
-            _cache[13] || (_cache[13] = _createElementVNode("h2", null, "确认创建硬链接？", -1)),
-            _cache[14] || (_cache[14] = _createElementVNode("p", null, "系统只会为这一个已检查通过的项目创建硬链接。", -1)),
-            _cache[15] || (_cache[15] = _createElementVNode("ul", null, [
+            _cache[14] || (_cache[14] = _createElementVNode("h2", null, "确认创建硬链接？", -1)),
+            _cache[15] || (_cache[15] = _createElementVNode("p", null, "系统只会为这一个已检查通过的项目创建硬链接。", -1)),
+            _cache[16] || (_cache[16] = _createElementVNode("ul", null, [
               _createElementVNode("li", null, "不会删除、移动、改名或覆盖原文件"),
               _createElementVNode("li", null, "不会修改下载器、代理或既有整理规则"),
               _createElementVNode("li", null, "完成后会回到此页面显示结果")
@@ -340,6 +347,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-cb528fa4"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-db4108b1"]]);
 
 export { AppPage as default };

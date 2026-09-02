@@ -33,9 +33,9 @@ def _payload(history_id: int, event_key: str, *, mode: str | None = "link", titl
 def test_v3_manifest_version_and_frontend_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
-    assert manifest["version"] == "0.7.0"
+    assert manifest["version"] == "0.7.1"
     assert manifest["release"] is True
-    assert 'plugin_version = "0.7.0"' in source
+    assert 'plugin_version = "0.7.1"' in source
     assert 'return "vue", "dist/assets"' in source
     assert "def get_sidebar_nav" in source
     assert 'return []' in source
@@ -49,7 +49,7 @@ def test_v3_manifest_version_and_frontend_contract() -> None:
 def test_batch_audit_hides_unchecked_records_and_keeps_only_safe_identity() -> None:
     governor = _governor_module()
     audit = governor.BatchAudit()
-    assert audit.summary([21]) == {"state": "idle", "total": 1, "checked": 0, "pending": 1, "actionable": 0, "needs_attention": 0}
+    assert audit.summary([21]) == {"state": "idle", "total": 1, "checked": 0, "pending": 1, "actionable": 0, "ready_for_preview": 0, "needs_attention": 0}
     assert audit.public_items([21]) == []
     record = audit.record(21, {"title": "示例作品", "year": "2026", "media_source": "tmdb", "media_id": "42", "media_type": "电视剧"}, {"ok": True}, checked_at=100)
     assert record["status"] == "ready_to_plan"
@@ -57,6 +57,29 @@ def test_batch_audit_hides_unchecked_records_and_keeps_only_safe_identity() -> N
     assert audit.public_items([21])[0]["title"] == "示例作品"
     saved = json.dumps(audit.to_data(), ensure_ascii=False)
     assert "path" not in saved and "src_fileitem" not in saved
+
+
+def test_batch_audit_defers_hardlink_preview_until_the_user_opens_one_record() -> None:
+    governor = _governor_module()
+    audit = governor.BatchAudit()
+    audit.record(24, {"title": "已识别作品", "media_source": "tmdb", "media_id": "44", "media_type": "电影"}, checked_at=100)
+    assert audit.public_items([24])[0]["status"] == "needs_preview"
+    assert audit.summary([24])["ready_for_preview"] == 1
+    updated = audit.record_preview(24, {"ok": True, "detail": "preview_ready"})
+    assert updated and updated["status"] == "ready_to_plan"
+
+
+def test_failed_history_identity_is_reused_without_network_recognition() -> None:
+    governor = _governor_module()
+    queue = governor.GovernanceQueue()
+    failed = governor.EventObservation.from_contract("failed", _payload(25, "reused"))
+    assert failed and queue.observe(failed)
+    assert queue.identity_for_history(25) == {
+        "title": "测试作品", "year": "2026", "media_source": "tmdb", "media_id": "42", "media_type": "电视剧",
+    }
+    source = SOURCE.read_text(encoding="utf-8")
+    audit_source = source[source.index("def audit_all"):source.index("def repair_plan")]
+    assert "MediaChain" not in audit_source and "preview_hardlink" not in audit_source
 
 
 def test_batch_audit_only_exposes_unresolved_after_real_check() -> None:

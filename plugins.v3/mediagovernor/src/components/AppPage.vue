@@ -16,9 +16,11 @@ const hasChecked = computed(() => summary.value.state === 'complete' || summary.
 const completed = computed(() => summary.value.state === 'complete')
 
 const auditGuide = {
+  needs_preview: { label: '已识别，待生成方案', detail: '作品已经确认；打开后可只对这一条模拟硬链接。' },
   ready_to_plan: { label: '可以处理', detail: '已经识别作品，并确认目前可以安全创建硬链接。' },
   preview_rejected: { label: '暂不能处理', detail: '已经识别作品，但这次检查不能安全创建硬链接。' },
   identity_unresolved: { label: '无法自动识别', detail: '历史记录的信息不足，暂时不能可靠确定这是什么作品。' },
+  source_unavailable: { label: '记录已不可用', detail: 'MoviePilot 已无法读取这条历史记录，因此不会尝试处理它。' },
 }
 const fallbackGuide = { label: '需要进一步核对', detail: '这条记录需要进一步核对；系统不会猜测作品或改动文件。' }
 
@@ -31,6 +33,7 @@ function planFor(card) { return plans.value.find(plan => plan.history_id === car
 function latestCheck(card) {
   if (previewResult.value) return previewResult.value
   if (card?.status === 'ready_to_plan') return { tone: 'ready', title: '可以创建硬链接', detail: '批量检查已通过。生成处理方案后，仍需你确认才会真正创建硬链接。' }
+  if (card?.status === 'needs_preview') return { tone: 'ready', title: '可以生成处理方案', detail: '作品身份已经确认。下一步只会模拟这一条记录能否安全创建硬链接，不会改动文件。' }
   if (card?.status === 'preview_rejected') return { tone: 'blocked', title: '现在不能安全处理', detail: '这次检查没有通过；没有创建、删除、移动或改名任何文件。' }
   return { tone: 'blocked', title: '无法自动识别', detail: '没有可靠作品身份时，系统不会把原始任务名当成影片名，也不会自动处理。' }
 }
@@ -55,7 +58,7 @@ async function auditAll() {
     const response = await props.api.post(`plugin/${props.pluginId}/audit`)
     const data = response?.data ?? response
     await refresh()
-    notice.value = data?.ok ? '检查完成：没有改动影片文件、下载器或现有整理规则。' : '检查没有完成，未改动任何文件。'
+    notice.value = data?.ok ? '检查完成：已核对历史记录；未改动影片文件、下载器或现有整理规则。' : '检查没有完成，未改动任何文件。'
   } catch (cause) { notice.value = cause?.message || '检查没有完成，未改动任何文件。' }
   finally { loading.value = false }
 }
@@ -95,21 +98,21 @@ onMounted(refresh)
 <template>
   <main class="governor-page">
     <header class="page-header">
-      <div><h1>整理检查</h1><p>一次核查所有历史异常。检查只读取记录、识别作品并模拟硬链接，不会改动文件。</p></div>
-      <button class="secondary" :disabled="loading" @click="refresh">{{ loading ? '正在更新…' : '更新页面' }}</button>
+      <div><h1>整理检查</h1><p>一次核查所有历史异常。先读取 MoviePilot 已保存的作品信息；需要处理时再单独模拟硬链接，不会改动文件。</p></div>
+      <button class="secondary" :disabled="loading" @click="refresh">{{ loading ? '正在刷新…' : '刷新结果' }}</button>
     </header>
     <p v-if="notice" class="notice" role="status">{{ notice }}</p>
     <section v-if="!hasChecked" class="start-panel" aria-label="开始整理检查">
-      <div class="start-copy"><h2>{{ summary.total ? `有 ${summary.total} 条历史记录等待检查` : '还没有需要检查的历史记录' }}</h2><p>{{ summary.total ? '先让系统逐条查明影片、年份和当前能否安全处理；只有检查后仍有问题的记录才会显示出来。' : 'MoviePilot 尚未提供需要处理的失败记录。' }}</p></div>
+      <div class="start-copy"><h2>{{ summary.total ? `有 ${summary.total} 条历史记录等待检查` : '还没有需要检查的历史记录' }}</h2><p>{{ summary.total ? '先逐条确认 MoviePilot 已保存的影片信息；只有仍需处理的记录才会显示出来。' : 'MoviePilot 尚未提供需要处理的失败记录。' }}</p></div>
       <button v-if="summary.total" class="primary primary-large" :disabled="loading" @click="auditAll">{{ loading ? '正在检查全部记录…' : '一键检查全部（不改文件）' }}</button>
     </section>
     <section v-else class="result-panel" aria-label="检查结果">
       <div class="result-heading"><div><h2>{{ completed ? '检查完成' : '检查尚未完成' }}</h2><p>已检查 {{ summary.checked || 0 }} / {{ summary.total || 0 }} 条历史记录。只显示仍需你决定的项目。</p></div><button v-if="!completed" class="primary" :disabled="loading" @click="auditAll">继续检查</button></div>
-      <div class="overview" aria-label="检查结果概览"><article><strong>{{ summary.actionable || 0 }}</strong><span>可以处理</span></article><article><strong>{{ summary.needs_attention || 0 }}</strong><span>需要你查看</span></article><article><strong>{{ summary.pending || 0 }}</strong><span>尚未检查</span></article></div>
+      <div class="overview" aria-label="检查结果概览"><article><strong>{{ summary.actionable || 0 }}</strong><span>可以处理</span></article><article><strong>{{ summary.ready_for_preview || 0 }}</strong><span>等待模拟</span></article><article><strong>{{ summary.needs_attention || 0 }}</strong><span>需要你查看</span></article><article><strong>{{ summary.pending || 0 }}</strong><span>尚未检查</span></article></div>
       <div v-if="!cards.length" class="empty"><h3>目前没有需要处理的记录</h3><p>已检查的历史异常没有发现需要你继续处理的问题。</p></div>
       <div v-else class="issues"><article v-for="card in cards" :key="card.history_id" class="issue-card"><div class="issue-copy"><span class="issue-type">{{ guideFor(card).label }}</span><h3>{{ titleFor(card) }}</h3><p>{{ guideFor(card).detail }}</p></div><button class="primary" @click="openIssue(card)">查看结论</button></article></div>
     </section>
-    <div v-if="selected" class="modal-backdrop" @click.self="closeIssue"><section class="modal" role="dialog" aria-modal="true" aria-label="整理检查结论"><header class="modal-header"><div><span class="modal-label">检查结论</span><h2>{{ titleFor(selected) }}</h2></div><button class="icon-button" aria-label="关闭" @click="closeIssue">×</button></header><section class="modal-section"><h3>{{ latestCheck(selected).title }}</h3><p>{{ latestCheck(selected).detail }}</p></section><section v-if="selected.status === 'ready_to_plan'" class="modal-section"><h3>下一步</h3><p>先生成一份即时处理方案。它仍然不会改文件；只有你在下一步确认后才会创建硬链接。</p><button v-if="!planFor(selected)" class="primary wide" :disabled="loading" @click="preparePlan(selected)">{{ loading ? '正在准备方案…' : '生成处理方案（不改文件）' }}</button><button v-else class="primary wide" :disabled="loading" @click="requestRepair(planFor(selected))">确认创建硬链接</button></section><details v-if="selected.status !== 'ready_to_plan'" class="manual-guide"><summary>仍无法处理？查看人工步骤</summary><ol><li>在 MoviePilot 的搜索页确认作品、年份和类型。</li><li>在整理或历史记录中确认它是否已经入库；已入库就不需要处理。</li><li>确认仍未入库后，修正可识别的名称，再重新执行“一键检查全部”。</li></ol></details></section></div>
+    <div v-if="selected" class="modal-backdrop" @click.self="closeIssue"><section class="modal" role="dialog" aria-modal="true" aria-label="整理检查结论"><header class="modal-header"><div><span class="modal-label">检查结论</span><h2>{{ titleFor(selected) }}</h2></div><button class="icon-button" aria-label="关闭" @click="closeIssue">×</button></header><section class="modal-section"><h3>{{ latestCheck(selected).title }}</h3><p>{{ latestCheck(selected).detail }}</p></section><section v-if="selected.status === 'needs_preview' || selected.status === 'ready_to_plan'" class="modal-section"><h3>下一步</h3><p>先生成一份即时处理方案。它仍然不会改文件；只有你在下一步确认后才会创建硬链接。</p><button v-if="!planFor(selected)" class="primary wide" :disabled="loading" @click="preparePlan(selected)">{{ loading ? '正在准备方案…' : '生成处理方案（不改文件）' }}</button><button v-else class="primary wide" :disabled="loading" @click="requestRepair(planFor(selected))">确认创建硬链接</button></section><details v-if="selected.status !== 'needs_preview' && selected.status !== 'ready_to_plan'" class="manual-guide"><summary>仍无法处理？查看人工步骤</summary><ol><li>在 MoviePilot 的搜索页确认作品、年份和类型。</li><li>在整理或历史记录中确认它是否已经入库；已入库就不需要处理。</li><li>确认仍未入库后，修正可识别的名称，再重新执行“一键检查全部”。</li></ol></details></section></div>
     <div v-if="pendingRepair" class="modal-backdrop" @click.self="pendingRepair = null"><section class="modal confirm" role="dialog" aria-modal="true" aria-label="确认创建硬链接"><h2>确认创建硬链接？</h2><p>系统只会为这一个已检查通过的项目创建硬链接。</p><ul><li>不会删除、移动、改名或覆盖原文件</li><li>不会修改下载器、代理或既有整理规则</li><li>完成后会回到此页面显示结果</li></ul><div class="actions"><button class="secondary" :disabled="loading" @click="pendingRepair = null">返回</button><button class="primary" :disabled="loading" @click="repair">确认创建</button></div></section></div>
   </main>
 </template>
