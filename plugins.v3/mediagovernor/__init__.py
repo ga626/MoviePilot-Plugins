@@ -13,7 +13,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "恢复失败整理的作品身份，展示官方预览，并在确认后由 MoviePilot 建立正确硬链接。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -35,7 +35,7 @@ class MediaGovernor(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> tuple[str, str]:
-        return "vue", "dist/v1.0.0/assets"
+        return "vue", "dist/v1.0.1/assets"
 
     def get_sidebar_nav(self) -> list[dict[str, Any]]:
         return []
@@ -46,6 +46,10 @@ class MediaGovernor(_PluginBase):
 
     def get_service(self) -> list[dict[str, Any]]:
         return []
+
+    def stop_service(self) -> None:
+        """满足宿主生命周期合同；本插件不创建后台服务或外部资源。"""
+        return None
 
     def get_form(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         return [], {"enabled": False}
