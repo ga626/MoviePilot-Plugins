@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import re
 import time
 from typing import Any, Callable, Mapping
 
@@ -35,6 +36,67 @@ def _digest(parts: Mapping[str, Any]) -> str:
 
 def _now() -> int:
     return int(time.time())
+
+
+_VIDEO_SUFFIXES = {".mkv", ".mp4", ".avi", ".m2ts", ".ts", ".wmv", ".mov", ".webm"}
+_SUBTITLE_SUFFIXES = {".ass", ".ssa", ".srt", ".sub", ".vtt"}
+_EPISODE_PATTERN = re.compile(r"(?:^|[. _\-\[])(?:s\d{1,2}[ ._\-]?)?e(?:p)?(\d{1,3})(?:$|[. _\-\]])", re.IGNORECASE)
+
+
+def build_file_summary(source_names: list[str], target_names: list[str], *, source_exists: bool, target_exists: bool) -> dict[str, Any]:
+    """将宿主临时列举出的名称压缩为无路径的作品包证据。
+
+    只保存视频/字幕数量和可解析集号；原始名称、路径及列表不会进入插件状态。
+    """
+    def summarise(names: list[str]) -> tuple[int, int, list[int]]:
+        videos = subtitles = 0
+        episodes: set[int] = set()
+        for name in names:
+            suffix = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            suffix = f".{suffix}" if suffix else ""
+            if suffix in _VIDEO_SUFFIXES:
+                videos += 1
+                match = _EPISODE_PATTERN.search(name)
+                if match:
+                    episodes.add(int(match.group(1)))
+            elif suffix in _SUBTITLE_SUFFIXES:
+                subtitles += 1
+        return videos, subtitles, sorted(episodes)
+
+    source_video_count, source_subtitle_count, source_episodes = summarise(source_names)
+    target_video_count, target_subtitle_count, target_episodes = summarise(target_names)
+    return {
+        "source_exists": source_exists,
+        "target_exists": target_exists,
+        "source_video_count": source_video_count,
+        "target_video_count": target_video_count,
+        "source_subtitle_count": source_subtitle_count,
+        "target_subtitle_count": target_subtitle_count,
+        "source_episodes": source_episodes,
+        "target_episodes": target_episodes,
+    }
+
+
+def classify_file_summary(summary: Mapping[str, Any]) -> tuple[str, str] | None:
+    """只在源/目标文件事实足够时报告缺失，未知绝不猜测。"""
+    # 成功的「移动」整理会正常地让下载源消失。仅凭源不在，不能把它
+    # 误报成媒体库问题；失败记录的源不可读由 ``record`` 单独安全降级。
+    if not bool(summary.get("source_exists")):
+        return None
+    if not bool(summary.get("target_exists")):
+        return "target_missing", "原始文件仍在，但当前目标入口不存在"
+    source_count = int(summary.get("source_video_count") or 0)
+    target_count = int(summary.get("target_video_count") or 0)
+    if source_count and target_count < source_count:
+        return "file_set_incomplete", f"源包检测到 {source_count} 个视频，目标仅检测到 {target_count} 个"
+    source_episodes = set(summary.get("source_episodes") or [])
+    target_episodes = set(summary.get("target_episodes") or [])
+    missing_episodes = sorted(source_episodes - target_episodes)
+    if missing_episodes:
+        rendered = "、".join(f"E{episode:02d}" for episode in missing_episodes[:12])
+        suffix = " 等" if len(missing_episodes) > 12 else ""
+        return "episode_set_incomplete", f"目标缺少源包中已识别的剧集：{rendered}{suffix}"
+    return None
 
 
 @dataclass(frozen=True)
@@ -77,6 +139,7 @@ class EventObservation:
             transfer_mode=_text(
                 _value(payload, "transfer_mode")
                 or _value(payload, "transfer_type")
+                or _value(history, "mode")
                 or _value(history, "transfer_mode")
                 or _value(history, "transfer_type")
             ),
@@ -174,10 +237,9 @@ class GovernanceQueue:
             package["status"] = "needs_selection"
             return
         mode = self._normalise_mode(observation.transfer_mode)
-        if mode and mode != "link":
-            package["status"] = "needs_attention"
-            self._add_reason(package, "unexpected_transfer_mode")
-            return
+        # ``copy`` 或 ``move`` 是当时的历史方式，不是现在文件损坏、目录
+        # 错误或硬链接缺失的证据。没有实际文件核对之前，绝不能把它升级为
+        # 用户需要处理的影片问题。
         missing: list[str] = []
         if not self._identity_complete(observation):
             missing.append("media_identity")
@@ -300,7 +362,15 @@ class GovernanceQueue:
     def allows_preview(self, history_id: int) -> bool:
         return any(history_id in package.get("failed_history_ids", []) for package in self._packages.values())
 
-    def record_preview(self, history_id: int, result: Mapping[str, Any], now: int | None = None) -> dict[str, Any] | None:
+    def record_preview(
+        self,
+        history_id: int,
+        result: Mapping[str, Any],
+        *,
+        target_label: str | None = None,
+        target_fingerprint: str | None = None,
+        now: int | None = None,
+    ) -> dict[str, Any] | None:
         """登记一份有时效、可审计、零写入的补救计划。"""
         if not self.allows_preview(history_id) or not bool(result.get("ok")):
             return None
@@ -326,6 +396,8 @@ class GovernanceQueue:
             "expires_at": issued_at + self._PLAN_TTL_SECONDS,
             "receipt_version": package["receipt_version"],
             "detail": str(result.get("detail") or "preview_ready"),
+            "target_label": _text(target_label, 120),
+            "target_fingerprint": _text(target_fingerprint, 80),
         }
         self._plans[plan_id] = plan
         return dict(plan)
@@ -391,7 +463,9 @@ class GovernanceQueue:
 class BatchAudit:
     """可恢复的逐条检查状态；只保存中文结论，不保存路径或原始文件名。"""
 
-    _SCHEMA = "mediagovernor-batch-audit/v3"
+    # v0.7.4 将不存在的 ``transfer_mode`` 字段误当成真实历史字段，产生的
+    # v3 结论不可信。升级时有意不迁移，必须以正确字段重新检查。
+    _SCHEMA = "mediagovernor-batch-audit/v4"
     _LEGACY_SCHEMAS = {"mediagovernor-batch-audit/v2"}
     _PENDING = "pending"
     _CHECKING = "checking"
@@ -580,27 +654,34 @@ class BatchAudit:
         transfer_mode: str | None,
         *,
         source_available: bool = True,
+        file_summary: Mapping[str, Any] | None = None,
         checked_at: int | None = None,
     ) -> dict[str, Any]:
-        """记录成功整理后的有限结论，不把历史字段误报成文件实况。"""
+        """记录成功整理的实际可读证据；历史字段不足时不制造影片故障。"""
         fields = self._identity(identity)
         mode = _text(transfer_mode, 32)
         normalised = mode.lower() if mode else None
-        if not source_available:
-            status, detail = "source_unavailable", "该历史记录已不可用于检查"
+        evidence = dict(file_summary or {})
+        factual = classify_file_summary(evidence) if evidence else None
+        if factual is not None:
+            status, detail = factual
+        elif not source_available:
+            status, detail = "source_unavailable", "该历史记录在检查时已不可读取"
         elif not self._is_reliable(fields):
-            status, detail = "identity_unresolved", "成功记录没有可靠作品身份，无法确认归类是否正确"
+            status, detail = "historical_data_incomplete", "历史记录缺少可靠作品身份；这不是影片异常，无法仅凭历史资料核验"
         elif not normalised:
-            status, detail = "transfer_mode_unknown", "历史记录未保存整理方式，无法确认是否符合硬链接策略"
+            status, detail = "historical_data_incomplete", "历史记录没有保存整理方式；这不是影片异常，无法仅凭历史资料核验"
         elif normalised not in {"link", "hardlink", "hard_link"}:
-            status, detail = "transfer_mode_mismatch", f"历史记录显示为“{mode}”；这与当前硬链接策略不一致，但尚未逐个验证实际文件"
+            status, detail = "historical_method_note", f"历史记录显示当时使用“{mode}”；这不是当前文件异常，也不能据此判断硬链接是否存在"
         else:
             status, detail = "verified", "已确认作品身份和硬链接整理方式"
         category = {
             "source_unavailable": "历史记录不可用",
-            "identity_unresolved": "作品身份无法确认",
-            "transfer_mode_unknown": "整理方式未记录",
-            "transfer_mode_mismatch": "整理方式与硬链接策略不一致",
+            "target_missing": "目标入口缺失",
+            "file_set_incomplete": "文件未完整整理",
+            "episode_set_incomplete": "剧集未完整整理",
+            "historical_data_incomplete": "历史资料不完整",
+            "historical_method_note": "历史整理方式说明",
             "verified": "已核对",
         }[status]
         record = {
@@ -610,6 +691,7 @@ class BatchAudit:
             "category": category,
             "transfer_mode": mode,
             "checked_at": _now() if checked_at is None else checked_at,
+            "file_summary": evidence or None,
             **fields,
         }
         self._records[str(history_id)] = record
@@ -649,10 +731,10 @@ class BatchAudit:
             "scope_changed": scope_changed,
             "actionable": sum(record.get("status") == "ready_to_plan" for record in records),
             "ready_for_preview": sum(record.get("status") == "needs_preview" for record in records),
-            "needs_attention": sum(record.get("status") in {"identity_unresolved", "preview_rejected", "source_unavailable", "transfer_mode_unknown", "transfer_mode_mismatch"} for record in records),
+            "needs_attention": sum(record.get("status") in {"identity_unresolved", "preview_rejected", "source_unavailable", "target_missing", "file_set_incomplete", "episode_set_incomplete"} for record in records),
             "unresolved": sum(record.get("status") == "identity_unresolved" for record in records),
             "blocked": sum(record.get("status") in {"preview_rejected", "source_unavailable"} for record in records),
-            "strategy_review": sum(record.get("status") in {"transfer_mode_unknown", "transfer_mode_mismatch"} for record in records),
+            "history_info": sum(record.get("status") in {"historical_data_incomplete", "historical_method_note"} for record in records),
             "current_history_id": self._run.get("current_history_id"),
         }
 
@@ -661,7 +743,7 @@ class BatchAudit:
         allowed = {str(history_id) for history_id in history_ids}
         visible_statuses = {
             "preview_rejected", "ready_to_plan", "needs_preview", "source_unavailable",
-            "transfer_mode_unknown", "transfer_mode_mismatch",
+            "target_missing", "file_set_incomplete", "episode_set_incomplete",
         }
         groups: dict[str, list[dict[str, Any]]] = {}
         for key, stored in self._records.items():
@@ -706,12 +788,13 @@ class BatchAudit:
                 "record_count": len(members),
                 "history_ids": sorted(int(member["history_id"]) for member in members if isinstance(member.get("history_id"), int)),
                 "findings": findings,
-                "repairable_count": sum(member.get("status") in {"needs_preview", "ready_to_plan"} for member in members),
+                "repairable_count": sum(member.get("status") in {"needs_preview", "ready_to_plan", "target_missing", "file_set_incomplete", "episode_set_incomplete"} for member in members),
                 "repairable_history_ids": sorted(
                     int(member["history_id"])
                     for member in members
-                    if member.get("status") in {"needs_preview", "ready_to_plan"} and isinstance(member.get("history_id"), int)
+                    if member.get("status") in {"needs_preview", "ready_to_plan", "target_missing", "file_set_incomplete", "episode_set_incomplete"} and isinstance(member.get("history_id"), int)
                 ),
+                "file_summary": first.get("file_summary"),
                 "last_checked_at": max(int(member.get("checked_at") or 0) for member in members),
             })
         return sorted(result, key=lambda item: int(item.get("last_checked_at") or 0), reverse=True)
@@ -726,7 +809,11 @@ class NativePreviewGateway:
     def __init__(self, chain_factory: Callable[[], Any]) -> None:
         self._chain_factory = chain_factory
 
-    def preview(self, fileitem: Any) -> dict[str, str | bool]:
+    def preview(self, fileitem: Any, *, target_storage: str | None = None, target_path: str | None = None) -> dict[str, str | bool]:
+        target_kwargs: dict[str, Any] = {}
+        if target_storage and target_path:
+            from pathlib import Path
+            target_kwargs = {"target_storage": target_storage, "target_path": Path(target_path)}
         state, _result = self._chain_factory().manual_transfer(
             fileitem=fileitem,
             transfer_type="link",
@@ -736,11 +823,16 @@ class NativePreviewGateway:
             scrape=False,
             reorganize=False,
             sync_extra_files=False,
+            **target_kwargs,
         )
         return {"mode": "preview", "transfer_type": "link", "ok": bool(state), "detail": "preview_ready" if state else "preview_rejected"}
 
-    def repair(self, fileitem: Any) -> dict[str, str | bool]:
+    def repair(self, fileitem: Any, *, target_storage: str | None = None, target_path: str | None = None) -> dict[str, str | bool]:
         """只允许用户确认后的单计划硬链接修复，绝不删除、覆盖或重整。"""
+        target_kwargs: dict[str, Any] = {}
+        if target_storage and target_path:
+            from pathlib import Path
+            target_kwargs = {"target_storage": target_storage, "target_path": Path(target_path)}
         state, _result = self._chain_factory().manual_transfer(
             fileitem=fileitem,
             transfer_type="link",
@@ -750,5 +842,6 @@ class NativePreviewGateway:
             scrape=False,
             reorganize=False,
             sync_extra_files=False,
+            **target_kwargs,
         )
         return {"mode": "repair", "transfer_type": "link", "ok": bool(state), "detail": "repair_completed" if state else "repair_failed"}
