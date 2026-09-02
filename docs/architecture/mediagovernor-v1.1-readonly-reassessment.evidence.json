@@ -1,0 +1,87 @@
+{
+  "schema": "knowledgeradar-research-evidence/v1",
+  "artifact": {
+    "report_path": "docs/architecture/mediagovernor-v1.1-readonly-reassessment.md",
+    "task_prompt_hash": "sha256:mediagovernor-v1.1-readonly-reassessment",
+    "created_at": "2026-09-03T00:00:00+08:00"
+  },
+  "budget": {
+    "selected_profile": "deep",
+    "selected_by": "user_request",
+    "reason": "对已安装插件、宿主公开接口与成熟识别插件做多面只读复盘。",
+    "remaining_repair_rounds": 1
+  },
+  "tool_calls": [
+    {"id": "T001", "tool": "mcp__knowledgeradar__health_check", "args_summary": {"mode": "summary"}, "status": "ok"},
+    {"id": "T002", "tool": "mcp__knowledgeradar__get_capabilities", "args_summary": {"summary": true}, "status": "ok"},
+    {"id": "T003", "tool": "mcp__knowledgeradar__kr_research", "args_summary": {"mode": "deep_route", "budget": "deep"}, "status": "ok", "receipt_id": "kr-research-318e9fdc88ce4433"},
+    {"id": "T004", "tool": "existing_MoviePilot_UI_readonly", "args_summary": {"surface": "installed MediaGovernor result page and existing Docker log window"}, "status": "ok"},
+    {"id": "T005", "tool": "local_source_read", "args_summary": {"surfaces": ["MediaGovernor", "MoviePilot V3", "AIRecognizerEnhancer"]}, "status": "ok"},
+    {"id": "T006", "tool": "mcp__knowledgeradar__kr_web_search", "args_summary": {"topic": "MoviePilot V3 public contracts"}, "status": "ok", "receipt_id": "receipt-87d7c9a744315934"},
+    {"id": "T007", "tool": "mcp__knowledgeradar__extract_web_page", "args_summary": {"sources": ["MoviePilot README V3", "AIRecognizerEnhancer README", "TMDB search documentation"]}, "status": "ok", "receipt_ids": ["receipt-b1eaf0ab56bd4698", "receipt-b01171450198d110", "receipt-b42a99a934fd094b"]}
+  ],
+  "evidence_items": [
+    {"id": "E001", "type": "runtime_probe", "title": "已安装页面的 47 条问题卡", "summary": "现页仅显示一个已识别作品卡；多数卡为无可靠身份，且页面无运行进度。", "strength": "strong"},
+    {"id": "E002", "type": "local_code", "title": "MediaGovernor 当前检查实现", "local_path": "plugins.v3/mediagovernor/src/components/AppPage.vue", "summary": "逐条串行识别；整包只计数；搜索仅取来源名称的三条候选；执行固定 reorganize=false。", "strength": "strong"},
+    {"id": "E003", "type": "local_code", "title": "MoviePilot V3 公开媒体和整理合同", "local_path": "docs/mcp-api.md", "summary": "默认影视识别只用 TMDB；公开提供来源、搜索、识别、历史、目标路径、预览和重整接口。", "strength": "strong"},
+    {"id": "E004", "type": "local_code", "title": "MoviePilot 手动整理数据模型", "local_path": "app/schemas/transfer.py", "summary": "公开请求支持 logid、preview、reorganize 与逐文件预览结果。", "strength": "strong"},
+    {"id": "E005", "type": "local_code", "title": "AI识别增强实现与公开说明", "local_path": "plugins/airecognizerenhancer/README.md", "summary": "AI插件是单标题/路径的结构化识别兜底和失败样本治理，不读取视频内容。", "strength": "strong"},
+    {"id": "E006", "type": "web", "source_ecology": "github_repository_ecology", "title": "MoviePilot V3 README", "url": "https://github.com/jxxghp/MoviePilot/blob/v3/README_EN.md", "summary": "确认 V3 官方仓、Docker 形态和对外文档入口。", "strength": "contextual", "receipt_id": "receipt-b1eaf0ab56bd4698"},
+    {"id": "E007", "type": "web", "source_ecology": "github_repository_ecology", "title": "AI识别增强公开 README", "url": "https://github.com/liuyuexi1987/MoviePilot-Plugins/blob/main/plugins/airecognizerenhancer/README.md", "summary": "确认其监听 NameRecognize、回写结构化字段和失败样本治理定位。", "strength": "strong", "receipt_id": "receipt-b01171450198d110"},
+    {"id": "E008", "type": "web", "source_ecology": "generic_web_ecology", "title": "TMDB Search & Query For Details", "url": "https://developer.themoviedb.org/docs/search-and-query-for-details", "summary": "检索结果不是最终身份；应以候选 ID 查询详情再核验。", "strength": "strong", "receipt_id": "receipt-b42a99a934fd094b"}
+  ],
+  "claims": [
+    {"id": "C001", "text": "当前高失败率主要来自单路径、串行、未使用整包证据的设计，不是对文件不可识别的逐条证明。", "importance": "critical", "supporting_evidence_ids": ["E001", "E002", "E003"]},
+    {"id": "C002", "text": "当前插件不具备审计旧硬链接并安全重整的完整产品流程。", "importance": "critical", "supporting_evidence_ids": ["E002", "E003", "E004"]},
+    {"id": "C003", "text": "AI识别增强可作为受限标题识别适配器，但不能替代包级证据核验或获得自动写盘权。", "importance": "high", "supporting_evidence_ids": ["E005", "E007", "E008"]}
+  ],
+  "coverage": {
+    "required_surfaces": ["runtime_probe", "local_code", "upstream_code", "external_web"],
+    "covered_surfaces": ["runtime_probe", "local_code", "upstream_code", "external_web"],
+    "missing_surfaces": [],
+    "skipped_surfaces": [
+      {"surface": "media_detail", "reason": "未读取真实媒体内容、字幕正文或私有文件；本次只读调研不扩大到媒体数据。"},
+      {"surface": "live_write_validation", "reason": "用户要求报告而非实现；不执行预览以外的整理或硬链接写入。"}
+    ]
+  },
+  "questioner_checkpoints": [
+    {"stage": "after_local_archaeology", "questions": ["当前页面是否真的读取了整包证据？", "当前执行是否已具备重整旧硬链接能力？"], "decision": "继续深研并把两个功能拆开", "reason": "页面和源码均显示整包只计数、reorganize 固定为 false。"},
+    {"stage": "after_first_external_round", "questions": ["官方公开接口是否足够完成候选核验和预览？", "AI插件是否可直接替代整包识别？"], "decision": "采用公开接口并将 AI 限为可选适配器", "reason": "官方公开历史/预览/重整合同存在；AI插件只处理单标题/路径。"},
+    {"stage": "before_final_report", "questions": ["能否逐条解释 46 个失败包？", "是否应现在改代码或写媒体？"], "decision": "报告明确未知分桶，并停止在设计", "reason": "当前未采集每包证据，且用户本轮只要求调研和报告。"}
+  ],
+  "known_issues": {
+    "schema": "knowledgeradar-known-issues/v1",
+    "issues": [
+      {"id": "KI-001", "description": "46 个未识别来源包尚无逐包证据分类。", "discovered_at": "2026-09-03", "status": "未解决", "next_action": "在 P0 只读分桶后按资料不足、来源不可用、冲突和可确认分类。"},
+      {"id": "KI-002", "description": "当前插件无旧硬链接审计和受控重整流程。", "discovered_at": "2026-09-03", "status": "未解决", "next_action": "P2 仅接入官方预览与重整，禁止插件自行删除。"}
+    ]
+  },
+  "decision_register": {
+    "schema": "knowledgeradar-decision-register/v1",
+    "decisions": [
+      {"id": "D-001", "title": "v1.1 产品边界", "status": "pending_user_decision", "options": ["继续在单点名称搜索上微调", "重做为找对作品与整理正确两个工作台"], "recommended_action": "采用两个工作台和包级证据核验。", "decision_record_location": "docs/architecture/mediagovernor-v1.1-readonly-reassessment.md#先说结论", "next_review": "用户批准实施前"},
+      {"id": "D-002", "title": "AI 使用边界", "status": "pending_user_decision", "options": ["AI 自动选择并直接整理", "AI 只做受限候选仲裁并由官方预览确认"], "recommended_action": "采用受限仲裁，不授予 AI 写盘权。", "decision_record_location": "docs/architecture/mediagovernor-v1.1-readonly-reassessment.md#a-找对作品工作台只读直到用户确认", "next_review": "P1 设计冻结前"}
+    ]
+  },
+  "process_quality": {
+    "schema": "knowledgeradar-process-quality/v1",
+    "code_modified": false,
+    "preflight_skip_reason": "本轮是既有代码和运行页面的只读复盘；没有代码候选、PR 或实现动作。",
+    "capability_handshake": {"health_check": "ok", "get_capabilities": "ok"},
+    "local_archaeology": {"performed": true, "surfaces": ["installed UI", "MediaGovernor", "MoviePilot V3 public source", "AIRecognizerEnhancer"]},
+    "source_ecology_plan": {"considered": ["github_repository_ecology", "generic_web_ecology", "wechat_public_article_ecology", "bilibili_video_ecology", "youtube_video_ecology", "zhihu_discussion_ecology", "xiaohongshu_experience_ecology", "academic_literature_ecology"], "selected": ["github_repository_ecology", "generic_web_ecology"], "skipped": [{"source_ecology": "wechat_public_article_ecology", "reason": "公开文章无法证明本机插件或官方接口合同。"}, {"source_ecology": "bilibili_video_ecology", "reason": "演示视频无法证明当前已安装插件实际行为或安全写入合同。"}, {"source_ecology": "youtube_video_ecology", "reason": "演示视频无法证明当前已安装插件实际行为或安全写入合同。"}, {"source_ecology": "zhihu_discussion_ecology", "reason": "讨论帖无法证明本机插件或官方接口合同。"}, {"source_ecology": "xiaohongshu_experience_ecology", "reason": "用户体验帖无法证明本机插件或官方接口合同。"}, {"source_ecology": "academic_literature_ecology", "reason": "本轮是具体宿主合同与插件行为问题，不需要学术资料证明。"}]},
+    "validation_ladder": {"selected_profile": "deep", "commands": ["JSON parse", "research quality checker"], "results": "待本次结构修复后复跑"},
+    "presentation": {"report": "中文 Markdown", "audience": "产品决策和后续实现"}
+  },
+  "claim_evidence_chains": [
+    {"claim_id": "C001", "tool_call_ids": ["T004", "T005"], "evidence_ids": ["E001", "E002", "E003"], "sources": ["installed UI", "MediaGovernor AppPage", "MoviePilot V3 docs"], "extracted_facts": ["页面无进度", "检查串行", "默认影视单来源"], "inference": "高失败率是当前单路径设计的结构性后果。", "limitations": "未读取每个真实包的文件清单。", "strength": "strong"},
+    {"claim_id": "C002", "tool_call_ids": ["T005"], "evidence_ids": ["E002", "E003", "E004"], "sources": ["MediaGovernor AppPage", "MoviePilot transfer contracts"], "extracted_facts": ["reorganize=false", "未查历史/目标路径", "官方支持预览和重整"], "inference": "当前产品没有整理正确闭环，但公开合同可承载该闭环。", "limitations": "真实执行须在单独候选和用户确认后验收。", "strength": "strong"},
+    {"claim_id": "C003", "tool_call_ids": ["T005", "T007"], "evidence_ids": ["E005", "E007", "E008"], "sources": ["AI plugin source", "AI plugin README", "TMDB docs"], "extracted_facts": ["AI 输入是标题/路径", "AI 输出需再匹配", "检索结果需要详情核验"], "inference": "AI 只能帮助缩小候选，不能单独授权整理。", "limitations": "没有对用户 LLM 实际额度或质量做调用。", "strength": "strong"}
+  ],
+  "roadmap": [
+    {"phase": "P0", "task": "实现可见进度和只读分桶", "method": "小并发、可暂停、按包增量渲染", "input": "47 条历史", "output": "可暂停的只读分桶与进度", "dependency": "公开历史/识别/存储接口", "acceptance": "逐包解释且零写入"},
+    {"phase": "P1", "task": "实现找对作品工作台", "method": "包级证据、多来源候选和详情交叉核验", "input": "包级证据和候选", "output": "找对作品工作台", "dependency": "公开来源/搜索/详情接口", "acceptance": "冲突候选不能自动预览"},
+    {"phase": "P2", "task": "实现整理正确工作台", "method": "历史/目标路径/逐文件预览/官方重整", "input": "确认身份和历史", "output": "整理正确工作台", "dependency": "公开历史/目标/预览/重整接口", "acceptance": "只通过官方预演和确认执行"},
+    {"phase": "P3", "task": "候选验收与发布", "method": "冻结同一 ZIP 并在获批准的 NAS 包上验收", "input": "冻结候选和验收清单", "output": "Release 与回执", "dependency": "P0-P2 通过", "acceptance": "候选与 Release SHA 一致"}
+  ]
+}
