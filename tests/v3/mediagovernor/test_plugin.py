@@ -33,13 +33,14 @@ def _payload(history_id: int, event_key: str, *, mode: str | None = "link", titl
 def test_v3_manifest_version_and_frontend_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
-    assert manifest["version"] == "0.8.0"
+    assert manifest["version"] == "0.8.1"
     assert manifest["release"] is True
-    assert 'plugin_version = "0.8.0"' in source
-    assert 'return "vue", "dist/assets"' in source
+    assert 'plugin_version = "0.8.1"' in source
+    assert 'return "vue", "dist/v0.8.1/assets"' in source
     assert "def get_sidebar_nav" in source
     assert 'return []' in source
-    assert (ROOT / "plugins.v3/mediagovernor/dist/assets/remoteEntry.js").is_file()
+    assets = ROOT / "plugins.v3/mediagovernor/dist/v0.8.1/assets"
+    assert (assets / "remoteEntry.js").is_file()
     frontend = (ROOT / "plugins.v3/mediagovernor/src/components/AppPage.vue").read_text(encoding="utf-8")
     assert "再次检查全部" in frontend
     assert "检查范围已变化" in frontend
@@ -50,6 +51,11 @@ def test_v3_manifest_version_and_frontend_contract() -> None:
     assert '"path": "/audit/next"' in source
     assert '"path": "/audit/batch"' in source
     assert "audit/batch" in frontend
+    assert "discovery_state" in frontend
+    assert '"state": "paused" if is_paused else "running"' in source
+    assert '"discovery_state": "paused" if is_paused else "discovering"' in source
+    built_pages = list(assets.glob("__federation_expose_AppPage-*.js"))
+    assert len(built_pages) == 1 and "discovery_state" in built_pages[0].read_text(encoding="utf-8")
     assert "暂停检查" in frontend and "进度条" not in frontend
 
 
