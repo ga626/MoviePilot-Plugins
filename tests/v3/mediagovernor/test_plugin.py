@@ -33,9 +33,9 @@ def _payload(history_id: int, event_key: str, *, mode: str | None = "link", titl
 def test_v3_manifest_version_and_frontend_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
-    assert manifest["version"] == "0.7.4"
+    assert manifest["version"] == "0.8.0"
     assert manifest["release"] is True
-    assert 'plugin_version = "0.7.4"' in source
+    assert 'plugin_version = "0.8.0"' in source
     assert 'return "vue", "dist/assets"' in source
     assert "def get_sidebar_nav" in source
     assert 'return []' in source
@@ -48,13 +48,15 @@ def test_v3_manifest_version_and_frontend_contract() -> None:
     assert '"path": "/audit"' in source
     assert '"path": "/audit/resume"' in source
     assert '"path": "/audit/next"' in source
+    assert '"path": "/audit/batch"' in source
+    assert "audit/batch" in frontend
     assert "暂停检查" in frontend and "进度条" not in frontend
 
 
 def test_batch_audit_hides_unchecked_records_and_keeps_only_safe_identity() -> None:
     governor = _governor_module()
     audit = governor.BatchAudit()
-    assert audit.summary([21]) == {"state": "idle", "total": 1, "checked": 0, "pending": 1, "run_total": 0, "run_checked": 0, "scope_changed": False, "actionable": 0, "ready_for_preview": 0, "needs_attention": 0, "unresolved": 0, "blocked": 0, "strategy_review": 0, "current_history_id": None}
+    assert audit.summary([21]) == {"state": "idle", "total": 1, "checked": 0, "pending": 1, "run_total": 0, "run_checked": 0, "scope_changed": False, "actionable": 0, "ready_for_preview": 0, "needs_attention": 0, "unresolved": 0, "blocked": 0, "history_info": 0, "current_history_id": None}
     assert audit.public_items([21]) == []
     record = audit.record(21, {"title": "示例作品", "year": "2026", "media_source": "tmdb", "media_id": "42", "media_type": "电视剧"}, {"ok": True}, checked_at=100)
     assert record["status"] == "ready_to_plan"
@@ -137,10 +139,11 @@ def test_failed_history_identity_is_reused_and_slow_work_is_limited_to_a_single_
         "title": "测试作品", "year": "2026", "media_source": "tmdb", "media_id": "42", "media_type": "电视剧",
     }
     source = SOURCE.read_text(encoding="utf-8")
-    start_source = source[source.index("def audit_all"):source.index("def audit_next")]
-    next_source = source[source.index("def audit_next"):source.index("def pause_audit")]
+    start_source = source[source.index("def audit_all"):source.index("def resume_audit")]
+    next_source = source[source.index("def _audit_one"):source.index("def _audit_some")]
     assert "MediaChain" not in start_source and "preview_hardlink" not in start_source
     assert "MediaChain" in next_source and "preview_hardlink" in next_source
+    assert "def audit_batch" in source
 
 
 def test_batch_audit_only_exposes_unresolved_after_real_check() -> None:
@@ -163,19 +166,21 @@ def test_complete_event_is_verified_only_with_identity_and_link_mode() -> None:
     assert item["reason_codes"] == []
 
 
-def test_successful_history_is_not_exempt_from_quality_check() -> None:
+def test_successful_history_uses_history_mode_without_creating_a_false_problem_card() -> None:
     governor = _governor_module()
     queue = governor.GovernanceQueue()
-    complete = governor.EventObservation.from_contract("complete", _payload(7, "success", mode="copy"))
+    complete = governor.EventObservation.from_contract("complete", _payload(7, "success", mode="copy"), {"mode": "link"})
     assert complete and queue.observe(complete)
     context = queue.history_context(7)
     assert context and context["event_kind"] == "complete"
+    assert context["transfer_mode"] == "copy"
     audit = governor.BatchAudit()
     audit.start(queue.auditable_history_ids(), now=100)
     assert audit.claim_next() == 7
     result = audit.record_complete_quality(7, context["identity"], context["transfer_mode"], checked_at=101)
-    assert result["status"] == "transfer_mode_mismatch"
-    assert audit.public_items([7])[0]["title"] == "测试作品"
+    assert result["status"] == "historical_method_note"
+    assert audit.public_items([7]) == []
+    assert audit.summary([7])["history_info"] == 1
 
 
 def test_batch_audit_groups_multiple_history_records_by_media_identity() -> None:
@@ -186,10 +191,8 @@ def test_batch_audit_groups_multiple_history_records_by_media_identity() -> None
     audit.record_complete_quality(61, identity, "copy", checked_at=101)
     audit.record_complete_quality(62, identity, "copy", checked_at=102)
     cards = audit.public_items([61, 62])
-    assert len(cards) == 1
-    assert cards[0]["record_count"] == 2
-    assert cards[0]["repairable_history_ids"] == []
-    assert cards[0]["findings"] == [{"status": "transfer_mode_mismatch", "title": "整理方式与硬链接策略不一致", "detail": "历史记录显示为“copy”；这与当前硬链接策略不一致，但尚未逐个验证实际文件", "count": 2, "transfer_mode": "copy"}]
+    assert cards == []
+    assert audit.summary([61, 62])["history_info"] == 2
 
 
 def test_group_exposes_only_failed_records_as_repair_candidates() -> None:
@@ -200,10 +203,10 @@ def test_group_exposes_only_failed_records_as_repair_candidates() -> None:
     audit.record_complete_quality(72, identity, "copy", checked_at=101)
     cards = audit.public_items([71, 72])
     assert len(cards) == 1
-    assert cards[0]["repairable_history_ids"] == [71]
+    assert cards[0]["record_count"] == 1 and cards[0]["repairable_history_ids"] == [71]
 
 
-def test_unknown_or_non_link_result_becomes_explicit_problem_state() -> None:
+def test_unknown_or_non_link_history_is_information_not_an_explicit_problem_state() -> None:
     governor = _governor_module()
     queue = governor.GovernanceQueue()
     unknown = governor.EventObservation.from_contract("complete", _payload(2, "unknown", mode=None))
@@ -212,7 +215,60 @@ def test_unknown_or_non_link_result_becomes_explicit_problem_state() -> None:
     queue.observe(unknown); queue.observe(copied)
     states = {item["title"]: (item["status"], item["reason_codes"]) for item in queue.public_items()}
     assert states["测试作品"] == ("awaiting_host_information", ["missing_transfer_mode"])
-    assert states["另一作品"] == ("needs_attention", ["unexpected_transfer_mode"])
+    assert states["另一作品"] == ("verified", [])
+
+
+def test_history_mode_is_read_from_the_real_moviepilot_field() -> None:
+    governor = _governor_module()
+    observation = governor.EventObservation.from_contract(
+        "complete",
+        {"transfer_history_id": 88, "mediainfo": {"media_source": "tmdb", "media_id": "88", "type": "电影", "title": "字段测试"}},
+        {"mode": "link"},
+    )
+    assert observation and observation.transfer_mode == "link"
+
+
+def test_file_package_evidence_only_reports_a_real_source_target_difference() -> None:
+    governor = _governor_module()
+    summary = governor.build_file_summary(
+        ["Series.S01E01.mkv", "Series.S01E02.mkv", "Series.S01E01.ass"],
+        ["Series.S01E01.mkv", "Series.S01E01.ass"],
+        source_exists=True,
+        target_exists=True,
+    )
+    assert governor.classify_file_summary(summary) == ("file_set_incomplete", "源包检测到 2 个视频，目标仅检测到 1 个")
+    target_missing = governor.build_file_summary(["Film.mkv"], [], source_exists=True, target_exists=False)
+    assert governor.classify_file_summary(target_missing)[0] == "target_missing"
+    moved_source = governor.build_file_summary([], ["Film.mkv"], source_exists=False, target_exists=True)
+    assert governor.classify_file_summary(moved_source) is None
+
+
+def test_complete_history_card_uses_file_package_evidence_and_groups_by_work() -> None:
+    governor = _governor_module()
+    audit = governor.BatchAudit()
+    identity = {"title": "完整性测试", "media_source": "tmdb", "media_id": "99", "media_type": "电视剧"}
+    record = audit.record_complete_quality(
+        99,
+        identity,
+        "link",
+        file_summary={"source_exists": True, "target_exists": True, "source_video_count": 3, "target_video_count": 2, "source_subtitle_count": 0, "target_subtitle_count": 0, "source_episodes": [1, 2, 3], "target_episodes": [1, 2]},
+        checked_at=100,
+    )
+    assert record["status"] == "file_set_incomplete"
+    card = audit.public_items([99])[0]
+    assert card["title"] == "完整性测试" and card["repairable_history_ids"] == [99]
+    assert card["file_summary"]["source_video_count"] == 3
+
+
+def test_v074_records_are_discarded_and_must_be_checked_again() -> None:
+    governor = _governor_module()
+    restored = governor.BatchAudit.from_data({
+        "schema": "mediagovernor-batch-audit/v3",
+        "records": {"91": {"history_id": 91, "status": "transfer_mode_unknown"}},
+        "run": {"state": "complete", "history_ids": [91]},
+    })
+    assert restored.summary([91])["checked"] == 0
+    assert restored.public_items([91]) == []
 
 
 def test_failed_history_can_generate_an_expiring_zero_write_plan() -> None:
@@ -224,8 +280,26 @@ def test_failed_history_can_generate_an_expiring_zero_write_plan() -> None:
     assert plan and plan["mode"] == "preview" and plan["transfer_type"] == "link"
     assert queue.public_plan(plan["plan_id"], now=999)["status"] == "ready"
     assert queue.public_plan(plan["plan_id"], now=1000)["status"] == "expired"
+
+
+def test_preview_plan_only_persists_a_target_fingerprint_not_a_target_path() -> None:
+    governor = _governor_module()
+    queue = governor.GovernanceQueue()
+    failed = governor.EventObservation.from_contract("failed", _payload(12, "target"))
+    assert failed and queue.observe(failed)
+    plan = queue.record_preview(12, {"ok": True}, target_label="动画", target_fingerprint="a" * 32, now=100)
+    assert plan and plan["target_label"] == "动画" and plan["target_fingerprint"] == "a" * 32
+    assert "target_path" not in plan and "target_storage" not in plan
     saved = json.dumps(queue.to_data(), ensure_ascii=False)
     assert "path" not in saved and "src_fileitem" not in saved
+
+
+def test_dynamic_target_contract_rejects_stale_or_unconfigured_target() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "def _target_is_currently_configured" in source
+    assert "target_not_currently_configured" in source
+    assert "DirectoryHelper().get_library_dirs()" in source
+    assert "def audit_batch(self, limit: int = 25)" in source
 
 
 def test_failed_history_records_a_path_free_preview_outcome_even_when_rejected() -> None:
