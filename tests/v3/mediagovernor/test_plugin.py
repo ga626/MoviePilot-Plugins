@@ -33,9 +33,9 @@ def _payload(history_id: int, event_key: str, *, mode: str | None = "link", titl
 def test_v3_manifest_version_and_frontend_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
-    assert manifest["version"] == "0.7.1"
+    assert manifest["version"] == "0.7.2"
     assert manifest["release"] is True
-    assert 'plugin_version = "0.7.1"' in source
+    assert 'plugin_version = "0.7.2"' in source
     assert 'return "vue", "dist/assets"' in source
     assert "def get_sidebar_nav" in source
     assert 'return []' in source
@@ -44,12 +44,14 @@ def test_v3_manifest_version_and_frontend_contract() -> None:
     assert "一键检查全部（不改文件）" in frontend
     assert "待确认影片" not in frontend
     assert '"path": "/audit"' in source
+    assert '"path": "/audit/next"' in source
+    assert "暂停检查" in frontend and "进度条" not in frontend
 
 
 def test_batch_audit_hides_unchecked_records_and_keeps_only_safe_identity() -> None:
     governor = _governor_module()
     audit = governor.BatchAudit()
-    assert audit.summary([21]) == {"state": "idle", "total": 1, "checked": 0, "pending": 1, "actionable": 0, "ready_for_preview": 0, "needs_attention": 0}
+    assert audit.summary([21]) == {"state": "idle", "total": 1, "checked": 0, "pending": 1, "actionable": 0, "ready_for_preview": 0, "needs_attention": 0, "unresolved": 0, "blocked": 0, "current_history_id": None}
     assert audit.public_items([21]) == []
     record = audit.record(21, {"title": "示例作品", "year": "2026", "media_source": "tmdb", "media_id": "42", "media_type": "电视剧"}, {"ok": True}, checked_at=100)
     assert record["status"] == "ready_to_plan"
@@ -57,6 +59,29 @@ def test_batch_audit_hides_unchecked_records_and_keeps_only_safe_identity() -> N
     assert audit.public_items([21])[0]["title"] == "示例作品"
     saved = json.dumps(audit.to_data(), ensure_ascii=False)
     assert "path" not in saved and "src_fileitem" not in saved
+
+
+def test_batch_audit_claims_one_item_at_a_time_and_recovers_an_interrupted_item() -> None:
+    governor = _governor_module()
+    audit = governor.BatchAudit()
+    assert audit.start([31, 32], now=100)["state"] == "running"
+    assert audit.claim_next() == 31
+    assert audit.summary([31, 32])["current_history_id"] == 31
+    restored = governor.BatchAudit.from_data(audit.to_data())
+    assert restored.summary([31, 32])["pending"] == 2
+    assert restored.claim_next() == 31
+
+
+def test_batch_audit_pause_and_resume_preserves_completed_results() -> None:
+    governor = _governor_module()
+    audit = governor.BatchAudit()
+    audit.start([41, 42], now=100)
+    assert audit.claim_next() == 41
+    audit.record(41, {"title": "作品甲", "media_source": "tmdb", "media_id": "1", "media_type": "电影"}, {"ok": True}, checked_at=101)
+    assert audit.pause()["state"] == "paused"
+    resumed = audit.resume_or_start([41, 42], now=102)
+    assert resumed["state"] == "running" and resumed["checked"] == 1
+    assert audit.claim_next() == 42
 
 
 def test_batch_audit_defers_hardlink_preview_until_the_user_opens_one_record() -> None:
@@ -69,7 +94,7 @@ def test_batch_audit_defers_hardlink_preview_until_the_user_opens_one_record() -
     assert updated and updated["status"] == "ready_to_plan"
 
 
-def test_failed_history_identity_is_reused_without_network_recognition() -> None:
+def test_failed_history_identity_is_reused_and_slow_work_is_limited_to_a_single_next_item() -> None:
     governor = _governor_module()
     queue = governor.GovernanceQueue()
     failed = governor.EventObservation.from_contract("failed", _payload(25, "reused"))
@@ -78,8 +103,10 @@ def test_failed_history_identity_is_reused_without_network_recognition() -> None
         "title": "测试作品", "year": "2026", "media_source": "tmdb", "media_id": "42", "media_type": "电视剧",
     }
     source = SOURCE.read_text(encoding="utf-8")
-    audit_source = source[source.index("def audit_all"):source.index("def repair_plan")]
-    assert "MediaChain" not in audit_source and "preview_hardlink" not in audit_source
+    start_source = source[source.index("def audit_all"):source.index("def audit_next")]
+    next_source = source[source.index("def audit_next"):source.index("def pause_audit")]
+    assert "MediaChain" not in start_source and "preview_hardlink" not in start_source
+    assert "MediaChain" in next_source and "preview_hardlink" in next_source
 
 
 def test_batch_audit_only_exposes_unresolved_after_real_check() -> None:
@@ -88,8 +115,8 @@ def test_batch_audit_only_exposes_unresolved_after_real_check() -> None:
     audit.record(22, None, checked_at=100)
     audit.record(23, {"title": "已识别作品", "media_source": "tmdb", "media_id": "43", "media_type": "电影"}, {"ok": False}, checked_at=100)
     records = audit.public_items([22, 23])
-    assert [record["status"] for record in records] == ["preview_rejected", "identity_unresolved"]
-    assert records[1]["title"] is None
+    assert [record["status"] for record in records] == ["preview_rejected"]
+    assert audit.summary([22, 23])["unresolved"] == 1
 
 
 def test_complete_event_is_verified_only_with_identity_and_link_mode() -> None:
@@ -100,7 +127,21 @@ def test_complete_event_is_verified_only_with_identity_and_link_mode() -> None:
     item = queue.public_items()[0]
     assert item["status"] == "verified"
     assert item["reason_codes"] == []
-    assert queue.public_summary()["verified"] == 1
+
+
+def test_successful_history_is_not_exempt_from_quality_check() -> None:
+    governor = _governor_module()
+    queue = governor.GovernanceQueue()
+    complete = governor.EventObservation.from_contract("complete", _payload(7, "success", mode="copy"))
+    assert complete and queue.observe(complete)
+    context = queue.history_context(7)
+    assert context and context["event_kind"] == "complete"
+    audit = governor.BatchAudit()
+    audit.start(queue.auditable_history_ids(), now=100)
+    assert audit.claim_next() == 7
+    result = audit.record_complete_quality(7, context["identity"], context["transfer_mode"], checked_at=101)
+    assert result["status"] == "quality_issue"
+    assert audit.public_items([7])[0]["title"] == "测试作品"
 
 
 def test_unknown_or_non_link_result_becomes_explicit_problem_state() -> None:

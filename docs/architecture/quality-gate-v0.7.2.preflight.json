@@ -1,0 +1,64 @@
+{
+  "schema": "knowledgeradar-research-preflight/v1",
+  "generated_at": "2026-09-02T07:57:08.860538+00:00",
+  "report_path": "D:/Projects/NAS docker/media-next/plugins/moviepilot-media-governor/docs/architecture/quality-gate-v0.7.2.md",
+  "evidence_path": "D:/Projects/NAS docker/media-next/plugins/moviepilot-media-governor/docs/architecture/quality-gate-v0.7.2.evidence.json",
+  "task_type": "governance_research",
+  "requires_preflight": true,
+  "status": "PASS",
+  "capability_handshake": {
+    "required": true,
+    "observed_tools": [],
+    "health_check": false,
+    "get_capabilities": false
+  },
+  "local_archaeology": "核对 v0.7.1 状态机、前端请求方式、历史字段与上游本地源码。",
+  "source_ecology_plan": "使用 GitHub 官方文档和开放网页的可恢复任务资料；跳过与本问题无关的平台内容。",
+  "recommended_probes": [
+    {
+      "id": "boundary_probe",
+      "command": "scripts/probe_source_ecology_boundaries.py --plan-only --json",
+      "reason": "报告涉及平台能力边界、来源生态或工具能力声明时使用。"
+    },
+    {
+      "id": "decision_log_feedback",
+      "command": "call KnowledgeRadar analyze_decision_logs(limit=50, compact=true)",
+      "reason": "报告使用失败率、降级、工具选择或能力图谱反哺作为依据时使用。"
+    }
+  ],
+  "required_artifacts": [
+    {
+      "name": "known_issues",
+      "present": true
+    },
+    {
+      "name": "decision_register",
+      "present": true
+    },
+    {
+      "name": "process_quality",
+      "present": true
+    },
+    {
+      "name": "questioner_checkpoints",
+      "present": true
+    },
+    {
+      "name": "mermaid_planning_diagram",
+      "present": true
+    },
+    {
+      "name": "detailed_execution_steps",
+      "present": true
+    }
+  ],
+  "known_issue_inheritance": {
+    "schema": "knowledgeradar-known-issue-inheritance/v1",
+    "previous_evidence": [],
+    "unresolved_count": 0,
+    "required_issue_ids": [],
+    "present_issue_ids": [],
+    "missing_issue_ids": [],
+    "rule": "上一份 sidecar 中 status 为 新发现/未解决/已延后 的 known_issues 必须复制到下一份 sidecar，直到显式标记为 已解决。"
+  }
+}

@@ -229,6 +229,13 @@ class GovernanceQueue:
         observation = EventObservation.from_contract("failed", {"transfer_history_id": history_id}, history)
         return bool(observation) and self.observe(observation)
 
+    def observe_history(self, history: Any) -> bool:
+        """把宿主历史投影进质量闸门；状态字段只用于区分成功与失败。"""
+        history_id = _value(history, "id")
+        event_kind = "complete" if bool(_value(history, "status")) else "failed"
+        observation = EventObservation.from_contract(event_kind, {"transfer_history_id": history_id}, history)
+        return bool(observation) and self.observe(observation)
+
     def to_data(self) -> dict[str, Any]:
         return {"schema": self._SCHEMA, "packages": self._packages, "plans": self._plans, "dedup_index": self._dedup_index}
 
@@ -255,6 +262,27 @@ class GovernanceQueue:
     def failed_history_ids(self) -> list[int]:
         """返回可批量检查的失败历史编号，绝不包含文件信息。"""
         return sorted({history_id for package in self._packages.values() for history_id in package.get("failed_history_ids", []) if isinstance(history_id, int)})
+
+    def auditable_history_ids(self) -> list[int]:
+        """返回已进入质量闸门的成功和失败记录，不把“成功”排除在检查外。"""
+        return sorted({history_id for package in self._packages.values() for history_id in package.get("history_ids", []) if isinstance(history_id, int)})
+
+    def history_context(self, history_id: int) -> dict[str, Any] | None:
+        """提供脱敏质量核查上下文；不返回源文件、目标路径或宿主对象。"""
+        package = next((item for item in self._packages.values() if history_id in item.get("history_ids", [])), None)
+        if package is None:
+            return None
+        return {
+            "event_kind": "failed" if history_id in package.get("failed_history_ids", []) else "complete",
+            "identity": self.identity_for_history(history_id) or {
+                "title": _text(package.get("title")),
+                "year": _text(package.get("year"), 12),
+                "media_source": _text(package.get("media_source"), 32),
+                "media_id": _text(package.get("media_id"), 64),
+                "media_type": _text(package.get("media_type"), 32),
+            },
+            "transfer_mode": next((mode for mode in package.get("transfer_modes", []) if isinstance(mode, str)), None),
+        }
 
     def identity_for_history(self, history_id: int) -> dict[str, str | None] | None:
         """取回宿主曾保存的作品身份；不回退到网络识别或原始文件名。"""
@@ -361,19 +389,113 @@ class GovernanceQueue:
 
 
 class BatchAudit:
-    """批量检查的脱敏结果投影；未检查的记录不会作为问题卡公开。"""
+    """可恢复的逐条检查状态；只保存中文结论，不保存路径或原始文件名。"""
 
-    _SCHEMA = "mediagovernor-batch-audit/v1"
+    _SCHEMA = "mediagovernor-batch-audit/v2"
+    _PENDING = "pending"
+    _CHECKING = "checking"
 
-    def __init__(self, records: dict[str, dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        records: dict[str, dict[str, Any]] | None = None,
+        run: Mapping[str, Any] | None = None,
+    ) -> None:
         self._records = records or {}
+        self._run = dict(run or {"state": "idle", "history_ids": []})
+        self._recover_interrupted_item()
 
     @classmethod
     def from_data(cls, raw: Any) -> "BatchAudit":
         if not isinstance(raw, Mapping) or raw.get("schema") != cls._SCHEMA:
             return cls()
         records = raw.get("records")
-        return cls(dict(records) if isinstance(records, Mapping) else {})
+        run = raw.get("run")
+        return cls(
+            dict(records) if isinstance(records, Mapping) else {},
+            run if isinstance(run, Mapping) else None,
+        )
+
+    def _recover_interrupted_item(self) -> None:
+        """宿主重载或网页中断时，把没有结论的领取项放回队列。
+
+        一次 API 调用只处理一条记录；因此 ``checking`` 不代表可交付结论，
+        不能在下次进入页面时把它永久遗漏。
+        """
+        interrupted = False
+        for record in self._records.values():
+            if record.get("status") == self._CHECKING:
+                record["status"] = self._PENDING
+                interrupted = True
+        if interrupted:
+            self._run["current_history_id"] = None
+            if self._run.get("state") == "complete":
+                self._run["state"] = "paused"
+
+    def start(self, history_ids: list[int], now: int | None = None) -> dict[str, Any]:
+        """开始一轮新检查，并立即持久化逐条游标以便中断后继续。"""
+        issued_at = _now() if now is None else now
+        unique_ids = list(dict.fromkeys(history_ids))
+        self._records = {
+            str(history_id): {
+                "history_id": history_id,
+                "status": self._PENDING,
+                "checked_at": None,
+                "title": None,
+                "year": None,
+                "media_source": None,
+                "media_id": None,
+                "media_type": None,
+            }
+            for history_id in unique_ids
+        }
+        self._run = {
+            "state": "running" if unique_ids else "complete",
+            "history_ids": unique_ids,
+            "started_at": issued_at,
+            "finished_at": issued_at if not unique_ids else None,
+            "current_history_id": None,
+        }
+        return self.summary(unique_ids)
+
+    def resume_or_start(self, history_ids: list[int], now: int | None = None) -> dict[str, Any]:
+        """恢复同一轮未完成检查；只有明确完成后才开始新一轮。"""
+        unique_ids = list(dict.fromkeys(history_ids))
+        existing_ids = self._history_ids()
+        if existing_ids == unique_ids and self._run.get("state") in {"running", "paused"}:
+            self._recover_interrupted_item()
+            self._run["state"] = "running"
+            self._run["finished_at"] = None
+            return self.summary(unique_ids)
+        return self.start(unique_ids, now=now)
+
+    def pause(self) -> dict[str, Any]:
+        """请求在当前单条完成后暂停；不会中断宿主正在执行的只读识别。"""
+        if self._run.get("state") == "running":
+            self._run["state"] = "paused"
+            self._run["current_history_id"] = None
+        return self.summary(self._history_ids())
+
+    def claim_next(self) -> int | None:
+        """领取一条待检查记录；每次 HTTP 调用最多处理一条。"""
+        if self._run.get("state") != "running":
+            return None
+        for history_id in self._history_ids():
+            record = self._records.get(str(history_id))
+            if record and record.get("status") == self._PENDING:
+                record["status"] = self._CHECKING
+                self._run["current_history_id"] = history_id
+                return history_id
+        self._complete()
+        return None
+
+    def _history_ids(self) -> list[int]:
+        values = self._run.get("history_ids")
+        return [value for value in values if isinstance(value, int)] if isinstance(values, list) else []
+
+    def _complete(self, now: int | None = None) -> None:
+        self._run["state"] = "complete"
+        self._run["current_history_id"] = None
+        self._run["finished_at"] = _now() if now is None else now
 
     @staticmethod
     def _identity(identity: Mapping[str, Any] | None) -> dict[str, str | None]:
@@ -419,6 +541,13 @@ class BatchAudit:
             **fields,
         }
         self._records[str(history_id)] = record
+        if self._run.get("current_history_id") == history_id:
+            self._run["current_history_id"] = None
+        if self._run.get("state") == "running" and not any(
+            item.get("status") in {self._PENDING, self._CHECKING}
+            for item in self._records.values()
+        ):
+            self._complete(checked_at)
         return dict(record)
 
     def record_preview(self, history_id: int, preview: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -428,28 +557,65 @@ class BatchAudit:
             return None
         return self.record(history_id, existing, preview)
 
-    def summary(self, history_ids: list[int]) -> dict[str, int | str]:
+    def record_complete_quality(
+        self,
+        history_id: int,
+        identity: Mapping[str, Any] | None,
+        transfer_mode: str | None,
+        *,
+        source_available: bool = True,
+        checked_at: int | None = None,
+    ) -> dict[str, Any]:
+        """记录成功整理后的可证明结论，不猜测路径或缺失剧集。"""
+        fields = self._identity(identity)
+        if not source_available:
+            status, detail = "source_unavailable", "该历史记录已不可用于检查"
+        elif not self._is_reliable(fields):
+            status, detail = "identity_unresolved", "成功记录没有可靠作品身份，无法确认归类是否正确"
+        elif not transfer_mode:
+            status, detail = "quality_issue", "成功记录没有保存整理方式，无法确认是否按硬链接整理"
+        elif transfer_mode.lower() not in {"link", "hardlink", "hard_link"}:
+            status, detail = "quality_issue", "成功记录显示的整理方式不是硬链接"
+        else:
+            status, detail = "verified", "已确认作品身份和硬链接整理方式"
+        record = {"history_id": history_id, "status": status, "detail": detail, "checked_at": _now() if checked_at is None else checked_at, **fields}
+        self._records[str(history_id)] = record
+        if self._run.get("current_history_id") == history_id:
+            self._run["current_history_id"] = None
+        if self._run.get("state") == "running" and not any(item.get("status") in {self._PENDING, self._CHECKING} for item in self._records.values()):
+            self._complete(checked_at)
+        return dict(record)
+
+    def summary(self, history_ids: list[int]) -> dict[str, Any]:
         known = {str(history_id) for history_id in history_ids}
         records = [record for key, record in self._records.items() if key in known]
-        checked = len(records)
+        checked = sum(record.get("status") not in {self._PENDING, self._CHECKING} for record in records)
+        state = str(self._run.get("state") or "idle")
+        if state == "idle" and known and checked == len(known):
+            state = "complete"
         return {
-            "state": "complete" if known and checked == len(known) else "idle" if not checked else "partial",
+            "state": state,
             "total": len(known),
             "checked": checked,
             "pending": max(0, len(known) - checked),
             "actionable": sum(record.get("status") == "ready_to_plan" for record in records),
             "ready_for_preview": sum(record.get("status") == "needs_preview" for record in records),
-            "needs_attention": sum(record.get("status") in {"identity_unresolved", "preview_rejected", "source_unavailable"} for record in records),
+            "needs_attention": sum(record.get("status") in {"identity_unresolved", "preview_rejected", "source_unavailable", "quality_issue"} for record in records),
+            "unresolved": sum(record.get("status") == "identity_unresolved" for record in records),
+            "blocked": sum(record.get("status") in {"preview_rejected", "source_unavailable", "quality_issue"} for record in records),
+            "current_history_id": self._run.get("current_history_id"),
         }
 
     def public_items(self, history_ids: list[int]) -> list[dict[str, Any]]:
         """只返回已经检查且仍需处理的记录，避免把待检查项伪装成问题。"""
         allowed = {str(history_id) for history_id in history_ids}
-        visible = [dict(record) for key, record in self._records.items() if key in allowed and record.get("status") in {"identity_unresolved", "preview_rejected", "ready_to_plan", "needs_preview", "source_unavailable"}]
+        # 无法取得可靠身份的历史记录会以总数展示，而不是堆成一排没有片名的
+        # “问题卡”。这类记录没有足够证据可安全地声称它是哪部影片。
+        visible = [dict(record) for key, record in self._records.items() if key in allowed and record.get("status") in {"preview_rejected", "ready_to_plan", "needs_preview", "source_unavailable", "quality_issue"}]
         return sorted(visible, key=lambda record: int(record.get("history_id") or 0), reverse=True)
 
     def to_data(self) -> dict[str, Any]:
-        return {"schema": self._SCHEMA, "records": self._records}
+        return {"schema": self._SCHEMA, "records": self._records, "run": self._run}
 
 
 class NativePreviewGateway:
