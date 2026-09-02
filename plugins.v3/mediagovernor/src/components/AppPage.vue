@@ -16,7 +16,9 @@ const cards = computed(() => result.value.items || [])
 const summary = computed(() => result.value.summary || {})
 const completed = computed(() => summary.value.state === 'complete')
 const running = computed(() => summary.value.state === 'running')
-const discovering = computed(() => summary.value.state === 'discovering')
+// 后端保持 state=running 以兼容仍被浏览器缓存的 v0.7.x 页面；新版界面以
+// discovery_state 区分“读取历史”和“逐条检查”，避免把真实进度显示成未开始。
+const discovering = computed(() => summary.value.discovery_state === 'discovering' || summary.value.state === 'discovering')
 const paused = computed(() => summary.value.state === 'paused')
 const scopeChanged = computed(() => Boolean(summary.value.scope_changed))
 const stale = computed(() => summary.value.state === 'stale')

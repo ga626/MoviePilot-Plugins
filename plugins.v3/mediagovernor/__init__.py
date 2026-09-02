@@ -19,7 +19,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "批量核对整理历史，只列出已确认需要处理的作品；确认后才创建硬链接，不改动原文件。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.8.0"
+    plugin_version = "0.8.1"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -66,7 +66,9 @@ class MediaGovernor(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> Tuple[str, str]:
-        return "vue", "dist/assets"
+        # 每个发布版使用独立入口目录，防止浏览器把稳定名称 remoteEntry.js
+        # 与旧版后端混用。目录必须与 vite.config.js 的 assetsDir 保持一致。
+        return "vue", "dist/v0.8.1/assets"
 
     def get_sidebar_nav(self) -> List[Dict[str, Any]]:
         """使用通用插件详情页入口，避免旧宿主暴露无法打开的全页侧栏项。"""
@@ -95,8 +97,13 @@ class MediaGovernor(_PluginBase):
         if isinstance(history_audit, dict) and history_audit.get("state") in {"in_progress", "retry_pending", "paused"}:
             discovered = len(history_ids)
             total = int(history_audit.get("history_total") or 0)
+            is_paused = history_audit.get("state") == "paused"
             summary.update({
-                "state": "paused" if history_audit.get("state") == "paused" else "discovering",
+                # v0.7.x 前端只会在 running 时继续请求 /audit/next。保留这个
+                # 传输状态，令缓存中的旧组件也能推进 v0.8+ 的分页发现；新版
+                # 页面则通过 discovery_state 显示准确的“读取历史”阶段。
+                "state": "paused" if is_paused else "running",
+                "discovery_state": "paused" if is_paused else "discovering",
                 "checked": discovered,
                 "total": total or discovered,
                 "pending": 0,
