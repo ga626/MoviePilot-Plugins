@@ -18,7 +18,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "逐条核查整理结果并显示进度；确认后才创建硬链接，不改动原文件。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.7.2"
+    plugin_version = "0.7.3"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -76,7 +76,8 @@ class MediaGovernor(_PluginBase):
             {"path": "/packages", "endpoint": self.get_packages, "methods": ["GET"], "auth": "bear", "summary": "查询媒体治理问题"},
             {"path": "/plans", "endpoint": self.get_plans, "methods": ["GET"], "auth": "bear", "summary": "查询零写入预演计划"},
             {"path": "/plans/{plan_id}", "endpoint": self.get_plan, "methods": ["GET"], "auth": "bear", "summary": "查询预演计划详情"},
-            {"path": "/audit", "endpoint": self.audit_all, "methods": ["POST"], "auth": "bear", "summary": "开始可恢复的逐条整理检查（不改文件）"},
+            {"path": "/audit", "endpoint": self.audit_all, "methods": ["POST"], "auth": "bear", "summary": "开始一轮新的逐条整理检查（不改文件）"},
+            {"path": "/audit/resume", "endpoint": self.resume_audit, "methods": ["POST"], "auth": "bear", "summary": "继续暂停的逐条整理检查（不改文件）"},
             {"path": "/audit/next", "endpoint": self.audit_next, "methods": ["POST"], "auth": "bear", "summary": "处理下一条整理检查（不改文件）"},
             {"path": "/audit/pause", "endpoint": self.pause_audit, "methods": ["POST"], "auth": "bear", "summary": "暂停整理检查"},
             {"path": "/packages/{history_id}/preview", "endpoint": self.preview_history, "methods": ["POST"], "auth": "bear", "summary": "生成硬链接预演计划（不执行）"},
@@ -231,12 +232,26 @@ class MediaGovernor(_PluginBase):
         return {**result, "plan": plan, "outcome": outcome, "checked": checked}
 
     def audit_all(self) -> dict[str, Any]:
-        """建立可恢复的检查队列；不在一次请求中阻塞整批识别。"""
+        """始终建立新一轮检查，允许用户在完成后再次核对当前历史记录。"""
         queue = getattr(self, "_queue", GovernanceQueue())
         inspection = getattr(self, "_inspection", BatchAudit())
         if not self.get_state():
             return {"ok": False, "detail": "plugin_disabled", "summary": inspection.summary(queue.auditable_history_ids())}
-        summary = inspection.resume_or_start(queue.auditable_history_ids())
+        summary = inspection.start(queue.auditable_history_ids())
+        self._inspection = inspection
+        self.save_data(self._INSPECTION_KEY, inspection.to_data())
+        return {"ok": True, "summary": summary}
+
+    def resume_audit(self) -> dict[str, Any]:
+        """只恢复被用户暂停的本轮，避免把完成状态误恢复成旧结果。"""
+        queue = getattr(self, "_queue", GovernanceQueue())
+        inspection = getattr(self, "_inspection", BatchAudit())
+        history_ids = queue.auditable_history_ids()
+        if not self.get_state():
+            return {"ok": False, "detail": "plugin_disabled", "summary": inspection.summary(history_ids)}
+        summary = inspection.resume(history_ids)
+        if summary.get("state") not in {"running", "paused"}:
+            return {"ok": False, "detail": "no_paused_audit", "summary": summary}
         self._inspection = inspection
         self.save_data(self._INSPECTION_KEY, inspection.to_data())
         return {"ok": True, "summary": summary}
@@ -294,7 +309,10 @@ class MediaGovernor(_PluginBase):
             context = queue.history_context(history_id) or {}
             identity = context.get("identity") or queue.identity_for_history(history_id)
             if context.get("event_kind") == "complete":
-                inspection.record_complete_quality(history_id, identity, context.get("transfer_mode"))
+                # 只能把历史字段称为“记录显示的整理方式”。它不是实际文件
+                # inode 的证明，更不能据此断言媒体文件已经错误。
+                recorded_mode = getattr(history, "transfer_mode", None) or getattr(history, "transfer_type", None) or context.get("transfer_mode")
+                inspection.record_complete_quality(history_id, identity, recorded_mode)
                 self._inspection = inspection
                 self.save_data(self._INSPECTION_KEY, inspection.to_data())
                 return {"ok": True, "summary": inspection.summary(history_ids)}

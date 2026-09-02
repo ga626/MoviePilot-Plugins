@@ -391,7 +391,8 @@ class GovernanceQueue:
 class BatchAudit:
     """可恢复的逐条检查状态；只保存中文结论，不保存路径或原始文件名。"""
 
-    _SCHEMA = "mediagovernor-batch-audit/v2"
+    _SCHEMA = "mediagovernor-batch-audit/v3"
+    _LEGACY_SCHEMAS = {"mediagovernor-batch-audit/v2"}
     _PENDING = "pending"
     _CHECKING = "checking"
 
@@ -406,7 +407,7 @@ class BatchAudit:
 
     @classmethod
     def from_data(cls, raw: Any) -> "BatchAudit":
-        if not isinstance(raw, Mapping) or raw.get("schema") != cls._SCHEMA:
+        if not isinstance(raw, Mapping) or raw.get("schema") not in {cls._SCHEMA, *cls._LEGACY_SCHEMAS}:
             return cls()
         records = raw.get("records")
         run = raw.get("run")
@@ -467,6 +468,13 @@ class BatchAudit:
             self._run["finished_at"] = None
             return self.summary(unique_ids)
         return self.start(unique_ids, now=now)
+
+    def resume(self, history_ids: list[int], now: int | None = None) -> dict[str, Any]:
+        """只恢复暂停的本轮，不把“再次检查”误当成恢复旧结果。"""
+        unique_ids = list(dict.fromkeys(history_ids))
+        if self._history_ids() == unique_ids and self._run.get("state") in {"running", "paused"}:
+            return self.resume_or_start(unique_ids, now=now)
+        return self.summary(unique_ids)
 
     def pause(self) -> dict[str, Any]:
         """请求在当前单条完成后暂停；不会中断宿主正在执行的只读识别。"""
@@ -537,6 +545,14 @@ class BatchAudit:
             "history_id": history_id,
             "status": status,
             "detail": detail,
+            "category": {
+                "source_unavailable": "历史记录不可用",
+                "identity_unresolved": "作品身份无法确认",
+                "needs_preview": "等待补建前检查",
+                "ready_to_plan": "可安全补建硬链接",
+                "preview_rejected": "补建前检查未通过",
+            }[status],
+            "transfer_mode": None,
             "checked_at": _now() if checked_at is None else checked_at,
             **fields,
         }
@@ -566,19 +582,36 @@ class BatchAudit:
         source_available: bool = True,
         checked_at: int | None = None,
     ) -> dict[str, Any]:
-        """记录成功整理后的可证明结论，不猜测路径或缺失剧集。"""
+        """记录成功整理后的有限结论，不把历史字段误报成文件实况。"""
         fields = self._identity(identity)
+        mode = _text(transfer_mode, 32)
+        normalised = mode.lower() if mode else None
         if not source_available:
             status, detail = "source_unavailable", "该历史记录已不可用于检查"
         elif not self._is_reliable(fields):
             status, detail = "identity_unresolved", "成功记录没有可靠作品身份，无法确认归类是否正确"
-        elif not transfer_mode:
-            status, detail = "quality_issue", "成功记录没有保存整理方式，无法确认是否按硬链接整理"
-        elif transfer_mode.lower() not in {"link", "hardlink", "hard_link"}:
-            status, detail = "quality_issue", "成功记录显示的整理方式不是硬链接"
+        elif not normalised:
+            status, detail = "transfer_mode_unknown", "历史记录未保存整理方式，无法确认是否符合硬链接策略"
+        elif normalised not in {"link", "hardlink", "hard_link"}:
+            status, detail = "transfer_mode_mismatch", f"历史记录显示为“{mode}”；这与当前硬链接策略不一致，但尚未逐个验证实际文件"
         else:
             status, detail = "verified", "已确认作品身份和硬链接整理方式"
-        record = {"history_id": history_id, "status": status, "detail": detail, "checked_at": _now() if checked_at is None else checked_at, **fields}
+        category = {
+            "source_unavailable": "历史记录不可用",
+            "identity_unresolved": "作品身份无法确认",
+            "transfer_mode_unknown": "整理方式未记录",
+            "transfer_mode_mismatch": "整理方式与硬链接策略不一致",
+            "verified": "已核对",
+        }[status]
+        record = {
+            "history_id": history_id,
+            "status": status,
+            "detail": detail,
+            "category": category,
+            "transfer_mode": mode,
+            "checked_at": _now() if checked_at is None else checked_at,
+            **fields,
+        }
         self._records[str(history_id)] = record
         if self._run.get("current_history_id") == history_id:
             self._run["current_history_id"] = None
@@ -600,19 +633,72 @@ class BatchAudit:
             "pending": max(0, len(known) - checked),
             "actionable": sum(record.get("status") == "ready_to_plan" for record in records),
             "ready_for_preview": sum(record.get("status") == "needs_preview" for record in records),
-            "needs_attention": sum(record.get("status") in {"identity_unresolved", "preview_rejected", "source_unavailable", "quality_issue"} for record in records),
+            "needs_attention": sum(record.get("status") in {"identity_unresolved", "preview_rejected", "source_unavailable", "transfer_mode_unknown", "transfer_mode_mismatch"} for record in records),
             "unresolved": sum(record.get("status") == "identity_unresolved" for record in records),
-            "blocked": sum(record.get("status") in {"preview_rejected", "source_unavailable", "quality_issue"} for record in records),
+            "blocked": sum(record.get("status") in {"preview_rejected", "source_unavailable"} for record in records),
+            "strategy_review": sum(record.get("status") in {"transfer_mode_unknown", "transfer_mode_mismatch"} for record in records),
             "current_history_id": self._run.get("current_history_id"),
         }
 
     def public_items(self, history_ids: list[int]) -> list[dict[str, Any]]:
-        """只返回已经检查且仍需处理的记录，避免把待检查项伪装成问题。"""
+        """按作品汇总已检查结论，不用每一集或每个文件淹没用户。"""
         allowed = {str(history_id) for history_id in history_ids}
-        # 无法取得可靠身份的历史记录会以总数展示，而不是堆成一排没有片名的
-        # “问题卡”。这类记录没有足够证据可安全地声称它是哪部影片。
-        visible = [dict(record) for key, record in self._records.items() if key in allowed and record.get("status") in {"preview_rejected", "ready_to_plan", "needs_preview", "source_unavailable", "quality_issue"}]
-        return sorted(visible, key=lambda record: int(record.get("history_id") or 0), reverse=True)
+        visible_statuses = {
+            "preview_rejected", "ready_to_plan", "needs_preview", "source_unavailable",
+            "transfer_mode_unknown", "transfer_mode_mismatch",
+        }
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for key, stored in self._records.items():
+            if key not in allowed or stored.get("status") not in visible_statuses:
+                continue
+            record = dict(stored)
+            identity = {
+                "media_source": record.get("media_source"),
+                "media_id": record.get("media_id"),
+                "media_type": record.get("media_type"),
+            }
+            if all(identity.values()):
+                group_key = f"media:{_digest(identity)[:20]}"
+            else:
+                # 没有可靠身份时不混合不同历史记录；但这种记录不会在这里显示成
+                # “待确认影片”卡，而是由摘要统一说明。
+                group_key = f"history:{record.get('history_id')}"
+            groups.setdefault(group_key, []).append(record)
+
+        result: list[dict[str, Any]] = []
+        for group_key, members in groups.items():
+            first = max(members, key=lambda item: int(item.get("history_id") or 0))
+            categories: dict[tuple[str, str, str | None], list[dict[str, Any]]] = {}
+            for member in members:
+                category_key = (str(member.get("status")), str(member.get("category") or "需要复核"), _text(member.get("transfer_mode"), 32))
+                categories.setdefault(category_key, []).append(member)
+            findings = [
+                {
+                    "status": status,
+                    "title": category,
+                    "detail": members_for_category[0].get("detail"),
+                    "count": len(members_for_category),
+                    "transfer_mode": mode,
+                }
+                for (status, category, mode), members_for_category in sorted(categories.items())
+            ]
+            result.append({
+                "group_id": group_key,
+                "title": first.get("title"),
+                "year": first.get("year"),
+                "media_type": first.get("media_type"),
+                "record_count": len(members),
+                "history_ids": sorted(int(member["history_id"]) for member in members if isinstance(member.get("history_id"), int)),
+                "findings": findings,
+                "repairable_count": sum(member.get("status") in {"needs_preview", "ready_to_plan"} for member in members),
+                "repairable_history_ids": sorted(
+                    int(member["history_id"])
+                    for member in members
+                    if member.get("status") in {"needs_preview", "ready_to_plan"} and isinstance(member.get("history_id"), int)
+                ),
+                "last_checked_at": max(int(member.get("checked_at") or 0) for member in members),
+            })
+        return sorted(result, key=lambda item: int(item.get("last_checked_at") or 0), reverse=True)
 
     def to_data(self) -> dict[str, Any]:
         return {"schema": self._SCHEMA, "records": self._records, "run": self._run}
