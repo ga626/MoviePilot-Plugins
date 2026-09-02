@@ -620,10 +620,23 @@ class BatchAudit:
         return dict(record)
 
     def summary(self, history_ids: list[int]) -> dict[str, Any]:
-        known = {str(history_id) for history_id in history_ids}
+        # ``history_ids`` 是当前宿主可见的范围；``run.history_ids`` 是上一次
+        # 实际开始检查时冻结的范围。两者不能混为同一轮的进度：升级或新增
+        # 历史记录后，旧轮次即使已完成，也不能被显示成“已检查全部”。
+        current_ids = list(dict.fromkeys(history_ids))
+        known = {str(history_id) for history_id in current_ids}
         records = [record for key, record in self._records.items() if key in known]
         checked = sum(record.get("status") not in {self._PENDING, self._CHECKING} for record in records)
+        run_ids = self._history_ids()
+        run_known = {str(history_id) for history_id in run_ids}
+        run_records = [record for key, record in self._records.items() if key in run_known]
+        run_checked = sum(record.get("status") not in {self._PENDING, self._CHECKING} for record in run_records)
+        scope_changed = bool(run_ids) and known != run_known
         state = str(self._run.get("state") or "idle")
+        if state == "complete" and scope_changed:
+            # 保留上轮结论，但明确告诉页面它不覆盖当前全部历史记录。只有用户
+            # 点击开始新一轮时才会重置记录，避免升级本身丢失任何检查结果。
+            state = "stale"
         if state == "idle" and known and checked == len(known):
             state = "complete"
         return {
@@ -631,6 +644,9 @@ class BatchAudit:
             "total": len(known),
             "checked": checked,
             "pending": max(0, len(known) - checked),
+            "run_total": len(run_ids),
+            "run_checked": run_checked,
+            "scope_changed": scope_changed,
             "actionable": sum(record.get("status") == "ready_to_plan" for record in records),
             "ready_for_preview": sum(record.get("status") == "needs_preview" for record in records),
             "needs_attention": sum(record.get("status") in {"identity_unresolved", "preview_rejected", "source_unavailable", "transfer_mode_unknown", "transfer_mode_mismatch"} for record in records),

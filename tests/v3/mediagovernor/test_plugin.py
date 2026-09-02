@@ -33,15 +33,16 @@ def _payload(history_id: int, event_key: str, *, mode: str | None = "link", titl
 def test_v3_manifest_version_and_frontend_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
-    assert manifest["version"] == "0.7.3"
+    assert manifest["version"] == "0.7.4"
     assert manifest["release"] is True
-    assert 'plugin_version = "0.7.3"' in source
+    assert 'plugin_version = "0.7.4"' in source
     assert 'return "vue", "dist/assets"' in source
     assert "def get_sidebar_nav" in source
     assert 'return []' in source
     assert (ROOT / "plugins.v3/mediagovernor/dist/assets/remoteEntry.js").is_file()
     frontend = (ROOT / "plugins.v3/mediagovernor/src/components/AppPage.vue").read_text(encoding="utf-8")
     assert "再次检查全部" in frontend
+    assert "检查范围已变化" in frontend
     assert "查看详细结论" in frontend
     assert "待确认影片" not in frontend
     assert '"path": "/audit"' in source
@@ -53,7 +54,7 @@ def test_v3_manifest_version_and_frontend_contract() -> None:
 def test_batch_audit_hides_unchecked_records_and_keeps_only_safe_identity() -> None:
     governor = _governor_module()
     audit = governor.BatchAudit()
-    assert audit.summary([21]) == {"state": "idle", "total": 1, "checked": 0, "pending": 1, "actionable": 0, "ready_for_preview": 0, "needs_attention": 0, "unresolved": 0, "blocked": 0, "strategy_review": 0, "current_history_id": None}
+    assert audit.summary([21]) == {"state": "idle", "total": 1, "checked": 0, "pending": 1, "run_total": 0, "run_checked": 0, "scope_changed": False, "actionable": 0, "ready_for_preview": 0, "needs_attention": 0, "unresolved": 0, "blocked": 0, "strategy_review": 0, "current_history_id": None}
     assert audit.public_items([21]) == []
     record = audit.record(21, {"title": "示例作品", "year": "2026", "media_source": "tmdb", "media_id": "42", "media_type": "电视剧"}, {"ok": True}, checked_at=100)
     assert record["status"] == "ready_to_plan"
@@ -95,6 +96,26 @@ def test_batch_audit_can_start_a_fresh_run_after_completion() -> None:
     restarted = audit.start([51], now=102)
     assert restarted["state"] == "running"
     assert restarted["checked"] == 0
+
+
+def test_completed_audit_never_claims_new_history_was_checked_after_upgrade() -> None:
+    governor = _governor_module()
+    audit = governor.BatchAudit()
+    audit.start([51], now=100)
+    audit.record(51, {"title": "旧记录", "media_source": "tmdb", "media_id": "51", "media_type": "电影"}, checked_at=101)
+
+    # 模拟升级后，宿主读取到比旧轮次更多的历史记录：保留旧结论，但不把
+    # 447/1795 这类状态显示为“已完成全部”。
+    summary = audit.summary([51, 52])
+    assert summary["state"] == "stale"
+    assert summary["scope_changed"] is True
+    assert summary["run_checked"] == summary["run_total"] == 1
+    assert summary["checked"] == 1 and summary["total"] == 2
+    assert audit.resume([51, 52])["state"] == "stale"
+
+    restarted = audit.start([51, 52], now=102)
+    assert restarted["state"] == "running"
+    assert restarted["checked"] == 0 and restarted["total"] == 2
 
 
 def test_batch_audit_defers_hardlink_preview_until_the_user_opens_one_record() -> None:
