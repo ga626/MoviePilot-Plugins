@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path
 
@@ -33,20 +34,25 @@ def _configure_test_plugin_runtime() -> None:
 
     def build_test_plugin_runtime(host):
         """构造使用隔离配置的插件运行时，避免隐式依赖生产组合根。"""
+        environment = {
+            "plugins_root": settings.ROOT_PATH / "app" / "plugins",
+            "storage": get_plugin_storage,
+            "system": get_plugin_system,
+            "catalog_factory": lambda _mapper: None,
+            "import_preparer": lambda **_kwargs: None,
+            "import_scanner": lambda **_kwargs: None,
+            "auth_level": lambda: 0,
+            "remote_entry": host.get_plugin_remote_entry,
+            "development": lambda: False,
+            "logger": plugin_manager_module.logger,
+        }
+        if "database" in inspect.signature(PluginRuntimeEnvironment).parameters:
+            from app.runtime.extensions.plugin.database import get_plugin_database
+
+            environment["database"] = get_plugin_database
         return build_plugin_runtime(
             host,
-            PluginRuntimeEnvironment(
-                plugins_root=settings.ROOT_PATH / "app" / "plugins",
-                storage=get_plugin_storage,
-                system=get_plugin_system,
-                catalog_factory=lambda _mapper: None,
-                import_preparer=lambda **_kwargs: None,
-                import_scanner=lambda **_kwargs: None,
-                auth_level=lambda: 0,
-                remote_entry=host.get_plugin_remote_entry,
-                development=lambda: False,
-                logger=plugin_manager_module.logger,
-            ),
+            PluginRuntimeEnvironment(**environment),
             tool_build_max_attempts=PluginManager.AGENT_TOOLS_BUILD_MAX_ATTEMPTS,
         )
 

@@ -256,6 +256,19 @@ class GovernanceQueue:
         """返回可批量检查的失败历史编号，绝不包含文件信息。"""
         return sorted({history_id for package in self._packages.values() for history_id in package.get("failed_history_ids", []) if isinstance(history_id, int)})
 
+    def identity_for_history(self, history_id: int) -> dict[str, str | None] | None:
+        """取回宿主曾保存的作品身份；不回退到网络识别或原始文件名。"""
+        package = next((item for item in self._packages.values() if history_id in item.get("failed_history_ids", [])), None)
+        if package is None:
+            return None
+        return {
+            "title": _text(package.get("title")),
+            "year": _text(package.get("year"), 12),
+            "media_source": _text(package.get("media_source"), 32),
+            "media_id": _text(package.get("media_id"), 64),
+            "media_type": _text(package.get("media_type"), 32),
+        }
+
     def allows_preview(self, history_id: int) -> bool:
         return any(history_id in package.get("failed_history_ids", []) for package in self._packages.values())
 
@@ -392,7 +405,9 @@ class BatchAudit:
             status, detail = "source_unavailable", "该历史记录已不可用于检查"
         elif not self._is_reliable(fields):
             status, detail = "identity_unresolved", "未能可靠识别作品"
-        elif preview and bool(preview.get("ok")):
+        elif preview is None:
+            status, detail = "needs_preview", "已识别作品，等待生成处理方案"
+        elif bool(preview.get("ok")):
             status, detail = "ready_to_plan", "可以创建硬链接"
         else:
             status, detail = "preview_rejected", "目前不能安全创建硬链接"
@@ -406,6 +421,13 @@ class BatchAudit:
         self._records[str(history_id)] = record
         return dict(record)
 
+    def record_preview(self, history_id: int, preview: Mapping[str, Any]) -> dict[str, Any] | None:
+        """把单条硬链接预演写回已有的检查结论，保留原有的安全身份投影。"""
+        existing = self._records.get(str(history_id))
+        if existing is None:
+            return None
+        return self.record(history_id, existing, preview)
+
     def summary(self, history_ids: list[int]) -> dict[str, int | str]:
         known = {str(history_id) for history_id in history_ids}
         records = [record for key, record in self._records.items() if key in known]
@@ -416,13 +438,14 @@ class BatchAudit:
             "checked": checked,
             "pending": max(0, len(known) - checked),
             "actionable": sum(record.get("status") == "ready_to_plan" for record in records),
-            "needs_attention": sum(record.get("status") in {"identity_unresolved", "preview_rejected"} for record in records),
+            "ready_for_preview": sum(record.get("status") == "needs_preview" for record in records),
+            "needs_attention": sum(record.get("status") in {"identity_unresolved", "preview_rejected", "source_unavailable"} for record in records),
         }
 
     def public_items(self, history_ids: list[int]) -> list[dict[str, Any]]:
         """只返回已经检查且仍需处理的记录，避免把待检查项伪装成问题。"""
         allowed = {str(history_id) for history_id in history_ids}
-        visible = [dict(record) for key, record in self._records.items() if key in allowed and record.get("status") in {"identity_unresolved", "preview_rejected", "ready_to_plan"}]
+        visible = [dict(record) for key, record in self._records.items() if key in allowed and record.get("status") in {"identity_unresolved", "preview_rejected", "ready_to_plan", "needs_preview", "source_unavailable"}]
         return sorted(visible, key=lambda record: int(record.get("history_id") or 0), reverse=True)
 
     def to_data(self) -> dict[str, Any]:
