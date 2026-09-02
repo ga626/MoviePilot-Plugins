@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from abc import ABC, abstractmethod
 import importlib.util
 import json
 from pathlib import Path
@@ -19,8 +20,10 @@ def _load_plugin():
     app = types.ModuleType("app")
     plugins = types.ModuleType("app.plugins")
 
-    class PluginBase:  # pragma: no cover - only supplies the host base contract.
-        pass
+    class PluginBase(ABC):  # pragma: no cover - only supplies the host base contract.
+        @abstractmethod
+        def stop_service(self) -> None:
+            pass
 
     plugins._PluginBase = PluginBase
     saved = {name: sys.modules.get(name) for name in ("app", "app.plugins")}
@@ -44,21 +47,22 @@ def test_manifest_plugin_and_frontend_versions_are_synced() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
     source = PLUGIN.read_text(encoding="utf-8")
-    assert manifest["version"] == package["version"] == "1.0.0"
-    assert list(manifest["history"])[0] == "v1.0.0"
-    assert 'plugin_version = "1.0.0"' in source
-    assert 'return "vue", "dist/v1.0.0/assets"' in source
-    assert "assetsDir: 'v1.0.0/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
+    assert manifest["version"] == package["version"] == "1.0.1"
+    assert list(manifest["history"])[0] == "v1.0.1"
+    assert 'plugin_version = "1.0.1"' in source
+    assert 'return "vue", "dist/v1.0.1/assets"' in source
+    assert "assetsDir: 'v1.0.1/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
 
 
 def test_plugin_is_a_thin_host_contract_without_private_backend_dependencies() -> None:
     plugin_class = _load_plugin()
     instance = plugin_class()
     assert plugin_class.plugin_name == "媒体治理"
-    assert plugin_class.get_render_mode() == ("vue", "dist/v1.0.0/assets")
+    assert plugin_class.get_render_mode() == ("vue", "dist/v1.0.1/assets")
     instance.init_plugin({"enabled": True})
     assert instance.get_state() is True
     assert instance.get_command() == instance.get_api() == instance.get_service() == []
+    assert instance.stop_service() is None
 
     modules = {
         node.module or ""
@@ -95,4 +99,4 @@ def test_repair_payload_is_preview_then_confirmed_link_without_history_cleanup()
 
 def test_release_sources_do_not_ship_legacy_private_governor() -> None:
     assert not (ROOT / "plugins.v3/mediagovernor/governor.py").exists()
-    assert (ROOT / "plugins.v3/mediagovernor/dist/v1.0.0/assets/remoteEntry.js").is_file()
+    assert (ROOT / "plugins.v3/mediagovernor/dist/v1.0.1/assets/remoteEntry.js").is_file()
