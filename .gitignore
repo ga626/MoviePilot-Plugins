@@ -168,6 +168,7 @@ yarn.lock
 .DS_Store
 
 # 本插件的本地运行态、安装回执和未脱敏调试材料不得进入第三方插件仓库。
+.codex/
 runtime/
 local/
 *.local.json

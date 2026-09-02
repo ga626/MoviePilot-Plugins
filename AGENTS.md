@@ -14,11 +14,11 @@
 - `plugin_version`、`package.v3.json.version` 和 `history` 最新条目必须一致；历史按语义版本从新到旧排列。只有真实候选完成且决定发布时才将 `release` 改为 `true`。
 - 无额外依赖时不创建 `pyproject.toml`；需要依赖时只在该文件声明 `[project].dependencies`，不提交 `uv.lock`，不从插件代码执行 pip/uv，也不覆盖宿主核心依赖。
 
-## 测试、Git 与发布边界
+## 开发、PR 与发布
 
-- 修改后至少运行相关 `py_compile`/`compileall`、`tests/v3/mediagovernor`、上游 `.github/scripts/check_plugin_versions.py` 与 `git diff --check`；最终候选还必须在真实 MoviePilot V3 宿主加载一次。语法通过不等于可安装或已在 NAS 生效。
-- `main` 是与上游规范对齐的稳定线；开发在 `codex/<topic>` 分支。当前仅配置只读 `upstream`，不得推送到上游。用户明确提供 GitHub owner/repo/visibility 后，才可配置其远端、创建公开第三方仓库或市场上架。
-- 公开/市场发布前必须有：确定源码提交、版本一致性检查、候选包与哈希、真实 V3 加载验收、发布回执，以及第三方仓库 `main` 分支可读性验证。不能用本地源码、测试或 NAS 容器重启替代这些证据。
+- `main` 只作基线/合并后验证；每项独立改动先同步 `main`，新建 `codex/<topic>`，一分支一 PR，PR 后不叠加新功能。并行/外部 worker 才建隔离 worktree；`upstream` 仅读，绝不推送。
+- 修改后跑受影响 `py_compile`/`compileall`、`tests/v3/mediagovernor`、`.github/scripts/check_plugin_versions.py`、`git diff --check`。PR 标题用 `type(scope): 中文结果`；正文中文且仅含 `变更 / 验证 / 风险或未验`，发布影响另列候选 SHA。全局规则的停止点、代理、CI、合并、Release/收口为准。
+- 候选须为干净提交，绑定版本、包 SHA、真实 V3 加载和回执；公开/市场只提升同一制品，随后核对第三方仓 `main`、远端下载哈希和稳定安装。源码/本地测试/NAS 重启均不能替代这些证据。
 
 ## 数据与安全
 
