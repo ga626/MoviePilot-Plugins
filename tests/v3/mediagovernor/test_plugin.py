@@ -33,17 +33,19 @@ def _payload(history_id: int, event_key: str, *, mode: str | None = "link", titl
 def test_v3_manifest_version_and_frontend_contract() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     source = SOURCE.read_text(encoding="utf-8")
-    assert manifest["version"] == "0.7.2"
+    assert manifest["version"] == "0.7.3"
     assert manifest["release"] is True
-    assert 'plugin_version = "0.7.2"' in source
+    assert 'plugin_version = "0.7.3"' in source
     assert 'return "vue", "dist/assets"' in source
     assert "def get_sidebar_nav" in source
     assert 'return []' in source
     assert (ROOT / "plugins.v3/mediagovernor/dist/assets/remoteEntry.js").is_file()
     frontend = (ROOT / "plugins.v3/mediagovernor/src/components/AppPage.vue").read_text(encoding="utf-8")
-    assert "一键检查全部（不改文件）" in frontend
+    assert "再次检查全部" in frontend
+    assert "查看详细结论" in frontend
     assert "待确认影片" not in frontend
     assert '"path": "/audit"' in source
+    assert '"path": "/audit/resume"' in source
     assert '"path": "/audit/next"' in source
     assert "暂停检查" in frontend and "进度条" not in frontend
 
@@ -51,7 +53,7 @@ def test_v3_manifest_version_and_frontend_contract() -> None:
 def test_batch_audit_hides_unchecked_records_and_keeps_only_safe_identity() -> None:
     governor = _governor_module()
     audit = governor.BatchAudit()
-    assert audit.summary([21]) == {"state": "idle", "total": 1, "checked": 0, "pending": 1, "actionable": 0, "ready_for_preview": 0, "needs_attention": 0, "unresolved": 0, "blocked": 0, "current_history_id": None}
+    assert audit.summary([21]) == {"state": "idle", "total": 1, "checked": 0, "pending": 1, "actionable": 0, "ready_for_preview": 0, "needs_attention": 0, "unresolved": 0, "blocked": 0, "strategy_review": 0, "current_history_id": None}
     assert audit.public_items([21]) == []
     record = audit.record(21, {"title": "示例作品", "year": "2026", "media_source": "tmdb", "media_id": "42", "media_type": "电视剧"}, {"ok": True}, checked_at=100)
     assert record["status"] == "ready_to_plan"
@@ -84,11 +86,22 @@ def test_batch_audit_pause_and_resume_preserves_completed_results() -> None:
     assert audit.claim_next() == 42
 
 
+def test_batch_audit_can_start_a_fresh_run_after_completion() -> None:
+    governor = _governor_module()
+    audit = governor.BatchAudit()
+    audit.start([51], now=100)
+    audit.record(51, {"title": "作品甲", "media_source": "tmdb", "media_id": "1", "media_type": "电影"}, checked_at=101)
+    assert audit.summary([51])["state"] == "complete"
+    restarted = audit.start([51], now=102)
+    assert restarted["state"] == "running"
+    assert restarted["checked"] == 0
+
+
 def test_batch_audit_defers_hardlink_preview_until_the_user_opens_one_record() -> None:
     governor = _governor_module()
     audit = governor.BatchAudit()
     audit.record(24, {"title": "已识别作品", "media_source": "tmdb", "media_id": "44", "media_type": "电影"}, checked_at=100)
-    assert audit.public_items([24])[0]["status"] == "needs_preview"
+    assert audit.public_items([24])[0]["findings"][0]["status"] == "needs_preview"
     assert audit.summary([24])["ready_for_preview"] == 1
     updated = audit.record_preview(24, {"ok": True, "detail": "preview_ready"})
     assert updated and updated["status"] == "ready_to_plan"
@@ -115,7 +128,7 @@ def test_batch_audit_only_exposes_unresolved_after_real_check() -> None:
     audit.record(22, None, checked_at=100)
     audit.record(23, {"title": "已识别作品", "media_source": "tmdb", "media_id": "43", "media_type": "电影"}, {"ok": False}, checked_at=100)
     records = audit.public_items([22, 23])
-    assert [record["status"] for record in records] == ["preview_rejected"]
+    assert [record["findings"][0]["status"] for record in records] == ["preview_rejected"]
     assert audit.summary([22, 23])["unresolved"] == 1
 
 
@@ -140,8 +153,33 @@ def test_successful_history_is_not_exempt_from_quality_check() -> None:
     audit.start(queue.auditable_history_ids(), now=100)
     assert audit.claim_next() == 7
     result = audit.record_complete_quality(7, context["identity"], context["transfer_mode"], checked_at=101)
-    assert result["status"] == "quality_issue"
+    assert result["status"] == "transfer_mode_mismatch"
     assert audit.public_items([7])[0]["title"] == "测试作品"
+
+
+def test_batch_audit_groups_multiple_history_records_by_media_identity() -> None:
+    governor = _governor_module()
+    audit = governor.BatchAudit()
+    audit.start([61, 62], now=100)
+    identity = {"title": "同一部剧", "year": "2026", "media_source": "tmdb", "media_id": "61", "media_type": "电视剧"}
+    audit.record_complete_quality(61, identity, "copy", checked_at=101)
+    audit.record_complete_quality(62, identity, "copy", checked_at=102)
+    cards = audit.public_items([61, 62])
+    assert len(cards) == 1
+    assert cards[0]["record_count"] == 2
+    assert cards[0]["repairable_history_ids"] == []
+    assert cards[0]["findings"] == [{"status": "transfer_mode_mismatch", "title": "整理方式与硬链接策略不一致", "detail": "历史记录显示为“copy”；这与当前硬链接策略不一致，但尚未逐个验证实际文件", "count": 2, "transfer_mode": "copy"}]
+
+
+def test_group_exposes_only_failed_records_as_repair_candidates() -> None:
+    governor = _governor_module()
+    audit = governor.BatchAudit()
+    identity = {"title": "可补建作品", "media_source": "tmdb", "media_id": "71", "media_type": "电影"}
+    audit.record(71, identity, checked_at=100)
+    audit.record_complete_quality(72, identity, "copy", checked_at=101)
+    cards = audit.public_items([71, 72])
+    assert len(cards) == 1
+    assert cards[0]["repairable_history_ids"] == [71]
 
 
 def test_unknown_or_non_link_result_becomes_explicit_problem_state() -> None:
