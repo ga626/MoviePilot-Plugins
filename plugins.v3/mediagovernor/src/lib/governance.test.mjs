@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { acceptanceFixtures, dedupeRoots, episodeAudit, organizationAudit, resolveIdentity } from './governance.js'
+import { acceptanceFixtures, bundleFamily, dedupeRoots, episodeAudit, organizationAudit, pathRelationship, resolveIdentity } from './governance.js'
 
 test('重叠根目录只保留最小可扫描范围', () => {
   const result = dedupeRoots([{ path: '/library', storage: 'local' }, { path: '/library/tv', storage: 'local' }, { path: '/downloads', storage: 'local' }])
@@ -25,4 +25,16 @@ test('整理审计会锁定缺集和目录扫描已记录的重复集', () => {
 
 test('用户可见样例全部通过同一规则', () => {
   assert.equal(acceptanceFixtures().every(item => item.pass), true)
+})
+
+test('平铺目录的文件名可归入不同作品，季集号不会误当标题', () => {
+  assert.equal(bundleFamily('Cowboy.Bebop.S01E26.1080p.mkv'), 'cowboy bebop')
+  assert.equal(bundleFamily('The.Movie.2024.EP01.mkv'), 'the movie 2024')
+  assert.notEqual(bundleFamily('Movie.A.S01E01.mkv'), bundleFamily('Movie.B.S01E01.mkv'))
+})
+
+test('宽泛历史目录只作线索，不能作为当前作品包重新检查', () => {
+  assert.equal(pathRelationship('/library/tv', '/library/tv/Show/Season 1'), 'ancestor')
+  assert.equal(pathRelationship('/library/tv/Show/Season 1', '/library/tv'), 'descendant')
+  assert.equal(pathRelationship('/library/tv/A', '/library/movie/B'), 'unrelated')
 })

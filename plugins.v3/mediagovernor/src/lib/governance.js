@@ -5,6 +5,29 @@ const pathKey = value => {
   return (normalized === '/' ? normalized : normalized.replace(/\/$/, '')).toLowerCase()
 }
 
+export function pathRelationship(left, right) {
+  const parent = pathKey(left), child = pathKey(right)
+  if (!parent || !child) return 'unrelated'
+  if (parent === child) return 'same'
+  if (child.startsWith(`${parent}/`)) return 'ancestor'
+  if (parent.startsWith(`${child}/`)) return 'descendant'
+  return 'unrelated'
+}
+
+export function bundleFamily(value) {
+  return clean(value)
+    .replace(/\.[a-z0-9]{2,5}$/i, '')
+    .replace(/[\[【(（].*?[\]】)）]/g, ' ')
+    .replace(/(?:[. _-]|^)s\d{1,2}(?:[. _-]?e\d{1,3})+(?=$|[. _-])/ig, ' ')
+    .replace(/(?:[. _-]|^)(?:e|ep)?\d{1,3}(?=$|[. _-])/ig, ' ')
+    .replace(/\b(?:2160p|1080p|720p|web[ .-]?dl|web[ .-]?rip|bluray|bdrip|remux|x26[45]|h\.?26[45]|hevc|aac|dts|atmos|hdr10?\+?|dv|10bit|proper|repack|complete)\b/ig, ' ')
+    .replace(/[._-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .slice(0, 120)
+}
+
 export function dedupeRoots(roots) {
   const accepted = [], skipped = []
   for (const root of [...roots].sort((a, b) => pathKey(a?.path).length - pathKey(b?.path).length)) {

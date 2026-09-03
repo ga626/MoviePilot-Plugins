@@ -73,17 +73,17 @@ def test_versions_and_federation_assets_are_synced() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
     source = PLUGIN.read_text(encoding="utf-8")
-    assert manifest["version"] == package["version"] == "1.6.0"
-    assert list(manifest["history"])[0] == "v1.6.0"
-    assert 'plugin_version = "1.6.0"' in source
-    assert 'return "vue", "dist/v1.6.0/assets"' in source
-    assert "assetsDir: 'v1.6.0/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
+    assert manifest["version"] == package["version"] == "1.7.0"
+    assert list(manifest["history"])[0] == "v1.7.0"
+    assert 'plugin_version = "1.7.0"' in source
+    assert 'return "vue", "dist/v1.7.0/assets"' in source
+    assert "assetsDir: 'v1.7.0/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
 
 
 def test_plugin_exposes_only_authenticated_readonly_bundle_analysis() -> None:
     module = _load_plugin()
     instance = module.MediaGovernor()
-    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v1.6.0/assets")
+    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v1.7.0/assets")
     instance.init_plugin({"enabled": True})
     assert instance.get_state() is True
     api = instance.get_api()
@@ -149,7 +149,11 @@ def test_frontend_uses_one_bundle_tree_then_model_and_official_verification() ->
     for endpoint in ("history/transfer?status=${status}", "storage/directories?directory_type=all", "storage/list", "plugin/MediaGovernor/bundle_analyze", "media/source", "media/recognize", "media/recognize_file", "media/search", "transfer/manual/history", "transfer/manual/target-path", "transfer/manual"):
         assert endpoint in page
     assert "inventoryGroups(roots)" in page
-    assert "当前库存" in page and "历史只作交叉线索" in page
+    assert "groupsFromFiles(current, children)" in page
+    assert "mergeExactHistory(inventory, failureGroups)" in page
+    assert "card.state !== 'clear'" in page
+    assert "slice(0, 2)" in page
+    assert "当前库存" in page and "历史仅作为交叉线索" in page
     assert "inventoryNodeLimit" in page
     assert "replace(/[\\[\\]【】()]/g, ' ')" in page
     assert "name.match(/\\[(\\d{1,3})\\]" in page
