@@ -56,32 +56,40 @@ const _hoisted_24 = {
 const _hoisted_25 = ["onClick"];
 const _hoisted_26 = { class: "modal" };
 const _hoisted_27 = { key: 0 };
-const _hoisted_28 = { key: 1 };
-const _hoisted_29 = {
-  key: 2,
+const _hoisted_28 = {
+  key: 1,
+  class: "diagnosis"
+};
+const _hoisted_29 = { key: 0 };
+const _hoisted_30 = { key: 1 };
+const _hoisted_31 = { key: 2 };
+const _hoisted_32 = { key: 2 };
+const _hoisted_33 = { key: 3 };
+const _hoisted_34 = {
+  key: 4,
   class: "candidate-list"
 };
-const _hoisted_30 = { class: "candidate-meta" };
-const _hoisted_31 = {
+const _hoisted_35 = { class: "candidate-meta" };
+const _hoisted_36 = {
   key: 0,
   class: "reason"
 };
-const _hoisted_32 = ["onClick"];
-const _hoisted_33 = {
-  key: 3,
+const _hoisted_37 = ["onClick"];
+const _hoisted_38 = {
+  key: 5,
   class: "empty"
 };
-const _hoisted_34 = ["disabled"];
-const _hoisted_35 = {
+const _hoisted_39 = ["disabled"];
+const _hoisted_40 = {
   key: 0,
   class: "audit"
 };
-const _hoisted_36 = { class: "audit-grid" };
-const _hoisted_37 = {
+const _hoisted_41 = { class: "audit-grid" };
+const _hoisted_42 = {
   key: 0,
   class: "reason"
 };
-const _hoisted_38 = {
+const _hoisted_43 = {
   key: 1,
   class: "safe"
 };
@@ -108,8 +116,8 @@ const safe = value => String(value || '').replace(/[\\/]/g, '').replace(/\s+/g, 
 const unique = values => [...new Set(values.filter(Boolean))];
 const number = value => Number(value) || 0;
 function emptyScope() { return { failure: 0, success: 0, recovered: 0, currentFailures: 0, unavailable: [], directories: 0, inventoryState: '尚未读取' } }
-function emptyRun() { return { phase: '尚未开始', total: 0, completed: 0, current: '', startedAt: 0, finishedAt: 0, stats: { confirmed: 0, selection: 0, insufficient: 0, unavailable: 0 } } }
-function cleanTitle(value) { return safe(value).replace(/\.[a-z0-9]{2,5}$/i, '').replace(/[._-]+/g, ' ').replace(/\b(2160p|1080p|720p|web[ .-]?dl|web[ .-]?rip|bluray|bdrip|remux|x26[45]|h\.?26[45]|hevc|aac|dts|atmos|hdr10?\+?|dv|10bit|proper|repack|complete|中字|简繁|国语|粤语)\b/gi, ' ').replace(/\[[^\]]*\]|【[^】]*】/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) }
+function emptyRun() { return { phase: '尚未开始', total: 0, completed: 0, current: '', startedAt: 0, finishedAt: 0, stats: { confirmed: 0, selection: 0, insufficient: 0, nonMedia: 0, unavailable: 0 } } }
+function cleanTitle(value) { return safe(value).replace(/\.[a-z0-9]{2,5}$/i, '').replace(/[\[\]【】()]/g, ' ').replace(/[._-]+/g, ' ').replace(/\b(2160p|1080p|720p|web[ .-]?dl|web[ .-]?rip|bluray|bdrip|remux|x26[45]|h\.?26[45]|hevc|aac|dts|atmos|hdr10?\+?|dv|10bit|proper|repack|complete|中字|简繁|国语|粤语)\b/gi, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) }
 const norm = value => cleanTitle(value).toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 const useful = value => { const name = norm(value); return name.length >= 3 && !/^(movie|video|sample|test|unknown|第?[0-9]+集?)$/i.test(name) };
 const itemKey = item => `${item?.storage || 'local'}:${item?.path || item?.name || ''}`;
@@ -122,18 +130,21 @@ async function historyRows(status, label) { const rows = []; for (let page = 1; 
 async function readSources() { try { const raw = dataOf(await props.api.get('media/source', { feedback: 'silent' })); sources.value = (Array.isArray(raw) ? raw : []).map(item => ({ id: String(item?.media_source || item?.source || ''), label: safe(item?.name || item?.title || item?.media_source || item?.source), state: '待查询', hits: 0 })).filter(item => item.id); } catch { sources.value = [{ id: '', label: '媒体数据源清单不可读取', state: '不可用', hits: 0 }]; } }
 async function readDirectories() { try { const raw = dataOf(await props.api.get('storage/directories', { feedback: 'silent' })); const list = Array.isArray(raw?.data) ? raw.data : Array.isArray(raw) ? raw : []; scope.value.directories = list.length; scope.value.inventoryState = list.length ? '已读到配置目录；目录清单不被伪装成已核验媒体库存。' : '没有可读的配置目录'; } catch { scope.value.unavailable.push('实际库存：当前账号无权读取 storage/directories，已降级为历史账本。'); scope.value.inventoryState = '无读取权限，已降级'; } }
 function packageRoot(row) { const source = row?.src_fileitem || row?.source_fileitem || row?.fileitem; if (!source?.path) return null; if (source.type === 'dir') return source; const path = String(source.path), cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')); return cut > 0 ? { ...source, path: path.slice(0, cut), type: 'dir', children: [] } : null }
-function packageKey(row) { const source = row?.src_fileitem || row?.source_fileitem || row?.fileitem; return source?.path ? itemKey(source) : `history:${row?.id || crypto.randomUUID()}` }
+function packageKey(row) { const root = packageRoot(row); return root?.path ? itemKey(root) : `history:${row?.id || crypto.randomUUID()}` }
 function groupsFor(rows) { const map = new Map(); for (const row of rows) { const key = packageKey(row), source = row?.src_fileitem || row?.source_fileitem || row?.fileitem, group = map.get(key) || { key, source, root: packageRoot(row), historyIds: [], titles: [] }; group.historyIds.push(row?.id); if (row?.title) group.titles.push(cleanTitle(row.title)); map.set(key, group); } return map }
-async function treeEvidence(group) { if (!group.root) return { ok: false, reason: '这条历史没有可读的来源包。' }; const queue = [{ item: group.root, depth: 0 }], seen = new Set(), entries = [], names = [...group.titles, cleanTitle(group.source?.name)].filter(Boolean), episodes = []; let videos = 0, subtitles = 0, nfos = 0, directories = 0; while (queue.length) { const current = queue.shift(), key = itemKey(current.item); if (seen.has(key)) continue; seen.add(key); let children; try { children = dataOf(await props.api.post('storage/list', current.item, { feedback: 'silent' })); } catch { return { ok: false, reason: 'MoviePilot 拒绝读取这个来源包。' } } if (!Array.isArray(children)) return { ok: false, reason: '来源包返回的不是目录清单。' }; directories += 1; for (const child of children) { const name = safe(child?.name); entries.push({ name, type: child?.type || 'file', depth: current.depth + 1 }); if (name) names.push(cleanTitle(name)); const match = name.match(/[. _-][Ss](\d{1,2})[. _-]?[Ee](\d{1,3})(?:[. _-]?[Ee]?(\d{1,3}))?/i) || name.match(/\b[Ee][Pp]?(\d{1,3})\b/); if (match) episodes.push(Number(match[2] || match[1]), ...(match[3] ? [Number(match[3])] : [])); if (child?.type === 'dir') queue.push({ item: child, depth: current.depth + 1 }); else if (videoExt.test(name)) videos += 1; else if (subtitleExt.test(name)) subtitles += 1; else if (/\.nfo$/i.test(name)) nfos += 1; } } const queries = unique(names.filter(useful)).sort((a, b) => b.length - a.length); if (!videos && !queries.length) return { ok: false, reason: '完整目录树中没有可用的视频或名称线索。' }; return { ok: true, videos, subtitles, nfos, directories, entries, episodes: unique(episodes.filter(Number.isFinite)).sort((a, b) => a - b), queries, fingerprint: `${directories}:${entries.length}:${videos}:${subtitles}:${nfos}:${unique(episodes).join(',')}` } }
+async function treeEvidence(group) { if (!group.root) return { ok: false, reason: '这条历史没有可读的来源包。' }; const queue = [{ item: group.root, depth: 0 }], seen = new Set(), entries = [], names = [...group.titles, cleanTitle(group.source?.name)].filter(Boolean), episodes = []; let videos = 0, subtitles = 0, nfos = 0, directories = 0; while (queue.length) { const current = queue.shift(), key = itemKey(current.item); if (seen.has(key)) continue; seen.add(key); let children; try { children = dataOf(await props.api.post('storage/list', current.item, { feedback: 'silent' })); } catch { return { ok: false, reason: 'MoviePilot 拒绝读取这个来源包。' } } if (!Array.isArray(children)) return { ok: false, reason: '来源包返回的不是目录清单。' }; directories += 1; for (const child of children) { const name = safe(child?.name); entries.push({ name, type: child?.type || 'file', depth: current.depth + 1 }); if (name) names.push(cleanTitle(name)); const match = name.match(/[. _-][Ss](\d{1,2})[. _-]?[Ee](\d{1,3})(?:[. _-]?[Ee]?(\d{1,3}))?/i) || name.match(/\b[Ee][Pp]?(\d{1,3})\b/) || name.match(/\[(\d{1,3})\](?=\.[a-z0-9]{2,5}$|[. _-])/i); if (match) episodes.push(Number(match[2] || match[1]), ...(match[3] ? [Number(match[3])] : [])); if (child?.type === 'dir') queue.push({ item: child, depth: current.depth + 1 }); else if (videoExt.test(name)) videos += 1; else if (subtitleExt.test(name)) subtitles += 1; else if (/\.nfo$/i.test(name)) nfos += 1; } } const queries = unique(names.filter(useful)).sort((a, b) => b.length - a.length); if (!videos && !queries.length) return { ok: false, reason: '完整目录树中没有可用的视频或名称线索。' }; return { ok: true, videos, subtitles, nfos, directories, entries, episodes: unique(episodes.filter(Number.isFinite)).sort((a, b) => a - b), queries, fingerprint: `${directories}:${entries.length}:${videos}:${subtitles}:${nfos}:${unique(episodes).join(',')}` } }
 function candidateOf(raw, via, query) { const media = raw?.media_info || raw?.mediaInfo || raw?.media || raw || {}, meta = raw?.meta_info || raw?.metaInfo || {}, title = safe(media.title || media.name || meta.title), mediaSource = String(media.media_source || media.source || ''), mediaId = String(media.media_id || media.id || ''), type = String(media.type || media.mtype || meta.type || ''); if (!title || !mediaSource || !mediaId || !type) return null; return { title, original_title: safe(media.original_title || media.original_name), en_title: safe(media.en_title || media.english_title), names: unique([...(Array.isArray(media.names) ? media.names : []), ...(Array.isArray(media.aliases) ? media.aliases : [])].map(safe)), year: String(media.year || media.release_year || media.release_date || '').slice(0, 4), media_source: mediaSource, media_id: mediaId, type_name: type, season: number(media.season || media.season_number) || undefined, via: [via], queries: query ? [query] : [], reasons: [], conflicts: [], score: 0 } }
 function mergeCandidate(a, b) { return !a ? b : { ...a, ...b, via: unique([...(a.via || []), ...(b.via || [])]), queries: unique([...(a.queries || []), ...(b.queries || [])]), names: unique([...(a.names || []), ...(b.names || [])]) } }
 async function detailFor(c) { try { return dataOf(await props.api.get(`media/${encodeURIComponent(c.media_id)}?${new URLSearchParams({ media_source: c.media_source, type_name: c.type_name })}`, { feedback: 'silent' })) || {} } catch { return {} } }
 function score(c, e) { const names = candidateNames(c).map(norm).filter(Boolean), hits = e.queries.filter(query => { const value = norm(query); return names.some(name => name === value || name.includes(value) || value.includes(name)) }); if (hits.length) { c.score += Math.min(8, hits.length * 2); c.reasons.push(`标题线索命中 ${hits.length} 条`); } else c.conflicts.push('候选标题与完整包名称线索没有交集'); if (c.via.some(item => item.includes('原生识别'))) { c.score += 3; c.reasons.push('MoviePilot 原生识别命中'); } const years = unique(e.queries.flatMap(query => query.match(/(?:19|20)\d{2}/g) || [])); if (years.length && c.year) { if (years.includes(c.year)) { c.score += 2; c.reasons.push('年份线索一致'); } else c.conflicts.push('年份线索冲突'); } if (e.episodes.length >= 2 && c.episodeCount && Math.max(...e.episodes) > c.episodeCount) c.conflicts.push('来源集号超过候选总集数'); if (e.videos >= 3 && c.episodeCount && c.episodeCount < Math.ceil(e.videos * .5)) c.conflicts.push('候选集数与视频数明显不符'); }
-function searchPlan(e) { const preferred = e.queries.filter(value => /(?:19|20)\d{2}|S\d|第\s*\d+\s*季/i.test(value)); const plan = unique([...preferred, ...e.queries]).slice(0, 12); return plan.length ? plan : e.queries }
-async function candidatesFor(group, e) { const map = new Map(), add = c => { if (c) map.set(candidateKey(c), mergeCandidate(map.get(candidateKey(c)), c)); }; if (group.source?.path) try { add(candidateOf(dataOf(await props.api.get(`media/recognize_file?path=${encodeURIComponent(group.source.path)}`, { feedback: 'silent' })), '来源文件原生识别', cleanTitle(group.source.name))); } catch { /* Evidence remains visible. */ } e.searchQueries = searchPlan(e); for (const query of e.searchQueries) { try { add(candidateOf(dataOf(await props.api.get(`media/recognize?title=${encodeURIComponent(query)}`, { feedback: 'silent' })), '包名原生识别', query)); } catch { /* Search can still answer. */ } for (const source of sources.value.filter(source => source.id)) { const params = new URLSearchParams({ title: query, type: 'media', count: '20', media_source: source.id }); try { const raw = dataOf(await props.api.get(`media/search?${params}`, { feedback: 'silent' })); const rows = Array.isArray(raw) ? raw : []; rows.forEach(item => add(candidateOf(item, `官方搜索：${source.label}`, query))); source.hits += rows.length; source.state = rows.length ? '有结果' : source.state === '待查询' ? '无结果' : source.state; } catch { source.state = '不可用'; } } } const candidates = [...map.values()]; await Promise.all(candidates.map(async c => { const d = await detailFor(c); c.original_title ||= safe(d.original_title || d.original_name); c.en_title ||= safe(d.en_title || d.english_title); c.names = unique([...(c.names || []), ...(Array.isArray(d.names) ? d.names : []), ...(Array.isArray(d.aliases) ? d.aliases : [])].map(safe)); c.year ||= String(d.year || d.release_year || d.release_date || '').slice(0, 4); c.episodeCount = number(d.number_of_episodes || d.episode_count) || undefined; score(c, e); })); return candidates.sort((a, b) => b.score - a.score) }
-function resolve(candidates) { const first = candidates[0], second = candidates[1]; if (!first) return { state: 'insufficient', candidates, reason: '整包证据已读取，但当前 MoviePilot 数据源没有返回候选。' }; if (first.score >= 7 && !first.conflicts.length && (!second || first.score - second.score >= 3)) return { state: 'confirmed', identity: first, candidates, reason: '完整名称线索、官方识别和集数核对均支持该身份。' }; return { state: 'needs_selection', candidates, reason: first.conflicts[0] || '存在多个接近候选，必须由你查看详情后确认。' } }
-async function inspectGroup(group) { const evidence = await treeEvidence(group); if (!evidence.ok) return { ...group, state: 'unavailable', reason: evidence.reason }; return { ...group, ...resolve(await candidatesFor(group, evidence)), evidence } }
-function addStat(card) { if (card.state === 'confirmed') run.value.stats.confirmed += 1; else if (card.state === 'needs_selection') run.value.stats.selection += 1; else if (card.state === 'insufficient') run.value.stats.insufficient += 1; else run.value.stats.unavailable += 1; }
+function bundlePayload(group, evidence) { return { evidence: { title_hints: unique([...(group.titles || []), ...(evidence.queries || [])]).slice(0, 30), entries: evidence.entries.slice(0, 500), episodes: evidence.episodes, video_count: evidence.videos, subtitle_count: evidence.subtitles, nfo_count: evidence.nfos } } }
+function diagnosisText(diagnosis) { if (!diagnosis) return '当前 MoviePilot 模型没有返回整包判断。'; if (diagnosis.classification === 'sample') return '模型判断这是样片，不参与作品匹配。'; if (diagnosis.classification === 'test') return '模型判断这是测试残留，不参与作品匹配。'; if (diagnosis.abstain) return '模型主动放弃判断；不会把它伪装成作品。'; return `模型判断：${diagnosis.title}${diagnosis.year ? `（${diagnosis.year}）` : ''}${diagnosis.season ? `，第 ${diagnosis.season} 季` : ''}，置信度 ${Math.round((diagnosis.confidence || 0) * 100)}%。` }
+async function diagnoseBundle(group, evidence) { try { const raw = dataOf(await props.api.post('plugin/MediaGovernor/bundle_analyze', bundlePayload(group, evidence), { feedback: 'silent' })); if (raw?.success === false) return { error: raw.message || '模型没有完成整包分析。' }; return raw?.data?.diagnosis || raw?.diagnosis || { error: '模型没有返回结构化判断。' } } catch { return { error: '无法调用当前 MoviePilot 模型；仍会继续原生候选核验。' } } }
+function searchPlan(e, diagnosis) { const aiTitles = diagnosis && !diagnosis.abstain ? [diagnosis.title, diagnosis.original_title, [diagnosis.title, diagnosis.year].filter(Boolean).join(' ')] : []; const preferred = [...aiTitles, ...e.queries.filter(value => /(?:19|20)\d{2}|S\d|第\s*\d+\s*季/i.test(value))]; const plan = unique([...preferred, ...e.queries].filter(useful)).slice(0, 12); return plan.length ? plan : e.queries }
+async function candidatesFor(group, e, diagnosis) { const map = new Map(), add = c => { if (c) map.set(candidateKey(c), mergeCandidate(map.get(candidateKey(c)), c)); }; if (group.source?.path) try { add(candidateOf(dataOf(await props.api.get(`media/recognize_file?path=${encodeURIComponent(group.source.path)}`, { feedback: 'silent' })), '来源文件原生识别', cleanTitle(group.source.name))); } catch { /* Evidence remains visible. */ } e.searchQueries = searchPlan(e, diagnosis); for (const query of e.searchQueries) { try { add(candidateOf(dataOf(await props.api.get(`media/recognize?title=${encodeURIComponent(query)}`, { feedback: 'silent' })), '包名原生识别', query)); } catch { /* Search can still answer. */ } for (const source of sources.value.filter(source => source.id)) { const params = new URLSearchParams({ title: query, type: 'media', count: '20', media_source: source.id }); try { const raw = dataOf(await props.api.get(`media/search?${params}`, { feedback: 'silent' })); const rows = Array.isArray(raw) ? raw : []; rows.forEach(item => add(candidateOf(item, `官方搜索：${source.label}`, query))); source.hits += rows.length; source.state = rows.length ? '有结果' : source.state === '待查询' ? '无结果' : source.state; } catch { source.state = '不可用'; } } } const candidates = [...map.values()]; await Promise.all(candidates.map(async c => { const d = await detailFor(c); c.original_title ||= safe(d.original_title || d.original_name); c.en_title ||= safe(d.en_title || d.english_title); c.names = unique([...(c.names || []), ...(Array.isArray(d.names) ? d.names : []), ...(Array.isArray(d.aliases) ? d.aliases : [])].map(safe)); c.year ||= String(d.year || d.release_year || d.release_date || '').slice(0, 4); c.episodeCount = number(d.number_of_episodes || d.episode_count) || undefined; score(c, e); if (diagnosis?.title && candidateNames(c).map(norm).some(name => name === norm(diagnosis.title))) { c.score += 4; c.reasons.push('整包模型判断与官方候选同名'); } if (diagnosis?.year && c.year && diagnosis.year !== c.year) c.conflicts.push('整包模型年份与官方候选冲突'); if (diagnosis?.season && c.season && diagnosis.season !== c.season) c.conflicts.push('整包模型季数与官方候选冲突'); })); return candidates.sort((a, b) => b.score - a.score) }
+function resolve(candidates, diagnosis) { if (diagnosis?.classification === 'sample' || diagnosis?.classification === 'test') return { state: 'non_media', candidates: [], reason: diagnosisText(diagnosis) }; const first = candidates[0], second = candidates[1]; if (!first) return { state: 'insufficient', candidates, reason: diagnosis?.error || (diagnosis?.abstain ? `${diagnosisText(diagnosis)} 当前 MoviePilot 数据源也没有返回候选。` : '整包证据已读取，但当前 MoviePilot 数据源没有返回候选。') }; if (first.score >= 9 && !first.conflicts.length && (!second || first.score - second.score >= 3)) return { state: 'confirmed', identity: first, candidates, reason: `${diagnosisText(diagnosis)} 已由官方候选、标题和集数核验确认。` }; return { state: 'needs_selection', candidates, reason: first.conflicts[0] || `${diagnosisText(diagnosis)} 仍存在接近候选，必须查看详情后确认。` } }
+async function inspectGroup(group) { const evidence = await treeEvidence(group); if (!evidence.ok) return { ...group, state: 'unavailable', reason: evidence.reason }; const diagnosis = await diagnoseBundle(group, evidence); return { ...group, ...resolve(await candidatesFor(group, evidence, diagnosis), diagnosis), evidence, diagnosis } }
+function addStat(card) { if (card.state === 'confirmed') run.value.stats.confirmed += 1; else if (card.state === 'needs_selection') run.value.stats.selection += 1; else if (card.state === 'insufficient') run.value.stats.insufficient += 1; else if (card.state === 'non_media') run.value.stats.nonMedia += 1; else run.value.stats.unavailable += 1; }
 async function waitIfPaused() { while (control.value.paused && !control.value.stopped) await new Promise(resolve => { resumeWaiter = resolve; }); return !control.value.stopped }
 function pause() { control.value.paused = true; run.value.phase = '已暂停：不再派发新包'; }
 function resume() { control.value.paused = false; run.value.phase = '继续检查'; resumeWaiter?.(); resumeWaiter = null; }
@@ -149,9 +160,9 @@ return (_ctx, _cache) => {
   return (_openBlock(), _createElementBlock("main", _hoisted_1, [
     _createElementVNode("header", _hoisted_2, [
       _cache[4] || (_cache[4] = _createElementVNode("div", null, [
-        _createElementVNode("p", { class: "eyebrow" }, "MediaGovernor 1.3"),
+        _createElementVNode("p", { class: "eyebrow" }, "MediaGovernor 1.4"),
         _createElementVNode("h1", null, "媒体治理工作台"),
-        _createElementVNode("p", null, "先建立真实范围，再用完整包证据找对作品；整理只生成官方逐文件预览，绝不静默删除旧硬链接。")
+        _createElementVNode("p", null, "先读取整包目录证据，再调用当前 MoviePilot 模型提出作品判断，并用官方候选与逐文件预览复核；绝不静默删除旧硬链接。")
       ], -1)),
       _createElementVNode("div", _hoisted_3, [
         _createElementVNode("button", {
@@ -193,7 +204,7 @@ return (_ctx, _cache) => {
         }, null, 4)
       ]),
       (run.value.current)
-        ? (_openBlock(), _createElementBlock("p", _hoisted_8, _toDisplayString(run.value.current) + "。结果会逐包出现。", 1))
+        ? (_openBlock(), _createElementBlock("p", _hoisted_8, _toDisplayString(run.value.current) + "。目录读取、模型判断和官方候选核验都会逐包显示。", 1))
         : _createCommentVNode("", true),
       _createElementVNode("div", _hoisted_9, [
         _createElementVNode("span", null, [
@@ -209,28 +220,32 @@ return (_ctx, _cache) => {
           _createElementVNode("b", null, _toDisplayString(run.value.stats.insufficient), 1)
         ]),
         _createElementVNode("span", null, [
-          _cache[8] || (_cache[8] = _createTextVNode("不可读取 ", -1)),
+          _cache[8] || (_cache[8] = _createTextVNode("样片/测试 ", -1)),
+          _createElementVNode("b", null, _toDisplayString(run.value.stats.nonMedia), 1)
+        ]),
+        _createElementVNode("span", null, [
+          _cache[9] || (_cache[9] = _createTextVNode("不可读取 ", -1)),
           _createElementVNode("b", null, _toDisplayString(run.value.stats.unavailable), 1)
         ])
       ])
     ]),
     _createElementVNode("section", _hoisted_10, [
-      _cache[13] || (_cache[13] = _createElementVNode("h2", null, "这次到底查了什么", -1)),
+      _cache[14] || (_cache[14] = _createElementVNode("h2", null, "这次到底查了什么", -1)),
       _createElementVNode("div", _hoisted_11, [
         _createElementVNode("span", null, [
-          _cache[9] || (_cache[9] = _createTextVNode("失败历史 ", -1)),
+          _cache[10] || (_cache[10] = _createTextVNode("失败历史 ", -1)),
           _createElementVNode("b", null, _toDisplayString(scope.value.failure), 1)
         ]),
         _createElementVNode("span", null, [
-          _cache[10] || (_cache[10] = _createTextVNode("成功历史 ", -1)),
+          _cache[11] || (_cache[11] = _createTextVNode("成功历史 ", -1)),
           _createElementVNode("b", null, _toDisplayString(scope.value.success), 1)
         ]),
         _createElementVNode("span", null, [
-          _cache[11] || (_cache[11] = _createTextVNode("失败后已成功 ", -1)),
+          _cache[12] || (_cache[12] = _createTextVNode("失败后已成功 ", -1)),
           _createElementVNode("b", null, _toDisplayString(scope.value.recovered), 1)
         ]),
         _createElementVNode("span", null, [
-          _cache[12] || (_cache[12] = _createTextVNode("当前失败候选 ", -1)),
+          _cache[13] || (_cache[13] = _createTextVNode("当前失败候选 ", -1)),
           _createElementVNode("b", null, _toDisplayString(scope.value.currentFailures), 1)
         ])
       ]),
@@ -255,15 +270,15 @@ return (_ctx, _cache) => {
     (tab.value === 'identity')
       ? (_openBlock(), _createElementBlock("section", _hoisted_15, [
           _createElementVNode("div", _hoisted_16, [
-            _cache[14] || (_cache[14] = _createElementVNode("div", null, [
+            _cache[15] || (_cache[15] = _createElementVNode("div", null, [
               _createElementVNode("h2", null, "找对作品"),
-              _createElementVNode("p", null, "每张卡对应一条来源记录，不按“直接父目录”强行合并。候选来自 MoviePilot 当前已配置数据源；若源里有豆瓣，会明确显示“来源：豆瓣”。")
+              _createElementVNode("p", null, "每张卡对应一个真实来源包，不按单个文件重复计数。模型先只读目录文字提出判断，再由 MoviePilot 当前数据源核验；若源里有豆瓣，会明确显示“来源：豆瓣”。")
             ], -1)),
             _createElementVNode("span", _hoisted_17, "数据源 " + _toDisplayString(sources.value.length), 1)
           ]),
           (sources.value.length)
             ? (_openBlock(), _createElementBlock("details", _hoisted_18, [
-                _cache[15] || (_cache[15] = _createElementVNode("summary", null, "查看数据源查询状态", -1)),
+                _cache[16] || (_cache[16] = _createElementVNode("summary", null, "查看数据源查询状态", -1)),
                 (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(sources.value, (source) => {
                   return (_openBlock(), _createElementBlock("p", {
                     key: source.id || source.label
@@ -272,7 +287,7 @@ return (_ctx, _cache) => {
               ]))
             : _createCommentVNode("", true),
           (!cards.value.length)
-            ? (_openBlock(), _createElementBlock("p", _hoisted_19, "尚未读取。开始后会先建立账本，再显示每一条来源记录的完整证据和候选。"))
+            ? (_openBlock(), _createElementBlock("p", _hoisted_19, "尚未读取。开始后会先建立账本，再显示每个来源包的模型判断、完整证据和官方候选。"))
             : _createCommentVNode("", true),
           (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(cards.value, (card) => {
             return (_openBlock(), _createElementBlock("article", {
@@ -280,10 +295,10 @@ return (_ctx, _cache) => {
               class: _normalizeClass(["card", card.state])
             }, [
               _createElementVNode("div", null, [
-                _createElementVNode("span", _hoisted_20, _toDisplayString(card.state === 'confirmed' ? '身份已确认' : card.state === 'needs_selection' ? '需要你确认' : card.state === 'insufficient' ? '资料不足' : '来源不可读取'), 1),
-                _createElementVNode("h3", null, _toDisplayString(card.identity?.title || '还没有可靠作品身份') + _toDisplayString(card.identity?.year ? `（${card.identity.year}）` : ''), 1),
+                _createElementVNode("span", _hoisted_20, _toDisplayString(card.state === 'confirmed' ? '身份已确认' : card.state === 'needs_selection' ? '需要你确认' : card.state === 'insufficient' ? '资料不足' : card.state === 'non_media' ? '样片或测试残留' : '来源不可读取'), 1),
+                _createElementVNode("h3", null, _toDisplayString(card.identity?.title || (card.state === 'non_media' ? '不是待整理正片' : '还没有可靠作品身份')) + _toDisplayString(card.identity?.year ? `（${card.identity.year}）` : ''), 1),
                 (card.evidence)
-                  ? (_openBlock(), _createElementBlock("p", _hoisted_21, _toDisplayString(evidenceText(card.evidence)) + "；目录 " + _toDisplayString(card.evidence.directories) + " 层节点、" + _toDisplayString(card.evidence.entries.length) + " 项证据。", 1))
+                  ? (_openBlock(), _createElementBlock("p", _hoisted_21, _toDisplayString(evidenceText(card.evidence)) + "；已读 " + _toDisplayString(card.evidence.directories) + " 个目录节点、" + _toDisplayString(card.evidence.entries.length) + " 项名称证据。", 1))
                   : _createCommentVNode("", true),
                 _createElementVNode("p", null, _toDisplayString(card.reason), 1)
               ]),
@@ -295,7 +310,7 @@ return (_ctx, _cache) => {
           }), 128))
         ]))
       : (_openBlock(), _createElementBlock("section", _hoisted_23, [
-          _cache[17] || (_cache[17] = _createElementVNode("div", { class: "section-head" }, [
+          _cache[18] || (_cache[18] = _createElementVNode("div", { class: "section-head" }, [
             _createElementVNode("div", null, [
               _createElementVNode("h2", null, "整理正确"),
               _createElementVNode("p", null, "只为已确认作品请求 MoviePilot 官方逐文件预览。预览中的新硬链接计划可查看；旧硬链接删除因没有逐项删除清单而保持锁定。")
@@ -311,7 +326,7 @@ return (_ctx, _cache) => {
               class: "card confirmed"
             }, [
               _createElementVNode("div", null, [
-                _cache[16] || (_cache[16] = _createElementVNode("span", { class: "state" }, "身份已确认", -1)),
+                _cache[17] || (_cache[17] = _createElementVNode("span", { class: "state" }, "身份已确认", -1)),
                 _createElementVNode("h3", null, _toDisplayString(card.identity.title) + _toDisplayString(card.identity.year ? `（${card.identity.year}）` : ''), 1),
                 _createElementVNode("p", null, _toDisplayString(evidenceText(card.evidence)) + "。尚未读写旧硬链接。", 1)
               ]),
@@ -336,20 +351,47 @@ return (_ctx, _cache) => {
             }, "×"),
             (tab.value === 'identity')
               ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
-                  _cache[18] || (_cache[18] = _createElementVNode("p", { class: "eyebrow" }, "完整证据账本", -1)),
+                  _cache[20] || (_cache[20] = _createElementVNode("p", { class: "eyebrow" }, "完整证据账本", -1)),
                   _createElementVNode("h2", null, _toDisplayString(selected.value.identity?.title || '候选核验'), 1),
                   (selected.value.evidence)
                     ? (_openBlock(), _createElementBlock("p", _hoisted_27, _toDisplayString(evidenceText(selected.value.evidence)) + "。已读取 " + _toDisplayString(selected.value.evidence.entries.length) + " 个目录项，证据指纹 " + _toDisplayString(selected.value.evidence.fingerprint) + "。", 1))
                     : _createCommentVNode("", true),
                   _createElementVNode("p", null, _toDisplayString(selected.value.reason), 1),
+                  (selected.value.diagnosis)
+                    ? (_openBlock(), _createElementBlock("section", _hoisted_28, [
+                        _cache[19] || (_cache[19] = _createElementVNode("strong", null, "整包模型判断", -1)),
+                        _createElementVNode("p", null, _toDisplayString(diagnosisText(selected.value.diagnosis)), 1),
+                        (selected.value.diagnosis.reasons?.length)
+                          ? (_openBlock(), _createElementBlock("p", _hoisted_29, "理由：" + _toDisplayString(selected.value.diagnosis.reasons.join('；')), 1))
+                          : _createCommentVNode("", true),
+                        (selected.value.diagnosis.expected_episodes?.length)
+                          ? (_openBlock(), _createElementBlock("p", _hoisted_30, "模型预期集号：" + _toDisplayString(selected.value.diagnosis.expected_episodes.join('、')), 1))
+                          : _createCommentVNode("", true),
+                        (selected.value.diagnosis.evidence_indexes?.length)
+                          ? (_openBlock(), _createElementBlock("p", _hoisted_31, "支持它的目录项编号：" + _toDisplayString(selected.value.diagnosis.evidence_indexes.map(index => index + 1).join('、')), 1))
+                          : _createCommentVNode("", true)
+                      ]))
+                    : _createCommentVNode("", true),
                   (selected.value.evidence)
-                    ? (_openBlock(), _createElementBlock("details", _hoisted_28, [
+                    ? (_openBlock(), _createElementBlock("details", _hoisted_32, [
                         _createElementVNode("summary", null, "查看名称线索（" + _toDisplayString(selected.value.evidence.queries.length) + " 条）", 1),
                         _createElementVNode("p", null, _toDisplayString(selected.value.evidence.queries.join('；') || '没有可用线索'), 1)
                       ]))
                     : _createCommentVNode("", true),
+                  (selected.value.evidence)
+                    ? (_openBlock(), _createElementBlock("details", _hoisted_33, [
+                        _createElementVNode("summary", null, "查看发送给模型的目录结构（" + _toDisplayString(selected.value.evidence.entries.length) + " 项）", 1),
+                        _createElementVNode("ul", null, [
+                          (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(selected.value.evidence.entries, (entry, index) => {
+                            return (_openBlock(), _createElementBlock("li", {
+                              key: `${entry.name}-${index}`
+                            }, _toDisplayString('　'.repeat(entry.depth || 0)) + _toDisplayString(entry.type === 'dir' ? '📁' : '📄') + " " + _toDisplayString(entry.name), 1))
+                          }), 128))
+                        ])
+                      ]))
+                    : _createCommentVNode("", true),
                   (selected.value.candidates?.length)
-                    ? (_openBlock(), _createElementBlock("div", _hoisted_29, [
+                    ? (_openBlock(), _createElementBlock("div", _hoisted_34, [
                         (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(selected.value.candidates, (candidate) => {
                           return (_openBlock(), _createElementBlock("article", {
                             key: candidateKey(candidate),
@@ -358,52 +400,52 @@ return (_ctx, _cache) => {
                             _createElementVNode("div", null, [
                               _createElementVNode("strong", null, _toDisplayString(candidate.title) + _toDisplayString(candidate.year ? `（${candidate.year}）` : ''), 1),
                               _createElementVNode("p", null, _toDisplayString(candidate.original_title ? `原名：${candidate.original_title}` : '原名：未返回') + _toDisplayString(candidate.en_title ? `；英文：${candidate.en_title}` : ''), 1),
-                              _createElementVNode("p", _hoisted_30, _toDisplayString(candidateMeta(candidate)), 1),
+                              _createElementVNode("p", _hoisted_35, _toDisplayString(candidateMeta(candidate)), 1),
                               _createElementVNode("p", null, "检索线索：" + _toDisplayString(candidate.queries?.join('；') || '原生文件识别') + "。支持：" + _toDisplayString(candidate.reasons?.join('；') || '只有官方搜索命中'), 1),
                               (candidate.conflicts?.length)
-                                ? (_openBlock(), _createElementBlock("p", _hoisted_31, "冲突：" + _toDisplayString(candidate.conflicts.join('；')), 1))
+                                ? (_openBlock(), _createElementBlock("p", _hoisted_36, "冲突：" + _toDisplayString(candidate.conflicts.join('；')), 1))
                                 : _createCommentVNode("", true)
                             ]),
                             _createElementVNode("button", {
                               class: "secondary",
                               onClick: $event => (choose(candidate))
-                            }, "确认是这部", 8, _hoisted_32)
+                            }, "确认是这部", 8, _hoisted_37)
                           ], 2))
                         }), 128))
                       ]))
-                    : (_openBlock(), _createElementBlock("p", _hoisted_33, "MoviePilot 没有返回候选；这不代表文件为空。"))
+                    : (_openBlock(), _createElementBlock("p", _hoisted_38, "MoviePilot 没有返回候选；这不代表文件为空。"))
                 ], 64))
               : (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
-                  _cache[23] || (_cache[23] = _createElementVNode("p", { class: "eyebrow" }, "官方逐文件预览", -1)),
+                  _cache[25] || (_cache[25] = _createElementVNode("p", { class: "eyebrow" }, "官方逐文件预览", -1)),
                   _createElementVNode("h2", null, _toDisplayString(selected.value.identity?.title), 1),
                   _createElementVNode("button", {
                     class: "primary",
                     disabled: loading.value,
                     onClick: auditOrganization
-                  }, _toDisplayString(loading.value ? '正在生成…' : '重新生成预览'), 9, _hoisted_34),
+                  }, _toDisplayString(loading.value ? '正在生成…' : '重新生成预览'), 9, _hoisted_39),
                   (preview.value)
-                    ? (_openBlock(), _createElementBlock("section", _hoisted_35, [
-                        _createElementVNode("div", _hoisted_36, [
+                    ? (_openBlock(), _createElementBlock("section", _hoisted_40, [
+                        _createElementVNode("div", _hoisted_41, [
                           _createElementVNode("span", null, [
-                            _cache[19] || (_cache[19] = _createTextVNode("命中旧成功记录 ", -1)),
+                            _cache[21] || (_cache[21] = _createTextVNode("命中旧成功记录 ", -1)),
                             _createElementVNode("b", null, _toDisplayString(preview.value.history?.history_count || 0), 1)
                           ]),
                           _createElementVNode("span", null, [
-                            _cache[20] || (_cache[20] = _createTextVNode("预览文件 ", -1)),
+                            _cache[22] || (_cache[22] = _createTextVNode("预览文件 ", -1)),
                             _createElementVNode("b", null, _toDisplayString(preview.value.data?.summary?.total || preview.value.data?.items?.length || 0), 1)
                           ]),
                           _createElementVNode("span", null, [
-                            _cache[21] || (_cache[21] = _createTextVNode("可创建 ", -1)),
+                            _cache[23] || (_cache[23] = _createTextVNode("可创建 ", -1)),
                             _createElementVNode("b", null, _toDisplayString(preview.value.data?.summary?.success || 0), 1)
                           ]),
                           _createElementVNode("span", null, [
-                            _cache[22] || (_cache[22] = _createTextVNode("预览失败 ", -1)),
+                            _cache[24] || (_cache[24] = _createTextVNode("预览失败 ", -1)),
                             _createElementVNode("b", null, _toDisplayString(preview.value.data?.summary?.failed || 0), 1)
                           ])
                         ]),
                         (preview.value.issues.length)
-                          ? (_openBlock(), _createElementBlock("p", _hoisted_37, "已锁定：" + _toDisplayString(preview.value.issues.join('；')), 1))
-                          : (_openBlock(), _createElementBlock("p", _hoisted_38, "新硬链接预览完整，但仍不执行。当前 MoviePilot 不会在预览中给出旧硬链接的逐项删除清单，插件不能替它猜测或静默删除。")),
+                          ? (_openBlock(), _createElementBlock("p", _hoisted_42, "已锁定：" + _toDisplayString(preview.value.issues.join('；')), 1))
+                          : (_openBlock(), _createElementBlock("p", _hoisted_43, "新硬链接预览完整，但仍不执行。当前 MoviePilot 不会在预览中给出旧硬链接的逐项删除清单，插件不能替它猜测或静默删除。")),
                         _createElementVNode("details", null, [
                           _createElementVNode("summary", null, "查看官方逐文件计划（" + _toDisplayString(preview.value.data?.items?.length || 0) + " 项）", 1),
                           _createElementVNode("ul", null, [
@@ -423,6 +465,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-e72753d1"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-fc48c80f"]]);
 
 export { AppPage as default };
