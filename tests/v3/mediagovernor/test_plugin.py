@@ -66,17 +66,17 @@ def test_versions_and_federation_assets_are_synced() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
     source = PLUGIN.read_text(encoding="utf-8")
-    assert manifest["version"] == package["version"] == "1.4.0"
-    assert list(manifest["history"])[0] == "v1.4.0"
-    assert 'plugin_version = "1.4.0"' in source
-    assert 'return "vue", "dist/v1.4.0/assets"' in source
-    assert "assetsDir: 'v1.4.0/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
+    assert manifest["version"] == package["version"] == "1.5.0"
+    assert list(manifest["history"])[0] == "v1.5.0"
+    assert 'plugin_version = "1.5.0"' in source
+    assert 'return "vue", "dist/v1.5.0/assets"' in source
+    assert "assetsDir: 'v1.5.0/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
 
 
 def test_plugin_exposes_only_authenticated_readonly_bundle_analysis() -> None:
     module = _load_plugin()
     instance = module.MediaGovernor()
-    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v1.4.0/assets")
+    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v1.5.0/assets")
     instance.init_plugin({"enabled": True})
     assert instance.get_state() is True
     api = instance.get_api()
@@ -120,14 +120,18 @@ def test_model_output_is_structured_and_remains_only_a_diagnosis() -> None:
 
 def test_frontend_uses_one_bundle_tree_then_model_and_official_verification() -> None:
     page = PAGE.read_text(encoding="utf-8")
-    for endpoint in ("history/transfer?status=${status}", "storage/directories", "storage/list", "plugin/MediaGovernor/bundle_analyze", "media/source", "media/recognize", "media/recognize_file", "media/search", "transfer/manual/history", "transfer/manual/target-path", "transfer/manual"):
+    for endpoint in ("history/transfer?status=${status}", "storage/directories?directory_type=all", "storage/list", "plugin/MediaGovernor/bundle_analyze", "media/source", "media/recognize", "media/recognize_file", "media/search", "transfer/manual/history", "transfer/manual/target-path", "transfer/manual"):
         assert endpoint in page
-    assert "packageRoot(row)" in page and "return root?.path ? itemKey(root)" in page
+    assert "inventoryGroups(roots)" in page
+    assert "当前库存" in page and "历史只作交叉线索" in page
+    assert "inventoryNodeLimit" in page
     assert "replace(/[\\[\\]【】()]/g, ' ')" in page
     assert "name.match(/\\[(\\d{1,3})\\]" in page
     assert "bundlePayload" in page and "diagnoseBundle" in page and "diagnosisText" in page
     assert "整包模型判断" in page and "查看发送给模型的目录结构" in page
-    assert "来源集号超过候选总集数" in page
+    assert "候选总集数" in page and "hardReject" in page
+    assert "videoSource" in page and "music|audio" in page
+    assert "organizationIssues" in page and "重复集号" in page
     assert "fetch(" not in page and "axios" not in page
 
 
