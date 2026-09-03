@@ -15,6 +15,7 @@ import types
 ROOT = Path(__file__).resolve().parents[3]
 PLUGIN = ROOT / "plugins.v3/mediagovernor/__init__.py"
 PAGE = ROOT / "plugins.v3/mediagovernor/src/components/AppPage.vue"
+RULES = ROOT / "plugins.v3/mediagovernor/src/lib/governance.js"
 
 
 class _FakeLLMHelper:
@@ -28,7 +29,10 @@ class _FakeLLMHelper:
 
 
 class _FakeLLM:
+    calls = 0
+
     async def ainvoke(self, _prompt):
+        type(self).calls += 1
         return types.SimpleNamespace(content='''{"classification":"media","title":"Cowboy Bebop","original_title":"Cowboy Bebop","year":"1998","media_type":"tv","season":1,"expected_episodes":[1,2,3,26],"confidence":0.92,"evidence_indexes":[0,1],"reasons":["文件名与集号一致"],"abstain":false}''')
 
 
@@ -38,6 +42,7 @@ def _load_plugin():
     agent = types.ModuleType("app.agent")
     llm = types.ModuleType("app.agent.llm")
     helper = types.ModuleType("app.agent.llm.helper")
+    fastapi = types.ModuleType("fastapi")
 
     class PluginBase(ABC):
         @abstractmethod
@@ -46,12 +51,14 @@ def _load_plugin():
 
     plugins._PluginBase = PluginBase
     helper.LLMHelper = _FakeLLMHelper
-    saved = {name: sys.modules.get(name) for name in ("app", "app.plugins", "app.agent", "app.agent.llm", "app.agent.llm.helper")}
-    sys.modules.update({"app": app, "app.plugins": plugins, "app.agent": agent, "app.agent.llm": llm, "app.agent.llm.helper": helper})
+    fastapi.Request = type("Request", (), {})
+    saved = {name: sys.modules.get(name) for name in ("app", "app.plugins", "app.agent", "app.agent.llm", "app.agent.llm.helper", "fastapi")}
+    sys.modules.update({"app": app, "app.plugins": plugins, "app.agent": agent, "app.agent.llm": llm, "app.agent.llm.helper": helper, "fastapi": fastapi})
     try:
         spec = importlib.util.spec_from_file_location("mediagovernor_plugin", PLUGIN)
         assert spec and spec.loader
         module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         return module
     finally:
@@ -66,17 +73,17 @@ def test_versions_and_federation_assets_are_synced() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
     source = PLUGIN.read_text(encoding="utf-8")
-    assert manifest["version"] == package["version"] == "1.5.0"
-    assert list(manifest["history"])[0] == "v1.5.0"
-    assert 'plugin_version = "1.5.0"' in source
-    assert 'return "vue", "dist/v1.5.0/assets"' in source
-    assert "assetsDir: 'v1.5.0/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
+    assert manifest["version"] == package["version"] == "1.6.0"
+    assert list(manifest["history"])[0] == "v1.6.0"
+    assert 'plugin_version = "1.6.0"' in source
+    assert 'return "vue", "dist/v1.6.0/assets"' in source
+    assert "assetsDir: 'v1.6.0/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
 
 
 def test_plugin_exposes_only_authenticated_readonly_bundle_analysis() -> None:
     module = _load_plugin()
     instance = module.MediaGovernor()
-    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v1.5.0/assets")
+    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v1.6.0/assets")
     instance.init_plugin({"enabled": True})
     assert instance.get_state() is True
     api = instance.get_api()
@@ -118,6 +125,25 @@ def test_model_output_is_structured_and_remains_only_a_diagnosis() -> None:
     assert uncertain.abstain is True
 
 
+def test_same_sanitized_bundle_reuses_in_memory_model_diagnosis() -> None:
+    module = _load_plugin()
+    instance = module.MediaGovernor()
+    instance.init_plugin({"enabled": True})
+    _FakeLLM.calls = 0
+
+    class Request:
+        async def json(self):
+            return {"evidence": {"title_hints": ["Cowboy Bebop"], "entries": [{"name": "Cowboy.Bebop.S01E01.mkv", "type": "file", "depth": 1}], "episodes": [1], "video_count": 1}}
+
+    async def run():
+        first = await instance.api_bundle_analyze(Request())
+        second = await instance.api_bundle_analyze(Request())
+        assert first.success and second.success
+
+    asyncio.run(run())
+    assert _FakeLLM.calls == 1
+
+
 def test_frontend_uses_one_bundle_tree_then_model_and_official_verification() -> None:
     page = PAGE.read_text(encoding="utf-8")
     for endpoint in ("history/transfer?status=${status}", "storage/directories?directory_type=all", "storage/list", "plugin/MediaGovernor/bundle_analyze", "media/source", "media/recognize", "media/recognize_file", "media/search", "transfer/manual/history", "transfer/manual/target-path", "transfer/manual"):
@@ -131,7 +157,11 @@ def test_frontend_uses_one_bundle_tree_then_model_and_official_verification() ->
     assert "整包模型判断" in page and "查看发送给模型的目录结构" in page
     assert "候选总集数" in page and "hardReject" in page
     assert "videoSource" in page and "music|audio" in page
-    assert "organizationIssues" in page and "重复集号" in page
+    assert "organizationIssues" in page and "acceptanceFixtures" in page
+    rules = RULES.read_text(encoding="utf-8")
+    assert "发现重复集号" in rules and "集号缺失" in rules
+    assert "acceptanceFixtures" in page and "验收样例" in page
+    assert "dedupeRoots" in page and "scopeLimit" in page
     assert "fetch(" not in page and "axios" not in page
 
 

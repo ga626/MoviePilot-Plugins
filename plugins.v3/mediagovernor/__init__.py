@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import re
@@ -48,7 +49,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "找对作品并核对整理：整包 AI 证据分析、原生候选核验和官方逐文件预览。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.5.0"
+    plugin_version = "1.6.0"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -59,10 +60,12 @@ class MediaGovernor(_PluginBase):
     _max_entries = 500
     _max_name_length = 180
     _request_timeout_seconds = 45
+    _max_cached_diagnoses = 200
 
     def init_plugin(self, config: dict[str, Any] | None = None) -> None:
         """只读取启用开关；读取目录与模型调用均由用户在页面显式触发。"""
         self._enabled = bool((config or {}).get("enabled"))
+        self._diagnosis_cache: dict[str, BundleDiagnosis] = {}
 
     def get_state(self) -> bool:
         return self._enabled
@@ -73,7 +76,7 @@ class MediaGovernor(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> tuple[str, str]:
-        return "vue", "dist/v1.5.0/assets"
+        return "vue", "dist/v1.6.0/assets"
 
     def get_sidebar_nav(self) -> list[dict[str, Any]]:
         return []
@@ -94,6 +97,7 @@ class MediaGovernor(_PluginBase):
 
     def stop_service(self) -> None:
         """满足宿主生命周期合同；本插件不创建后台服务或外部资源。"""
+        self._diagnosis_cache = {}
         return None
 
     def get_form(self) -> tuple[list[dict], dict[str, Any]]:
@@ -214,6 +218,12 @@ class MediaGovernor(_PluginBase):
             response = await asyncio.wait_for(asyncio.to_thread(llm.invoke, prompt), timeout=self._request_timeout_seconds)
         return self._diagnosis_from_model(self._extract_json(self._extract_response_text(response)), len(evidence["entries"]))
 
+    @staticmethod
+    def _evidence_key(evidence: dict[str, Any]) -> str:
+        """仅对已脱敏且已限长的证据摘要取指纹，缓存不保存路径或媒体内容。"""
+        encoded = json.dumps(evidence, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
     async def api_bundle_analyze(self, request: Request) -> BundleAnalysisResponse:
         """由已登录的 Vue 工作台显式调用；失败不写样本、不改变识别词或媒体。"""
         if not self._enabled:
@@ -225,8 +235,15 @@ class MediaGovernor(_PluginBase):
         evidence = self._normalise_evidence((body or {}).get("evidence"))
         if not evidence["entries"] and not evidence["title_hints"]:
             return BundleAnalysisResponse(success=False, message="整包没有可发送给模型的名称或结构证据")
+        cache = getattr(self, "_diagnosis_cache", {})
+        key = self._evidence_key(evidence)
+        diagnosis = cache.get(key)
         try:
-            diagnosis = await self._invoke_bundle_model(evidence)
+            if diagnosis is None:
+                diagnosis = await self._invoke_bundle_model(evidence)
+                if len(cache) >= self._max_cached_diagnoses:
+                    cache.pop(next(iter(cache)), None)
+                cache[key] = diagnosis
         except asyncio.TimeoutError:
             return BundleAnalysisResponse(success=False, message="当前 MoviePilot 模型分析超时；没有改变任何媒体")
         except Exception:

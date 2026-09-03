@@ -1,0 +1,108 @@
+{
+  "schema": "knowledgeradar-research-evidence/v1",
+  "artifact": {
+    "report_path": "docs/architecture/mediagovernor-future-development-roadmap.md",
+    "task_prompt_hash": "sha256:1aaa256e9254cb5f",
+    "created_at": "2026-09-04T00:00:00+08:00"
+  },
+  "research_task": {
+    "schema": "knowledgeradar-research-task/v1",
+    "task_id": "kr-research-28cb57d700f737f3",
+    "objective": "为 MediaGovernor 制定可验证的后续开发路线，不修改产品或 NAS。",
+    "task_boundary": "single_user_requested_delivery"
+  },
+  "budget": {
+    "selected_profile": "deep",
+    "selected_by": "user_request",
+    "reason": "需要同时梳理插件现状、上游宿主合同、测试方式与长期开发路径。",
+    "remaining_repair_rounds": 0
+  },
+  "tool_calls": [
+    {"id": "T001", "tool": "mcp__knowledgeradar__health_check", "args_summary": {"mode": "summary"}, "status": "ok"},
+    {"id": "T002", "tool": "mcp__knowledgeradar__get_capabilities", "args_summary": {"summary": true}, "status": "ok"},
+    {"id": "T003", "tool": "mcp__knowledgeradar__kr_research", "args_summary": {"mode": "deep_route", "budget": "deep"}, "status": "ok", "receipt_id": "kr-research-28cb57d700f737f3"},
+    {"id": "T004", "tool": "local_source_read", "args_summary": {"surfaces": ["MediaGovernor AppPage", "V3 tests", "plugin documentation"]}, "status": "ok"},
+    {"id": "T005", "tool": "mcp__knowledgeradar__extract_web_page", "args_summary": {"source": "Vitest Component Testing Guide"}, "status": "ok", "receipt_id": "receipt-d7b00a1fad448478"},
+    {"id": "T006", "tool": "mcp__knowledgeradar__review_research_progress", "args_summary": {"phase": "before_delivery"}, "status": "ok", "receipt_id": "receipt-348f6f6f14d3e8c7"}
+  ],
+  "evidence_items": [
+    {"id": "E001", "type": "local_code", "title": "当前插件页面实现", "local_path": "plugins.v3/mediagovernor/src/components/AppPage.vue", "summary": "库存扫描、包边界、目录取证、模型调用、候选搜索、预览与页面状态集中在一个组件。", "strength": "strong"},
+    {"id": "E002", "type": "local_code", "title": "当前插件测试", "local_path": "tests/v3/mediagovernor/test_plugin.py", "summary": "现有测试大量断言源码文本，不能证明目录会被正确分包或候选会以正确状态展示。", "strength": "strong"},
+    {"id": "E003", "type": "local_code", "title": "V3 插件合同", "local_path": "docs/Plugin_Development.md", "summary": "插件必须遵守 V3 生命周期、只读边界和宿主公开合同。", "strength": "strong"},
+    {"id": "E004", "type": "local_code", "title": "本仓开发约定", "local_path": "docs/Repository_Guide.md", "summary": "前端为模块联邦构建物，候选仍需要真实宿主加载验证。", "strength": "strong"},
+    {"id": "E005", "type": "upstream_code", "source_ecology": "github_repository_ecology", "title": "MoviePilot Frontend 模块联邦指南", "url": "https://github.com/jxxghp/MoviePilot-Frontend/blob/v3/docs/module-federation-guide.md", "summary": "此前已成功核验构建监听和本地插件开发约定；本轮 GitHub 动态抽取连接重置，未把该传输失败当作能力结论。", "strength": "strong", "receipt_id": "receipt-d41a85bf53357dcd"},
+    {"id": "E006", "type": "web", "source_ecology": "generic_web_ecology", "title": "Vitest Component Testing Guide", "url": "https://vitest.dev/guide/browser/component-testing", "summary": "官方指南要求验证用户可见行为、交互、加载和错误状态；Browser Mode 可发现真实 DOM、CSS 与浏览器差异。", "strength": "strong", "receipt_id": "receipt-d7b00a1fad448478"},
+    {"id": "E007", "type": "runtime_probe", "title": "本地构建与运行时依赖盘点", "summary": "本机可运行 Vite，匹配的 MoviePilot Python 环境有 SQLAlchemy；这只证明可做本机验证，不证明 NAS 已加载候选。", "strength": "strong"},
+    {"id": "E008", "type": "runtime_probe", "title": "GitHub 动态抽取边界", "summary": "本轮两个 MoviePilot GitHub 页面抽取均遇到 ERR_CONNECTION_RESET；这是传输层降级，不是上游不支持的证据。", "strength": "strong", "receipt_ids": ["receipt-b64e2301c41c2f66", "receipt-2d47c03c38310d55"]}
+  ],
+  "claims": [
+    {"id": "C001", "text": "下一步应先做用户可见的验收底座，而不是再次直接安装一版完整扫描器。", "importance": "critical", "supporting_evidence_ids": ["E001", "E002", "E006", "E007"]},
+    {"id": "C002", "text": "检查范围、作品包边界、候选核验和整理审计必须拆成可独立验证的模块。", "importance": "critical", "supporting_evidence_ids": ["E001", "E002", "E003"]},
+    {"id": "C003", "text": "在没有逐文件官方预览与删除清单的合同前，插件不得自行清理硬链接或执行媒体写入。", "importance": "critical", "supporting_evidence_ids": ["E003", "E004"]},
+    {"id": "C004", "text": "当前不建立 NAS 热更新开发线；本机可见验收后，用同一候选制品做一次真实宿主零写入验证更可靠。", "importance": "high", "supporting_evidence_ids": ["E004", "E007", "E008"]}
+  ],
+  "coverage": {
+    "required_surfaces": ["local_code", "upstream_code", "external_web", "runtime_probe"],
+    "covered_surfaces": ["local_code", "upstream_code", "external_web", "runtime_probe"],
+    "missing_surfaces": [],
+    "required_source_ecologies": ["github_repository_ecology", "generic_web_ecology"],
+    "covered_source_ecologies": ["github_repository_ecology", "generic_web_ecology"],
+    "missing_source_ecologies": [],
+    "skipped_surfaces": [
+      {"surface": "live_media", "reason": "本轮只写规划报告；不读取真实媒体、下载、数据库或日志。"},
+      {"surface": "live_write_validation", "reason": "未获媒体写入、硬链接、安装或启用授权。"},
+      {"surface": "nas_hot_reload", "reason": "没有建立或验证可由 Codex 长期写入的 NAS 开发目录。"}
+    ],
+    "skipped_source_ecologies": [
+      {"source_ecology": "wechat_public_article_ecology", "reason": "无法证明 MoviePilot V3 的实际插件合同。"},
+      {"source_ecology": "bilibili_video_ecology", "reason": "演示视频不能替代源码、测试或宿主合同。"},
+      {"source_ecology": "youtube_video_ecology", "reason": "演示视频不能替代源码、测试或宿主合同。"},
+      {"source_ecology": "zhihu_discussion_ecology", "reason": "讨论内容不能证明当前插件实现或安全写入边界。"},
+      {"source_ecology": "xiaohongshu_experience_ecology", "reason": "体验帖不能证明当前插件实现或安全写入边界。"},
+      {"source_ecology": "academic_literature_ecology", "reason": "本轮是具体产品和宿主开发流程，不依赖学术结论。"}
+    ]
+  },
+  "questioner_checkpoints": [
+    {"stage": "after_local_archaeology", "questions": ["现有测试能否证明用户看到的结果？", "当前组件能否单独验证范围、分包和候选？"], "decision": "先建立可见验收底座并拆分纯规则模块。", "reason": "源码和测试均显示核心行为未被端到端验证。"},
+    {"stage": "after_first_external_round", "questions": ["是否应继续用静态源码文字断言？", "是否需要每次 NAS 上传才能验证页面？"], "decision": "加入行为导向组件测试与本机验收页，不把 NAS 作为日常调试环境。", "reason": "Vitest 官方指南支持行为与错误状态测试；当前 NAS 自动同步未验证。"},
+    {"stage": "before_final_report", "questions": ["是否已有足够证据允许设计媒体写入？", "是否能把真实失败包身份写成既成事实？"], "decision": "停止在只读路线图，不设计执行或删除功能。", "reason": "官方逐文件执行合同和每个真实包的证据均未完成核验。"}
+  ],
+  "known_issues": {
+    "schema": "knowledgeradar-known-issues/v1",
+    "issues": [
+      {"id": "KI-001", "description": "当前包边界与重叠根目录处理不足，扫描数量不能代表当前问题全集。", "discovered_at": "2026-09-04", "status": "未解决", "next_action": "PR 1 先实现有限范围、根去重、包指纹和部分结果标识。"},
+      {"id": "KI-002", "description": "当前缺少用户可见的输入、预期、实际输出对照，导致本地绿色不能证明识别正确。", "discovered_at": "2026-09-04", "status": "未解决", "next_action": "PR 0 建立 fixture、组件测试和可见验收页。"},
+      {"id": "KI-003", "description": "官方整理预览与执行参数的完整语义、以及旧硬链接删除清单未在本轮验证。", "discovered_at": "2026-09-04", "status": "未解决", "next_action": "PR 3 先用零写入样例验证，再决定是否单开受控修复设计。"}
+    ]
+  },
+  "decision_register": {
+    "schema": "knowledgeradar-decision-register/v1",
+    "decisions": [
+      {"id": "D-001", "title": "下一项开发工作的顺序", "status": "pending_user_decision", "options": ["继续微调扫描器", "先做可见验收底座"], "recommended_action": "先做 PR 0。", "decision_record_location": "docs/architecture/mediagovernor-future-development-roadmap.md#本报告后的第一步", "next_review": "用户批准下一项实现工作前"},
+      {"id": "D-002", "title": "开发验证环境", "status": "pending_user_decision", "options": ["每次 NAS 上传调试", "本机可见验收加候选宿主验证"], "recommended_action": "采用后者。", "decision_record_location": "docs/architecture/mediagovernor-future-development-roadmap.md#开发环境决定", "next_review": "未来出现可持续 NAS 同步合同后"}
+    ]
+  },
+  "roadmap": [
+    {"phase": "PR 0", "task": "可见验收底座", "method": "提取纯规则模块，用脱敏 fixture、mock API、组件测试和验收页走同一算法。", "input": "脱敏 fixture 和纯规则模块", "output": "输入、预期、实际与失败原因可见的验收页", "dependency": "无 NAS 写入", "acceptance": "Cowboy Bebop 冲突等固定样例可重复显示正确状态。"},
+    {"phase": "PR 1", "task": "范围与包边界", "method": "先限定范围，再做根去重、包指纹合并和部分结果标识。", "input": "当前可读库存与历史线索", "output": "去重后的逻辑作品包与覆盖说明", "dependency": "PR 0", "acceptance": "历史残留和父目录不会被误报为当前问题。"},
+    {"phase": "PR 2", "task": "整包证据与候选核验", "method": "确定性解析优先，受限模型只诊断，最后以官方候选详情交叉核验。", "input": "已分包的确定性线索和受限模型诊断", "output": "带冲突理由的可信候选", "dependency": "PR 1", "acceptance": "翻拍、动画与真人版、季集冲突不自动确认。"},
+    {"phase": "PR 3", "task": "整理正确的只读审计", "method": "只对确认身份做历史、目标规则和官方逐文件零写入预览对照。", "input": "已确认身份和官方逐文件预览", "output": "可解释的正常、锁定与待处理状态", "dependency": "PR 2 与官方合同验证", "acceptance": "无完整预览不提供执行；不增加自行删除能力。"},
+    {"phase": "PR 4", "task": "候选与发布收口", "method": "冻结源码与 ZIP，用同一制品完成本地检查、PR CI、真实宿主零写入和发布回执。", "input": "冻结的同一候选制品", "output": "真实宿主零写入验证和发布回执", "dependency": "PR 0 至 PR 3", "acceptance": "源码 SHA、ZIP SHA、宿主加载和远端交付一致。"}
+  ],
+  "process_quality": {
+    "schema": "knowledgeradar-process-quality/v1",
+    "code_modified": false,
+    "preflight_skip_reason": "本轮只新增规划报告及其证据索引，不修改插件、NAS 或媒体。",
+    "capability_handshake": {"health_check": "ok", "get_capabilities": "ok"},
+    "local_archaeology": {"performed": true, "surfaces": ["MediaGovernor AppPage", "V3 plugin tests", "plugin development documentation", "local build runtime"]},
+    "source_ecology_plan": {"considered": ["github_repository_ecology", "generic_web_ecology", "wechat_public_article_ecology", "bilibili_video_ecology", "youtube_video_ecology", "zhihu_discussion_ecology", "xiaohongshu_experience_ecology", "academic_literature_ecology"], "selected": ["github_repository_ecology", "generic_web_ecology"], "skipped": ["wechat_public_article_ecology", "bilibili_video_ecology", "youtube_video_ecology", "zhihu_discussion_ecology", "xiaohongshu_experience_ecology", "academic_literature_ecology"]},
+    "validation_ladder": {"selected_profile": "deep", "commands": ["JSON parse", "check_research_quality.py"], "results": "本次质量检查通过后更新。"},
+    "presentation": {"report": "中文 Markdown", "audience": "产品决策和下一阶段实现", "detailed_roadmap_in_report": true, "roadmap_in_sidecar": true}
+  },
+  "claim_evidence_chains": [
+    {"claim_id": "C001", "tool_call_ids": ["T004", "T005"], "evidence_ids": ["E001", "E002", "E006", "E007"], "sources": ["本地源码", "Vitest 官方指南"], "extracted_facts": ["核心逻辑集中", "测试多为文字断言", "官方建议测行为与错误状态"], "inference": "可见验收是降低误判和无效安装循环的第一步。", "limitations": "尚未执行新增测试，因为本轮不做代码实现。", "strength": "strong"},
+    {"claim_id": "C002", "tool_call_ids": ["T004"], "evidence_ids": ["E001", "E002", "E003"], "sources": ["本地源码与插件合同"], "extracted_facts": ["范围、分包、模型、候选和预览耦合", "核心行为未被真实组件测试"], "inference": "必须拆分并分阶段验收。", "limitations": "尚未重构。", "strength": "strong"},
+    {"claim_id": "C003", "tool_call_ids": ["T004"], "evidence_ids": ["E003", "E004"], "sources": ["V3 插件合同与仓库约定"], "extracted_facts": ["插件无自行媒体写入授权", "候选与宿主验证不能互相替代"], "inference": "执行/删除功能必须后置且另行核验。", "limitations": "官方执行语义尚未用零写入样例复核。", "strength": "strong"},
+    {"claim_id": "C004", "tool_call_ids": ["T004", "T005"], "evidence_ids": ["E004", "E006", "E007", "E008"], "sources": ["仓库约定、官方测试指南、传输边界"], "extracted_facts": ["本机可做构建和浏览器组件验证", "NAS 自动同步尚未验证", "上游网络本轮有降级"], "inference": "本机可见验收加一次冻结候选的宿主验证更可控。", "limitations": "未来有稳定同步合同后可另做可行性验证。", "strength": "strong"}
+  ]
+}
