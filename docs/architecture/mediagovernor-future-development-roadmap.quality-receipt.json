@@ -1,0 +1,10 @@
+{
+  "schema": "knowledgeradar-research-quality-receipt/v1",
+  "status": "pass",
+  "checked_at": "2026-09-03T18:20:04.181488+00:00",
+  "report_path": "D:\\Projects\\NAS docker\\media-next\\plugins\\moviepilot-media-governor\\docs\\architecture\\mediagovernor-future-development-roadmap.md",
+  "evidence_path": "D:\\Projects\\NAS docker\\media-next\\plugins\\moviepilot-media-governor\\docs\\architecture\\mediagovernor-future-development-roadmap.evidence.json",
+  "report_sha256": "fc335a9a4e0708ea84adc070e594509ed30c36b5dce428288579accfea9e38c5",
+  "evidence_sha256": "ab86cb6b204e1ca890f3e8a7ddc87bf5f76f0a094557f8e71e44265059c99491",
+  "quality_check_schema": "knowledgeradar-research-quality-check/v1"
+}
