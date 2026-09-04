@@ -73,17 +73,17 @@ def test_versions_and_federation_assets_are_synced() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
     source = PLUGIN.read_text(encoding="utf-8")
-    assert manifest["version"] == package["version"] == "2.0.0"
-    assert list(manifest["history"])[0] == "v2.0.0"
-    assert 'plugin_version = "2.0.0"' in source
-    assert 'return "vue", "dist/v2.0.0/assets"' in source
-    assert "assetsDir: 'v2.0.0/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
+    assert manifest["version"] == package["version"] == "2.1.0"
+    assert list(manifest["history"])[0] == "v2.1.0"
+    assert 'plugin_version = "2.1.0"' in source
+    assert 'return "vue", "dist/v2.1.0/assets"' in source
+    assert "assetsDir: 'v2.1.0/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
 
 
 def test_plugin_exposes_only_authenticated_evidence_and_analysis_interfaces() -> None:
     module = _load_plugin()
     instance = module.MediaGovernor()
-    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v2.0.0/assets")
+    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v2.1.0/assets")
     instance.init_plugin({"enabled": True})
     assert instance.get_state() is True
     api = instance.get_api()
@@ -93,10 +93,13 @@ def test_plugin_exposes_only_authenticated_evidence_and_analysis_interfaces() ->
     assert api[1]["response_model"] is module.BatchBundleAnalysisResponse
     assert instance.get_command() == instance.get_service() == []
     assert instance.stop_service() is None
-    modules = {node.module or "" for node in ast.walk(ast.parse(PLUGIN.read_text(encoding="utf-8"))) if isinstance(node, ast.ImportFrom)}
+    source = PLUGIN.read_text(encoding="utf-8")
+    modules = {node.module or "" for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ImportFrom)}
     forbidden = ("app.db", "app.chain", "app.application", "app.core", "app.helper", "app.utils", "app.sdk._legacy")
     assert not any(module_name.startswith(forbidden) for module_name in modules)
     assert "app.agent.llm.helper" in modules
+    assert "app.sdk.events" in source
+    assert "EventType.TransferComplete" in source and "EventType.TransferFailed" in source
 
 
 def test_bundle_evidence_is_bounded_and_has_no_path_field() -> None:
@@ -163,17 +166,34 @@ def test_batch_rejects_paths_and_uses_one_model_call_for_multiple_bundles() -> N
     assert _FakeLLM.calls == 1
 
 
-def test_frontend_uses_one_bundle_tree_then_model_and_official_verification() -> None:
+def test_event_index_only_returns_events_recorded_for_the_current_scope() -> None:
+    module = _load_plugin()
+    instance = module.MediaGovernor()
+    instance._event_index = {"items": [
+        {"scope": "legacy", "history_id": 1},
+        {"scope": "2.1", "history_id": 2, "status": "success"},
+    ]}
+    result = asyncio.run(instance.api_evidence_index())
+    assert result.success is True
+    assert result.data == {"items": [{"scope": "2.1", "history_id": 2, "status": "success"}], "realtime_only": True}
+
+
+def test_frontend_uses_history_anchored_bounded_fallback_pipeline() -> None:
     page = PAGE.read_text(encoding="utf-8")
-    for endpoint in ("history/transfer?status=${status}", "storage/directories?directory_type=all", "storage/list", "plugin/MediaGovernor/bundle_analyze_batch", "media/source", "media/recognize", "media/recognize_file", "media/search", "transfer/manual/history", "transfer/manual/target-path", "transfer/manual"):
+    for endpoint in ("history/transfer?status=${status}", "storage/list", "plugin/MediaGovernor/bundle_analyze_batch", "media/source", "media/recognize", "media/recognize_file", "media/search", "transfer/manual/history", "transfer/manual/target-path", "transfer/manual"):
         assert endpoint in page
-    assert "inventoryGroups(roots)" in page
-    assert "groupsFromFiles(current, children)" in page
-    assert "currentFailureGroups" in page and "mergeExactHistory(sourceInventory, successGroups)" in page
+    assert "reviewHistoryScope({ failed, successful, events })" in page
+    assert "plugin/MediaGovernor/evidence_index" in page
+    assert "_mediagovernor_event_success" in page
+    assert "prepareGroups(groups)" in page
+    assert "needsModelReview" in page and "modelQueue" in page and "baseline" in page
+    assert "inventoryGroups(" not in page
+    assert "readDirectories(" not in page
+    assert "storage/directories?directory_type=all" not in page
+    assert "Promise.all(groups.map" not in page
     assert "card.state !== 'clear'" in page
     assert "slice(0, 2)" in page
-    assert "当前库存" in page and "完整包结构" in page
-    assert "inventoryNodeLimit" not in page and "scopeLimit" not in page
+    assert "当前来源包" in page and "不会递归扫描整个媒体库" in page
     assert "replace(/[\\[\\]【】()]/g, ' ')" in page
     assert "strictEpisodeHints" in page
     assert "bundlePayload" in page and "diagnoseBundles" in page and "diagnosisText" in page
@@ -185,9 +205,11 @@ def test_frontend_uses_one_bundle_tree_then_model_and_official_verification() ->
     rules = RULES.read_text(encoding="utf-8")
     assert "initialIssueSignals" in rules and "strictEpisodeHints" in rules
     assert "目录名与视频文件名不像同一作品" not in page
-    assert "完整包结构、当前硬链接目标和模型判断" in page
+    assert "当前来源、整理历史和硬链接目标一致；没有触发 AI 兜底" in page
     assert "acceptanceFixtures" in page and "验收样例" in page
-    assert "dedupeRoots" in page and "currentTargetAudit" in page and "historyIdentityAudit" in page
+    assert "currentTargetAudit" in page and "historyIdentityAudit" in page
+    assert "run.value.aiCompleted" in page and "await waitIfPaused()" in page
+    assert "reviewHistoryScope" in rules
     assert "fetch(" not in page and "axios" not in page
 
 

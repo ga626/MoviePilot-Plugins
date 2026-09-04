@@ -90,6 +90,24 @@ export function auditCoverage({ expected = 0, scanned = 0, limited = false } = {
   return { complete: false, message: `只覆盖 ${done}/${total} 个当前包` }
 }
 
+// 日常兜底不能把全量成功历史重新当作待检查库存。失败记录只有尚未被
+// 同来源成功记录覆盖时才保留；成功记录仅限插件已收到的实时整理事件。
+export function reviewHistoryScope({ failed = [], successful = [], events = [] } = {}) {
+  const sourceKey = row => {
+    const source = row?.src_fileitem || row?.source_fileitem || row?.fileitem || {}
+    return `${row?.src_storage || source.storage || 'local'}:${row?.src || source.path || ''}`
+  }
+  const successSources = new Set(successful.map(sourceKey).filter(key => !key.endsWith(':')))
+  const activeFailed = failed.filter(row => !successSources.has(sourceKey(row)))
+  const eventSuccessIds = new Set(events
+    .filter(item => item?.status === 'success' && item?.history_id !== undefined && item?.history_id !== null)
+    .map(item => String(item.history_id)))
+  const eventSuccess = successful
+    .filter(row => eventSuccessIds.has(String(row?.id)))
+    .map(row => ({ ...row, _mediagovernor_event_success: true }))
+  return { activeFailed, eventSuccess, recovered: failed.length - activeFailed.length }
+}
+
 export function strictEpisodeHints(name) {
   const value = clean(name)
   const season = value.match(/(?:^|[. _-])s\d{1,2}[. _-]*e(\d{1,3})(?:[. _-]*e(\d{1,3}))?(?=$|[. _-])/i)

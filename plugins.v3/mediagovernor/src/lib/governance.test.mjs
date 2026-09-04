@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { acceptanceFixtures, auditCoverage, bundleFamily, dedupeRoots, episodeAudit, historyIdentityAudit, initialIssueSignals, organizationAudit, pathRelationship, resolveIdentity, strictEpisodeHints } from './governance.js'
+import { acceptanceFixtures, auditCoverage, bundleFamily, dedupeRoots, episodeAudit, historyIdentityAudit, initialIssueSignals, organizationAudit, pathRelationship, resolveIdentity, reviewHistoryScope, strictEpisodeHints } from './governance.js'
 
 test('重叠根目录只保留最小可扫描范围', () => {
   const result = dedupeRoots([{ path: '/library', storage: 'local' }, { path: '/library/tv', storage: 'local' }, { path: '/downloads', storage: 'local' }])
@@ -41,6 +41,19 @@ test('全量基线不能把未核验、年份冲突或类型冲突伪装成通�
 test('全量检查覆盖不完整时不能给出通过结论', () => {
   assert.deepEqual(auditCoverage({ expected: 180, scanned: 180, limited: false }), { complete: true, message: '已覆盖全部 180 个当前包' })
   assert.deepEqual(auditCoverage({ expected: 181, scanned: 180, limited: true }), { complete: false, message: '只覆盖 180/181 个当前包' })
+})
+
+test('日常兜底只保留未恢复失败和实时成功，不重扫旧成功历史', () => {
+  const source = (id, path) => ({ id, src: path, src_storage: 'local' })
+  const result = reviewHistoryScope({
+    failed: [source(1, '/download/recovered.mkv'), source(2, '/download/failed.mkv')],
+    successful: [source(3, '/download/recovered.mkv'), source(4, '/download/new-success.mkv'), source(5, '/download/old-success.mkv')],
+    events: [{ status: 'success', history_id: 4 }, { status: 'failed', history_id: 2 }],
+  })
+  assert.deepEqual(result.activeFailed.map(row => row.id), [2])
+  assert.deepEqual(result.eventSuccess.map(row => row.id), [4])
+  assert.equal(result.eventSuccess[0]._mediagovernor_event_success, true)
+  assert.equal(result.recovered, 1)
 })
 
 test('集号只接受明确的剧集格式，清晰度数字不能伪造缺集', () => {
