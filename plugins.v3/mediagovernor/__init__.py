@@ -83,7 +83,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "找对作品并核对整理：整包 AI 证据分析、原生候选核验和官方逐文件预览。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.9.0"
+    plugin_version = "2.0.0"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -102,7 +102,7 @@ class MediaGovernor(_PluginBase):
     def init_plugin(self, config: dict[str, Any] | None = None) -> None:
         """只读取启用开关；读取目录与模型调用均由用户在页面显式触发。"""
         self._enabled = bool((config or {}).get("enabled"))
-        self._diagnosis_cache: dict[str, BundleDiagnosis] = {}
+        self._diagnosis_cache = self._read_diagnosis_cache()
         self._event_index = self._read_event_index()
         self._registered_events = False
         self._register_transfer_events()
@@ -116,7 +116,7 @@ class MediaGovernor(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> tuple[str, str]:
-        return "vue", "dist/v1.9.0/assets"
+        return "vue", "dist/v2.0.0/assets"
 
     def get_sidebar_nav(self) -> list[dict[str, Any]]:
         return []
@@ -165,6 +165,34 @@ class MediaGovernor(_PluginBase):
         except Exception:
             value = None
         return value if isinstance(value, dict) and isinstance(value.get("items"), list) else {"items": []}
+
+    def _read_diagnosis_cache(self) -> dict[str, BundleDiagnosis]:
+        """只恢复脱敏证据指纹和结构化判断，重启后不重复消耗模型。"""
+        try:
+            value = self.get_data("diagnosis_cache")
+        except Exception:
+            value = None
+        if not isinstance(value, dict):
+            return {}
+        cache: dict[str, BundleDiagnosis] = {}
+        for key, diagnosis in value.items():
+            if not isinstance(key, str) or not isinstance(diagnosis, dict):
+                continue
+            try:
+                cache[key] = BundleDiagnosis.model_validate(diagnosis)
+            except Exception:
+                continue
+        return dict(list(cache.items())[-self._max_cached_diagnoses:])
+
+    def _save_diagnosis_cache(self) -> None:
+        """缓存只含模型结构化结果，不含路径、文件内容或认证信息。"""
+        try:
+            self.save_data("diagnosis_cache", {
+                key: diagnosis.model_dump(mode="json")
+                for key, diagnosis in self._diagnosis_cache.items()
+            })
+        except Exception:
+            return None
 
     def _save_event_index(self) -> None:
         try:
@@ -369,6 +397,7 @@ class MediaGovernor(_PluginBase):
                 if len(cache) >= self._max_cached_diagnoses:
                     cache.pop(next(iter(cache)), None)
                 cache[key] = diagnosis
+                self._save_diagnosis_cache()
         except asyncio.TimeoutError:
             return BundleAnalysisResponse(success=False, message="当前 MoviePilot 模型分析超时；没有改变任何媒体")
         except Exception:
@@ -420,6 +449,7 @@ class MediaGovernor(_PluginBase):
                         cache.pop(next(iter(cache)), None)
                     cache[self._evidence_key(evidence)] = diagnosis
                     diagnoses[key] = diagnosis
+                self._save_diagnosis_cache()
         except asyncio.TimeoutError:
             return BatchBundleAnalysisResponse(success=False, message="当前 MoviePilot 模型分析超时；没有改变任何媒体")
         except Exception:

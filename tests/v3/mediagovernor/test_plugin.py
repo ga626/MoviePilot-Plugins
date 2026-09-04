@@ -73,17 +73,17 @@ def test_versions_and_federation_assets_are_synced() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
     source = PLUGIN.read_text(encoding="utf-8")
-    assert manifest["version"] == package["version"] == "1.9.0"
-    assert list(manifest["history"])[0] == "v1.9.0"
-    assert 'plugin_version = "1.9.0"' in source
-    assert 'return "vue", "dist/v1.9.0/assets"' in source
-    assert "assetsDir: 'v1.9.0/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
+    assert manifest["version"] == package["version"] == "2.0.0"
+    assert list(manifest["history"])[0] == "v2.0.0"
+    assert 'plugin_version = "2.0.0"' in source
+    assert 'return "vue", "dist/v2.0.0/assets"' in source
+    assert "assetsDir: 'v2.0.0/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
 
 
 def test_plugin_exposes_only_authenticated_evidence_and_analysis_interfaces() -> None:
     module = _load_plugin()
     instance = module.MediaGovernor()
-    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v1.9.0/assets")
+    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v2.0.0/assets")
     instance.init_plugin({"enabled": True})
     assert instance.get_state() is True
     api = instance.get_api()
@@ -169,14 +169,15 @@ def test_frontend_uses_one_bundle_tree_then_model_and_official_verification() ->
         assert endpoint in page
     assert "inventoryGroups(roots)" in page
     assert "groupsFromFiles(current, children)" in page
-    assert "currentFailureGroups" in page and "mergeExactHistory(inventory, currentFailureGroups)" in page
+    assert "currentFailureGroups" in page and "mergeExactHistory(sourceInventory, successGroups)" in page
     assert "card.state !== 'clear'" in page
     assert "slice(0, 2)" in page
-    assert "当前库存" in page and "历史仅作为交叉线索" in page
-    assert "inventoryNodeLimit" in page
+    assert "当前库存" in page and "完整包结构" in page
+    assert "inventoryNodeLimit" not in page and "scopeLimit" not in page
     assert "replace(/[\\[\\]【】()]/g, ' ')" in page
     assert "strictEpisodeHints" in page
     assert "bundlePayload" in page and "diagnoseBundles" in page and "diagnosisText" in page
+    assert "entries + count > 1200" in page
     assert "整包模型判断" in page and "查看发送给模型的目录结构" in page
     assert "候选总集数" in page and "hardReject" in page
     assert "videoSource" in page and "music|audio" in page
@@ -184,9 +185,9 @@ def test_frontend_uses_one_bundle_tree_then_model_and_official_verification() ->
     rules = RULES.read_text(encoding="utf-8")
     assert "initialIssueSignals" in rules and "strictEpisodeHints" in rules
     assert "目录名与视频文件名不像同一作品" not in page
-    assert "当前失败记录和不同文件的重复集号当作问题入口" in page
+    assert "完整包结构、当前硬链接目标和模型判断" in page
     assert "acceptanceFixtures" in page and "验收样例" in page
-    assert "dedupeRoots" in page and "scopeLimit" in page
+    assert "dedupeRoots" in page and "currentTargetAudit" in page and "historyIdentityAudit" in page
     assert "fetch(" not in page and "axios" not in page
 
 
