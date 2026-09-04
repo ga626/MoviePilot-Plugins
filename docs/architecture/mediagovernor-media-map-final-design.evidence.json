@@ -1,0 +1,53 @@
+{
+  "schema": "knowledgeradar-research-evidence/v1",
+  "title": "MediaGovernor 媒体地图最终重设计：证据登记",
+  "date": "2026-09-04",
+  "research_task": {
+    "id": "kr-research-335b27886a585388",
+    "status": "open_at_write",
+    "access_path": "native_mcp"
+  },
+  "scope": "只读考古和最终设计；未读取真实媒体、未调用模型、未修改业务代码或 NAS。",
+  "tool_calls": [
+    {"id":"T001","tool":"mcp__knowledgeradar__health_check","args_summary":{"mode":"summary"},"status":"ok"},
+    {"id":"T002","tool":"mcp__knowledgeradar__get_capabilities","args_summary":{"summary":true},"status":"ok"},
+    {"id":"T003","tool":"mcp__knowledgeradar__kr_research","args_summary":{"mode":"first_wave","budget":"deep"},"status":"ok","research_task_id":"kr-research-335b27886a585388"},
+    {"id":"T004","tool":"mcp__knowledgeradar__kr_web_search","args_summary":{"query":"MoviePilot V3 插件开发与存储历史接口"},"status":"ok","receipt_id":"receipt-54eb159e84677ed1"},
+    {"id":"T005","tool":"mcp__knowledgeradar__extract_web_page","args_summary":{"source":"MoviePilot-Plugins Plugin_Development.md"},"status":"ok","receipt_id":"receipt-a65a8e90381fcbff"},
+    {"id":"T006","tool":"mcp__knowledgeradar__extract_web_page","args_summary":{"source":"上游 v3 app/sdk/governance.py"},"status":"degraded","receipt_id":"receipt-ee64ddb0afb4663a","reason":"上游同路径返回 404；只用作不依赖本地原型的反证。"},
+    {"id":"T007","tool":"local_source_read","args_summary":{"surfaces":["MediaGovernor v2.1 AppPage 与后端状态","MoviePilot storage/history/media/transfer endpoints","FileItem/TransferHistory/Event schemas","本地 AI 识别增强插件"]},"status":"ok"},
+    {"id":"T008","tool":"mcp__knowledgeradar__review_research_progress","args_summary":{"phase":"after_archaeology"},"status":"ok","receipt_id":"receipt-f7a3c710732a53e7"}
+  ],
+  "evidence_items": [
+    {"id":"E001","type":"local_code","path":"plugins.v3/mediagovernor/src/components/AppPage.vue","summary":"v2.1 以失败整理历史及插件启用后记录的成功事件决定扫描范围；文件型来源在 treeEvidence 的初始队列为空，能导致一秒完成、AI 0/0 的错误结论。","strength":"strong"},
+    {"id":"E002","type":"local_code","path":"MoviePilot/app/api/endpoints/storage.py; app/schemas/file.py","summary":"公开 storage/directories 可按 download/library 取当前配置；storage/list 返回 FileItem 的路径、类型、名称、大小、修改时间与子项，不含 inode 或硬链接计数。","strength":"strong"},
+    {"id":"E003","type":"local_code","path":"MoviePilot/app/api/endpoints/history.py; app/schemas/history.py; app/application/history.py","summary":"transfer 历史保存源/目标 FileItem、mode、身份、download hash 和成功状态；失败与成功历史是记录事实，不保证当前源或目标仍存在。","strength":"strong"},
+    {"id":"E004","type":"local_code","path":"MoviePilot/app/api/endpoints/media.py; app/api/endpoints/transfer.py; app/chain/transfer/history.py","summary":"已有原生文件识别、手动历史查询、目标路径计算和逐文件手动整理 preview；成功历史 logid 的非 preview 手动整理会把旧目标交给同一官方整理计划清理。","strength":"strong"},
+    {"id":"E005","type":"local_code","path":"MoviePilot/app/chain/transfer/settlement.py; app/schemas/event.py","summary":"TransferComplete/TransferFailed 仅在未来整理结算时发出，payload 有来源、结果、历史 ID、下载 hash 和幂等键，不能自动重播存量历史。","strength":"strong"},
+    {"id":"E006","type":"local_code","path":"plugins/airecognizerenhancer/__init__.py","summary":"现有 AI 识别增强对原生名称失败后调用 LLM、输出结构化标题并交回原生链路；其代码使用旧导入和单标题输入，不能直接作为 V3 复用实现。","strength":"strong"},
+    {"id":"E007","type":"official_doc","url":"https://github.com/jxxghp/MoviePilot-Plugins/blob/main/docs/Plugin_Development.md","summary":"官方 V3 文档确认插件生命周期、持久数据目录/自有表、事件、插件 API、完整媒体身份和真实宿主加载边界。","strength":"strong","receipt_id":"receipt-a65a8e90381fcbff"},
+    {"id":"E008","type":"upstream_counterevidence","url":"https://raw.githubusercontent.com/jxxghp/MoviePilot/v3/app/sdk/governance.py","summary":"外部读取得到 404；本地参考树的治理 SDK 原型不是上游 v3 已发布能力，设计不依赖它。","strength":"contextual","receipt_id":"receipt-ee64ddb0afb4663a"},
+    {"id":"E009","type":"official_source","url":"https://github.com/jxxghp/MoviePilot/blob/v3/app/api/endpoints/storage.py","summary":"上游 v3 存储端点正文交叉确认目录配置接口与单层 storage/list 的权限和返回边界。","strength":"strong","receipt_id":"receipt-4fd7fd6bc856e11b"}
+  ],
+  "claims": [
+    {"id":"C001","text":"应以当前下载区和媒体库的递归文件地图为事实基础，整理历史仅作关联证据，才能同时检测真失败和表面成功却错误。","evidence":["E001","E002","E003","E009"],"strength":"strong"},
+    {"id":"C002","text":"首次全量、后续事件驱动增量、定期目录对账组成可实现的长期路线；人工文件管理改动无广播，只能在下一次对账保证发现。","evidence":["E002","E005","E007"],"strength":"strong"},
+    {"id":"C003","text":"身份确认后，以官方逐文件 preview 核对现有结果，并用同一官方手动整理计划清理命中旧目标再重建，是当前可用的安全修复闭环。","evidence":["E004"],"strength":"strong"},
+    {"id":"C004","text":"AI 只能消费压缩后的歧义作品候选并回交原生识别/预览；没有 inode 与文件管理广播意味着不能承诺底层硬链接取证或实时人工改动通知。","evidence":["E002","E006","E007"],"strength":"strong"}
+  ],
+  "ecology_outcomes": [
+    {"source_ecology":"github_repository_ecology","outcome":"used","reason":"官方插件开发文档及上游路径反证支撑 V3 稳定合同与边界。","receipt_ids":["receipt-54eb159e84677ed1","receipt-a65a8e90381fcbff","receipt-ee64ddb0afb4663a"]},
+    {"source_ecology":"generic_web_ecology","outcome":"used","reason":"用于发现并抽取官方插件主文档；关键运行语义由本地匹配 V3 源码交叉确认。","receipt_ids":["receipt-54eb159e84677ed1","receipt-a65a8e90381fcbff"]},
+    {"source_ecology":"academic_literature_ecology","outcome":"strategic_skip","reason":"学术资料不能证明具体 MoviePilot V3 接口、事件和 NAS 运行语义。","claim_gap_ids":["C001","C002","C003","C004"],"reopen_condition":"若另行研究多模型评测方法而非本产品接口，再纳入。"},
+    {"source_ecology":"wechat_public_article_ecology","outcome":"strategic_skip","reason":"中文文章不能替代官方插件合同或宿主源码。","claim_gap_ids":["C001","C002","C003","C004"],"reopen_condition":"若研究用户教程或传播，再单独研究。"},
+    {"source_ecology":"bilibili_video_ecology","outcome":"strategic_skip","reason":"公开视频经验不能验证此宿主接口。","claim_gap_ids":["C001","C002","C003","C004"],"reopen_condition":"若研究公开操作体验，再单独研究。"},
+    {"source_ecology":"youtube_video_ecology","outcome":"strategic_skip","reason":"公开视频经验不能验证此宿主接口。","claim_gap_ids":["C001","C002","C003","C004"],"reopen_condition":"若研究公开操作体验，再单独研究。"},
+    {"source_ecology":"zhihu_discussion_ecology","outcome":"strategic_skip","reason":"社区观点不能替代可执行合同。","claim_gap_ids":["C001","C002","C003","C004"],"reopen_condition":"若研究用户意见分歧，再单独研究。"},
+    {"source_ecology":"xiaohongshu_experience_ecology","outcome":"strategic_skip","reason":"社区经验不能替代可执行合同。","claim_gap_ids":["C001","C002","C003","C004"],"reopen_condition":"若研究用户体验，再单独研究。"}
+  ],
+  "limitations": [
+    "未读取真实媒体目录、数据库、运行日志或硬链接 inode。",
+    "未在 NAS 调用任何读取、AI、preview、删除或整理接口。",
+    "当前参考 MoviePilot 树含本地候选分支；所有 NAS 能力仍须在冻结候选上按真实宿主身份复验。"
+  ]
+}

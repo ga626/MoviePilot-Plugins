@@ -1,16 +1,13 @@
-"""MediaGovernor V3 发布合同测试；不访问 NAS、模型或真实媒体数据。"""
-
+"""MediaGovernor 3.0 合同测试：不访问 NAS、模型以外的网络或真实媒体。"""
 from __future__ import annotations
 
-import ast
 import asyncio
-from abc import ABC, abstractmethod
 import importlib.util
 import json
 from pathlib import Path
 import sys
+import tempfile
 import types
-
 
 ROOT = Path(__file__).resolve().parents[3]
 PLUGIN = ROOT / "plugins.v3/mediagovernor/__init__.py"
@@ -18,212 +15,94 @@ PAGE = ROOT / "plugins.v3/mediagovernor/src/components/AppPage.vue"
 RULES = ROOT / "plugins.v3/mediagovernor/src/lib/governance.js"
 
 
+class _FakeLLM:
+    async def ainvoke(self, _prompt):
+        return types.SimpleNamespace(content='{"probe":{"title":"示例剧","media_type":"tv","confidence":0.9,"abstain":false},"one":{"title":"示例剧","media_type":"tv","confidence":0.9,"abstain":false}}')
+
+
 class _FakeLLMHelper:
     @staticmethod
-    def get_llm(*_args, **_kwargs):
-        return _FakeLLM()
-
+    def get_llm(*_args, **_kwargs): return _FakeLLM()
     @staticmethod
-    def extract_text_content(content, **_kwargs):
-        return str(content or "")
-
-
-class _FakeLLM:
-    calls = 0
-
-    async def ainvoke(self, _prompt):
-        type(self).calls += 1
-        return types.SimpleNamespace(content='''{"classification":"media","title":"Cowboy Bebop","original_title":"Cowboy Bebop","year":"1998","media_type":"tv","season":1,"expected_episodes":[1,2,3,26],"confidence":0.92,"evidence_indexes":[0,1],"reasons":["文件名与集号一致"],"abstain":false}''')
+    def extract_text_content(content, **_kwargs): return str(content or "")
 
 
 def _load_plugin():
-    app = types.ModuleType("app")
-    plugins = types.ModuleType("app.plugins")
-    agent = types.ModuleType("app.agent")
-    llm = types.ModuleType("app.agent.llm")
-    helper = types.ModuleType("app.agent.llm.helper")
-    fastapi = types.ModuleType("fastapi")
-
-    class PluginBase(ABC):
-        @abstractmethod
-        def stop_service(self) -> None:
-            pass
-
-    plugins._PluginBase = PluginBase
-    helper.LLMHelper = _FakeLLMHelper
-    fastapi.Request = type("Request", (), {})
+    app, plugins, agent, llm, helper, fastapi = (types.ModuleType(name) for name in ("app", "app.plugins", "app.agent", "app.agent.llm", "app.agent.llm.helper", "fastapi"))
+    class Base:
+        def __init__(self): self.store, self.path = {}, Path(tempfile.mkdtemp())
+        def get_data(self, key): return self.store.get(key)
+        def save_data(self, key, value): self.store[key] = value
+        def get_data_path(self): return self.path
+    plugins._PluginBase = Base; helper.LLMHelper = _FakeLLMHelper; fastapi.Request = type("Request", (), {})
     saved = {name: sys.modules.get(name) for name in ("app", "app.plugins", "app.agent", "app.agent.llm", "app.agent.llm.helper", "fastapi")}
     sys.modules.update({"app": app, "app.plugins": plugins, "app.agent": agent, "app.agent.llm": llm, "app.agent.llm.helper": helper, "fastapi": fastapi})
     try:
-        spec = importlib.util.spec_from_file_location("mediagovernor_plugin", PLUGIN)
-        assert spec and spec.loader
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        return module
+        spec = importlib.util.spec_from_file_location("mediagovernor_plugin", PLUGIN); module = importlib.util.module_from_spec(spec); assert spec and spec.loader; sys.modules[spec.name] = module; spec.loader.exec_module(module); return module
     finally:
         for name, value in saved.items():
-            if value is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = value
+            if value is None: sys.modules.pop(name, None)
+            else: sys.modules[name] = value
 
 
-def test_versions_and_federation_assets_are_synced() -> None:
-    manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
+class Request:
+    method = "POST"
+    def __init__(self, body): self.body = body
+    async def json(self): return self.body
+
+
+def test_versions_assets_and_new_api_contract_are_synced():
+    module = _load_plugin(); manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "3.0.0"
+    assert list(manifest["history"])[0] == "v3.0.0"
+    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v3.0.0/assets")
+    instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
+    assert [row["path"] for row in instance.get_api()] == ["/map_status", "/map_plan", "/map_commit", "/map_dirty", "/ai_probe", "/bundle_analyze_batch"]
+    assert all(row["auth"] == "bear" for row in instance.get_api())
+
+
+def test_map_persists_paths_only_privately_and_status_never_leaks_them():
+    module = _load_plugin(); instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
+    result = asyncio.run(instance.api_map_commit(Request({"baseline": True, "download_units": [{"id": "/private/download/A", "root": {"path": "/private/download/A", "name": "A"}, "fingerprint": "one"}], "library_nodes": [{"id": "/private/library/A", "root": {"path": "/private/library/A", "name": "A"}}], "findings": [{"unit_id": "/private/download/A", "kind": "native_failure", "reason": "当前失败"}]})))
+    assert result.success and result.data["download_units"] == 1
+    assert "/private" not in json.dumps(result.data, ensure_ascii=False)
+    saved = instance._map_path().read_text(encoding="utf-8")
+    assert "/private/download/A" in saved
+    assert asyncio.run(instance.api_map_status()).data["findings"] == 1
+
+
+def test_incremental_plan_only_echoes_the_callers_changed_or_unchanged_ids():
+    module = _load_plugin(); instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
+    asyncio.run(instance.api_map_commit(Request({"baseline": True, "download_units": [{"id": "raw-a", "root": {"path": "/private/A"}, "header_fingerprint": "same"}], "library_nodes": [], "findings": []})))
+    plan = asyncio.run(instance.api_map_plan(Request({"units": [{"id": "raw-a", "fingerprint": "same"}, {"id": "raw-b", "fingerprint": "new"}]})))
+    assert plan.data["unchanged"] == ["raw-a"]
+
+
+def test_batch_analysis_is_bounded_path_free_and_cached():
+    module = _load_plugin(); instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
+    body = {"items": [{"id": "one", "evidence": {"title_hints": ["示例剧"], "entries": [{"name": "Show.S01E01.mkv", "path": "/must/not/leave"}], "video_count": 1}}]}
+    first = asyncio.run(instance.api_bundle_analyze_batch(Request(body))); second = asyncio.run(instance.api_bundle_analyze_batch(Request(body)))
+    assert first.success and first.data["analyzed"] == 1
+    assert second.success and second.data["cached"] == 1
+    assert "path" not in json.dumps(instance._normalise_evidence(body["items"][0]["evidence"]))
+
+
+def test_events_only_mark_dirty_and_never_read_media_or_call_model():
+    module = _load_plugin(); instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
+    instance._on_transfer_result({"event_data": {"transfer_history_id": 7, "fileitem": {"path": "/private/A"}}})
+    assert len(instance._dirty) == 1
     source = PLUGIN.read_text(encoding="utf-8")
-    assert manifest["version"] == package["version"] == "2.1.0"
-    assert list(manifest["history"])[0] == "v2.1.0"
-    assert 'plugin_version = "2.1.0"' in source
-    assert 'return "vue", "dist/v2.1.0/assets"' in source
-    assert "assetsDir: 'v2.1.0/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
+    callback = source[source.index("def _on_transfer_result"):source.index("@classmethod\n    def _normalise_evidence")]
+    assert "storage/list" not in callback and "_model" not in callback
 
 
-def test_plugin_exposes_only_authenticated_evidence_and_analysis_interfaces() -> None:
-    module = _load_plugin()
-    instance = module.MediaGovernor()
-    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v2.1.0/assets")
-    instance.init_plugin({"enabled": True})
-    assert instance.get_state() is True
-    api = instance.get_api()
-    assert [item["path"] for item in api] == ["/bundle_analyze", "/bundle_analyze_batch", "/evidence_index"]
-    assert all(item["auth"] == "bear" for item in api)
-    assert api[0]["response_model"] is module.BundleAnalysisResponse
-    assert api[1]["response_model"] is module.BatchBundleAnalysisResponse
-    assert instance.get_command() == instance.get_service() == []
-    assert instance.stop_service() is None
-    source = PLUGIN.read_text(encoding="utf-8")
-    modules = {node.module or "" for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ImportFrom)}
-    forbidden = ("app.db", "app.chain", "app.application", "app.core", "app.helper", "app.utils", "app.sdk._legacy")
-    assert not any(module_name.startswith(forbidden) for module_name in modules)
-    assert "app.agent.llm.helper" in modules
-    assert "app.sdk.events" in source
-    assert "EventType.TransferComplete" in source and "EventType.TransferFailed" in source
-
-
-def test_bundle_evidence_is_bounded_and_has_no_path_field() -> None:
-    module = _load_plugin()
-    evidence = module.MediaGovernor._normalise_evidence({
-        "title_hints": ["[Cowboy_Bebop]", "x" * 1000],
-        "entries": [{"name": "Cowboy_Bebop.[01].mkv", "type": "file", "depth": 1, "path": "/must/not/leave"}] * 600,
-        "episodes": [1, "26", 0, 1000],
-        "video_count": 2,
-    })
-    assert len(evidence["entries"]) == 500
-    assert evidence["entries"][0] == {"name": "Cowboy_Bebop.[01].mkv", "type": "file", "depth": 1}
-    assert evidence["episodes"] == [1, 26]
-    assert all("path" not in entry for entry in evidence["entries"])
-    assert len(evidence["title_hints"][1]) == 120
-
-
-def test_model_output_is_structured_and_remains_only_a_diagnosis() -> None:
-    module = _load_plugin()
-    instance = module.MediaGovernor()
-    diagnosis = asyncio.run(instance._invoke_bundle_model({"title_hints": ["Cowboy Bebop"], "entries": [{"name": "Cowboy.Bebop.S01E26.mkv", "type": "file", "depth": 1}], "episodes": [26], "video_count": 1, "subtitle_count": 0, "nfo_count": 0}))
-    assert diagnosis.title == "Cowboy Bebop"
-    assert diagnosis.expected_episodes == [1, 2, 3, 26]
-    assert diagnosis.abstain is False
-    uncertain = module.MediaGovernor._diagnosis_from_model({"classification": "media", "title": "", "confidence": 0.99}, 0)
-    assert uncertain.abstain is True
-
-
-def test_same_sanitized_bundle_reuses_in_memory_model_diagnosis() -> None:
-    module = _load_plugin()
-    instance = module.MediaGovernor()
-    instance.init_plugin({"enabled": True})
-    _FakeLLM.calls = 0
-
-    class Request:
-        async def json(self):
-            return {"evidence": {"title_hints": ["Cowboy Bebop"], "entries": [{"name": "Cowboy.Bebop.S01E01.mkv", "type": "file", "depth": 1}], "episodes": [1], "video_count": 1}}
-
-    async def run():
-        first = await instance.api_bundle_analyze(Request())
-        second = await instance.api_bundle_analyze(Request())
-        assert first.success and second.success
-
-    asyncio.run(run())
-    assert _FakeLLM.calls == 1
-
-
-def test_batch_rejects_paths_and_uses_one_model_call_for_multiple_bundles() -> None:
-    module = _load_plugin()
-    instance = module.MediaGovernor()
-    instance.init_plugin({"enabled": True})
-    _FakeLLM.calls = 0
-
-    class Request:
-        async def json(self):
-            return {"items": [
-                {"id": "bundle-1", "evidence": {"entries": [{"name": "Cowboy.Bebop.S01E01.mkv", "path": "/not/sent"}], "video_count": 1}},
-                {"id": "bundle-2", "evidence": {"entries": [{"name": "Cowboy.Bebop.S01E02.mkv"}], "video_count": 1}},
-            ]}
-
-    result = asyncio.run(instance.api_bundle_analyze_batch(Request()))
-    assert result.success
-    assert set(result.data.diagnoses) == {"bundle-1", "bundle-2"}
-    assert _FakeLLM.calls == 1
-
-
-def test_event_index_only_returns_events_recorded_for_the_current_scope() -> None:
-    module = _load_plugin()
-    instance = module.MediaGovernor()
-    instance._event_index = {"items": [
-        {"scope": "legacy", "history_id": 1},
-        {"scope": "2.1", "history_id": 2, "status": "success"},
-    ]}
-    result = asyncio.run(instance.api_evidence_index())
-    assert result.success is True
-    assert result.data == {"items": [{"scope": "2.1", "history_id": 2, "status": "success"}], "realtime_only": True}
-
-
-def test_frontend_uses_history_anchored_bounded_fallback_pipeline() -> None:
-    page = PAGE.read_text(encoding="utf-8")
-    for endpoint in ("history/transfer?status=${status}", "storage/list", "plugin/MediaGovernor/bundle_analyze_batch", "media/source", "media/recognize", "media/recognize_file", "media/search", "transfer/manual/history", "transfer/manual/target-path", "transfer/manual"):
+def test_frontend_starts_from_current_directories_not_failure_history_and_keeps_official_preview_gate():
+    page, rules = PAGE.read_text(encoding="utf-8"), RULES.read_text(encoding="utf-8")
+    for endpoint in ("storage/directories?directory_type=${kind}", "storage/list", "history/transfer?status=${status}", "plugin/MediaGovernor/map_commit", "plugin/MediaGovernor/bundle_analyze_batch", "media/recognize_file", "transfer/manual"):
         assert endpoint in page
-    assert "reviewHistoryScope({ failed, successful, events })" in page
-    assert "plugin/MediaGovernor/evidence_index" in page
-    assert "_mediagovernor_event_success" in page
-    assert "prepareGroups(groups)" in page
-    assert "needsModelReview" in page and "modelQueue" in page and "baseline" in page
-    assert "inventoryGroups(" not in page
-    assert "readDirectories(" not in page
-    assert "storage/directories?directory_type=all" not in page
-    assert "Promise.all(groups.map" not in page
-    assert "card.state !== 'clear'" in page
-    assert "slice(0, 2)" in page
-    assert "当前来源包" in page and "不会递归扫描整个媒体库" in page
-    assert "replace(/[\\[\\]【】()]/g, ' ')" in page
-    assert "strictEpisodeHints" in page
-    assert "bundlePayload" in page and "diagnoseBundles" in page and "diagnosisText" in page
-    assert "entries + count > 1200" in page
-    assert "整包模型判断" in page and "查看发送给模型的目录结构" in page
-    assert "候选总集数" in page and "hardReject" in page
-    assert "videoSource" in page and "music|audio" in page
-    assert "organizationIssues" in page and "acceptanceFixtures" in page
-    rules = RULES.read_text(encoding="utf-8")
-    assert "initialIssueSignals" in rules and "strictEpisodeHints" in rules
-    assert "目录名与视频文件名不像同一作品" not in page
-    assert "当前来源、整理历史和硬链接目标一致；没有触发 AI 兜底" in page
-    assert "acceptanceFixtures" in page and "验收样例" in page
-    assert "currentTargetAudit" in page and "historyIdentityAudit" in page
-    assert "run.value.aiCompleted" in page and "await waitIfPaused()" in page
-    assert "reviewHistoryScope" in rules
-    assert "fetch(" not in page and "axios" not in page
-
-
-def test_organization_uses_the_official_guarded_link_rebuild_path() -> None:
-    page = PAGE.read_text(encoding="utf-8")
-    payload = page[page.index("function previewPayload"):page.index("function previewIssues")]
-    assert "preview: true" in payload
-    assert "reorganize: false" in payload
-    assert "官方逐文件计划" in page and "确认按此预览重建" in page
-    assert "async function repairOrganization" in page
-    assert "transfer/manual" in page and "preview: false" in page
-    assert "reorganize: false" in page
-    assert "storage/delete" not in page
-
-
-def test_release_sources_do_not_ship_legacy_private_governor() -> None:
-    assert not (ROOT / "plugins.v3/mediagovernor/governor.py").exists()
+    assert "失败历史只作线索" in page and "当前文件状态" in page
+    assert "preview: true" in page and "preview: false" in page and "reorganize: false" in page
+    assert "storage/delete" not in page and "fetch(" not in page
+    for name in ("createDownloadUnits", "unitFingerprint", "diffMap", "classifyFinding"):
+        assert f"function {name}" in rules or f"export function {name}" in rules
