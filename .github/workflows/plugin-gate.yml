@@ -83,8 +83,6 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: '22'
-          cache: 'pnpm'
-          cache-dependency-path: plugins.v3/mediagovernor/pnpm-lock.yaml
 
       - name: Install frontend dependencies
         working-directory: plugins.v3/mediagovernor
