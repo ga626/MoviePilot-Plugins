@@ -51,6 +51,28 @@ export function episodeAudit(episodes = []) {
   return { episodes: known, duplicates, missing }
 }
 
+// A partial season is normal: the library may intentionally contain only the
+// episodes that have been downloaded.  The scanner may only raise a structural
+// alarm for a duplicate episode that was parsed from different video files, or
+// for a still-active official transfer failure.  Names, history and gaps remain
+// evidence for the later review, never an alarm on their own.
+export function initialIssueSignals({ activeFailure = false, duplicateEpisodes = [] } = {}) {
+  const issues = []
+  if (activeFailure) issues.push('此当前包仍只有失败整理记录，没有对应成功记录，需要官方预览核验')
+  if (duplicateEpisodes.length) issues.push(`不同视频文件重复标为同一集：${duplicateEpisodes.join('、')}`)
+  return issues
+}
+
+export function strictEpisodeHints(name) {
+  const value = clean(name)
+  const season = value.match(/(?:^|[. _-])s\d{1,2}[. _-]*e(\d{1,3})(?:[. _-]*e(\d{1,3}))?(?=$|[. _-])/i)
+  if (season) return [Number(season[1]), ...(season[2] ? [Number(season[2])] : [])]
+  const episode = value.match(/(?:^|[. _-])(?:ep|e)(\d{1,3})(?=$|[. _-]|\.[a-z0-9]{2,5}$)/i)
+  if (episode) return [Number(episode[1])]
+  const anime = value.match(/\[(\d{1,3})\](?=\.[a-z0-9]{2,5}$)/i)
+  return anime ? [Number(anime[1])] : []
+}
+
 export function candidateFamily(candidate = {}) {
   return [clean(candidate.title || candidate.original_title).toLowerCase(), clean(candidate.year), clean(candidate.type_name).toLowerCase(), Number(candidate.episodeCount) || ''].join(':')
 }
@@ -81,7 +103,6 @@ export function organizationAudit({ evidence = {}, identity = {}, diagnosis = {}
   if (/(tv|电视剧|剧集|series)/i.test(type) && identity.episodeCount && Number(evidence.videos) > identity.episodeCount) issues.push(`${evidence.videos} 个视频多于作品总集数 ${identity.episodeCount}`)
   const duplicates = unique([...audit.duplicates, ...(evidence.duplicateEpisodes || [])])
   if (duplicates.length) issues.push(`发现重复集号：${duplicates.join('、')}`)
-  if (audit.missing.length) issues.push(`集号缺失：${audit.missing.join('、')}`)
   return issues
 }
 
@@ -100,7 +121,7 @@ export function acceptanceFixtures() {
     fixture('conflict', '动画与真人版冲突', { candidates: [{ title: 'Cowboy Bebop', year: '1998', type_name: 'tv', episodeCount: 26, score: 10, conflicts: [] }, { title: 'Cowboy Bebop', year: '2021', type_name: 'tv', episodeCount: 10, score: 8, conflicts: [] }] }, 'needs_selection'),
     fixture('sample', '样片或测试残留', {}, 'non_media'),
     fixture('empty', '无可靠候选', {}, 'insufficient'),
-    fixture('missing', '缺集审计', { evidence: { episodes: [1, 2, 4], videos: 3 }, identity: { title: '示例剧', type_name: 'tv', episodeCount: 4 }, diagnosis: {} }, 'locked'),
+    fixture('partial', '部分下载不是整理错误', { evidence: { episodes: [1, 2, 4], videos: 3 }, identity: { title: '示例剧', type_name: 'tv', episodeCount: 12 }, diagnosis: {} }, 'clear'),
     fixture('duplicate', '重复集审计', { evidence: { episodes: [1, 2, 2], videos: 3 }, identity: { title: '示例剧', type_name: 'tv', episodeCount: 2 }, diagnosis: {} }, 'locked'),
   ]
 }
