@@ -1,0 +1,56 @@
+{
+  "schema": "knowledgeradar-research-evidence/v1",
+  "title": "MediaGovernor 原生整理后最终兜底方案：证据登记",
+  "date": "2026-09-04",
+  "research_task": {
+    "id": "kr-research-0bb9863a9a3703a6",
+    "status": "open_at_write",
+    "access_path": "native_mcp"
+  },
+  "scope": "只读设计；不读取真实媒体、不调用模型、不改变插件或 NAS。",
+  "tool_calls": [
+    {"id": "T001", "tool": "mcp__knowledgeradar__health_check", "args_summary": {"mode": "summary"}, "status": "ok"},
+    {"id": "T002", "tool": "mcp__knowledgeradar__get_capabilities", "args_summary": {"summary": true}, "status": "ok"},
+    {"id": "T003", "tool": "mcp__knowledgeradar__kr_research", "args_summary": {"mode": "deep_route", "budget": "deep"}, "status": "ok", "research_task_id": "kr-research-0bb9863a9a3703a6"},
+    {"id": "T004", "tool": "mcp__knowledgeradar__kr_web_search", "args_summary": {"query": "MoviePilot manual transfer reorganize"}, "status": "ok", "receipt_id": "receipt-d8761d118add0ee6"},
+    {"id": "T005", "tool": "mcp__knowledgeradar__extract_web_page", "args_summary": {"source": "MoviePilot raw mcp-api.md"}, "status": "degraded", "receipt_id": "receipt-01e20c7906f7616b", "reason": "源站返回 text/plain，正文抽取器拒绝该类型；不以搜索摘要支撑关键实现结论"},
+    {"id": "T006", "tool": "mcp__knowledgeradar__kr_web_search", "args_summary": {"query": "MoviePilot TransferComplete TransferFailed plugin"}, "status": "ok", "receipt_id": "receipt-984c784b5e4aca6f", "reason": "结果主要为社区/噪声，只作反例检索，不作为事件合同证据"},
+    {"id": "T007", "tool": "mcp__knowledgeradar__search_github_repositories", "args_summary": {"query": "jxxghp MoviePilot V3 plugin development"}, "status": "ok", "receipt_id": "receipt-d12d9e83ca7c87c5"},
+    {"id": "T008", "tool": "local_source_read", "args_summary": {"surfaces": ["MediaGovernor AppPage/governance", "MoviePilot storage/transfer endpoints", "MoviePilot transfer settlement/workflow/filemanager", "Plugin Development guide"]}, "status": "ok"},
+    {"id": "T009", "tool": "mcp__knowledgeradar__review_research_progress", "args_summary": {"phase": "after_archaeology"}, "status": "ok", "receipt_id": "receipt-b1364ad1e2ce03c7"},
+    {"id": "T010", "tool": "mcp__knowledgeradar__record_research_candidates_tool", "args_summary": {"ecology": "github_repository_ecology"}, "status": "ok", "receipt_id": "receipt-7fb9a81c5b6bd3d7"},
+    {"id": "T011", "tool": "mcp__knowledgeradar__advance_research_candidate", "args_summary": {"stage": "degraded_or_blocked"}, "status": "ok", "receipt_id": "receipt-f0bab2d63839cc8a"}
+  ],
+  "evidence_items": [
+    {"id": "E001", "type": "local_code", "path": "plugins.v3/mediagovernor/src/components/AppPage.vue; src/lib/governance.js", "summary": "当前产品是前端库存扫描；问题入口仍主要来自当前失败历史和重复集，且每包单独调用模型，未实现事件包、持久证据单、批量模型或修复执行。", "strength": "strong"},
+    {"id": "E002", "type": "local_code", "path": "MoviePilot/app/api/endpoints/storage.py", "summary": "公开管理接口提供 POST /storage/delete；它接收 FileItem 并委托 StorageChain.delete_file。", "strength": "strong"},
+    {"id": "E003", "type": "local_code", "path": "MoviePilot/app/api/endpoints/transfer.py", "summary": "成功历史 logid 的手动整理在 reorganize=false、非预览时，使用 src_fileitem 作为输入，并把 dest_fileitem 交给 cleanup_dest_fileitem。", "strength": "strong"},
+    {"id": "E004", "type": "local_code", "path": "MoviePilot/app/modules/filemanager/module.py", "summary": "冻结整理计划在转移前调用 cleanup_dest_fileitem 的统一媒体删除能力；删除失败会保留计划待重试。", "strength": "strong"},
+    {"id": "E005", "type": "local_code", "path": "MoviePilot/app/chain/transfer/settlement.py; app/schemas/event.py", "summary": "主媒体整理结算发出 TransferComplete/TransferFailed；公开 payload 有 fileitem、meta、mediainfo、transferinfo、下载上下文、history ID 与 idempotency_key。", "strength": "strong"},
+    {"id": "E006", "type": "local_code", "path": "MoviePilot/app/api/endpoints/storage.py; app/schemas/file.py", "summary": "storage/list 返回路径、类型、名称、大小和修改时间等 FileItem 字段；没有 inode/link-count。storage/delete 本身也没有通用插件广播。", "strength": "strong"},
+    {"id": "E007", "type": "local_doc", "path": "docs/Plugin_Development.md", "summary": "V3 插件应使用 app.sdk.events、插件数据接口和受控服务；不在导入期启动后台操作，也不将运行态写入源码目录。", "strength": "strong"},
+    {"id": "E008", "type": "upstream_search", "url": "https://github.com/jxxghp/MoviePilot/blob/v3/docs/mcp-api.md", "summary": "上游公开文档搜索结果说明 manual/history、manual preview 与 reorganize 语义，和本机匹配 V3 源码相符。", "strength": "contextual", "receipt_id": "receipt-d8761d118add0ee6"},
+    {"id": "E009", "type": "github_repository", "url": "https://github.com/jxxghp/MoviePilot", "summary": "GitHub REST 检索确认当前上游仓库身份；没有把仓库星标或搜索摘要当成接口证据。", "strength": "contextual", "receipt_id": "receipt-d12d9e83ca7c87c5"}
+  ],
+  "claims": [
+    {"id": "C001", "text": "可安全实现只删除本次成功历史中、位于当前媒体库配置范围的旧目标，并由 MoviePilot 的同一手动整理计划从原始来源重建硬链接；不需要插件直接操作文件系统。", "evidence": ["E002", "E003", "E004"], "strength": "strong", "limitation": "须在实现中重新核验来源、目标、目录配置和预览指纹，并经用户确认。"},
+    {"id": "C002", "text": "完成/失败事件只能覆盖插件启用后的结算；历史与文件管理手工改动必须通过初始回填和轻量对账处理，不能当成实时广播。", "evidence": ["E005", "E006", "E007"], "strength": "strong"},
+    {"id": "C003", "text": "先完成全量确定性筛选、再以边界化批次交给模型，既满足整包综合判断，也避免按文件或按包重复发送规则和证据。", "evidence": ["E001", "E005", "E007"], "strength": "strong", "limitation": "批次必须受输入上限约束；模型结果仍需官方来源详情和 preview 核验。"},
+    {"id": "C004", "text": "官方 preview 可产生逐文件应有结果；只有身份已确认且预览完整时，才能判断目录分类、层级、季集或映射错误。", "evidence": ["E003", "E008"], "strength": "strong"}
+  ],
+  "ecology_outcomes": [
+    {"source_ecology": "github_repository_ecology", "outcome": "used", "reason": "上游仓库身份、公开文档检索和本机匹配源码共同支撑接口结论。", "receipt_ids": ["receipt-d12d9e83ca7c87c5", "receipt-d8761d118add0ee6"]},
+    {"source_ecology": "generic_web_ecology", "outcome": "used_with_degradation", "reason": "搜索可发现官方文档；正文抽取因 text/plain 降级，关键结论降回本机源码。", "receipt_ids": ["receipt-d8761d118add0ee6", "receipt-01e20c7906f7616b"]},
+    {"source_ecology": "academic_literature_ecology", "outcome": "not_relevant", "reason": "本题是具体 API 与本机产品合同；论文不能证明此宿主执行语义。", "claim_gap_ids": ["C001", "C002"], "reopen_condition": "若研究模型批处理的通用统计质量而非产品接口，再单独纳入。"},
+    {"source_ecology": "wechat_public_article_ecology", "outcome": "not_relevant", "reason": "中文文章不能替代宿主 API/源码合同。", "claim_gap_ids": ["C001", "C002"], "reopen_condition": "若研究用户教学或产品传播，再独立研究。"},
+    {"source_ecology": "bilibili_video_ecology", "outcome": "not_relevant", "reason": "视频经验不能替代宿主 API/源码合同。", "claim_gap_ids": ["C001", "C002"], "reopen_condition": "若研究公开产品操作体验，再独立研究。"},
+    {"source_ecology": "youtube_video_ecology", "outcome": "not_relevant", "reason": "视频经验不能替代宿主 API/源码合同。", "claim_gap_ids": ["C001", "C002"], "reopen_condition": "若研究公开产品操作体验，再独立研究。"},
+    {"source_ecology": "zhihu_discussion_ecology", "outcome": "not_relevant", "reason": "社区观点不能替代宿主 API/源码合同。", "claim_gap_ids": ["C001", "C002"], "reopen_condition": "若研究用户需求分歧，再独立研究。"},
+    {"source_ecology": "xiaohongshu_experience_ecology", "outcome": "not_relevant", "reason": "社区经验不能替代宿主 API/源码合同。", "claim_gap_ids": ["C001", "C002"], "reopen_condition": "若研究用户体验，再独立研究。"}
+  ],
+  "limitations": [
+    "未读取真实媒体目录、数据库、日志或硬链接。",
+    "未在 NAS 宿主上订阅事件、调用 preview 或执行清理；这些是未来候选的冻结验收。",
+    "用户的“媒体库结果均为硬链接”是当前项目运行规则，不是本轮通过 inode 接口重新证明的事实。"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "schema": "mediagovernor-report-local-validation/v1",
+  "status": "partial",
+  "checked_at": "2026-09-04T17:06:00+08:00",
+  "report_path": "D:\\Projects\\NAS docker\\media-next\\plugins\\moviepilot-media-governor\\docs\\architecture\\mediagovernor-event-driven-fallback-design.md",
+  "evidence_path": "D:\\Projects\\NAS docker\\media-next\\plugins\\moviepilot-media-governor\\docs\\architecture\\mediagovernor-event-driven-fallback-design.evidence.json",
+  "report_sha256": "4521A63ED1393307EC0D07EE7DFD889BC92BE40DA8E9A0B681DE4594DC137C99",
+  "evidence_sha256": "EE1EB3CC4C8BF498318F6AA2AAD7C5F1F328F68043FFE9810EEFDEEC4D560A68",
+  "checks": [
+    {"name": "evidence_json_parse", "status": "pass"},
+    {"name": "report_and_evidence_hash", "status": "pass"},
+    {"name": "git_diff_check", "status": "pass"},
+    {"name": "research_quality_checker", "status": "blocked", "reason": "D:\\Projects\\KnowledgeRadar 的现有 .venv 缺少 httpx；未安装依赖来伪造通过。"}
+  ],
+  "meaning": "报告与证据文件自身结构已核对；KnowledgeRadar 深度报告质量脚本未在当前环境运行，故不把本回执写成 quality pass。"
+}
