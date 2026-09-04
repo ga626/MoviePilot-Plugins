@@ -15,14 +15,12 @@ from pydantic import BaseModel, Field
 from app.agent.llm.helper import LLMHelper
 from app.plugins import _PluginBase
 
-# The event bus is a public V3 SDK surface.  EventType is deliberately only
-# used to name the two documented transfer broadcasts; the plugin never reads
-# a host database or a filesystem from an event handler.
-try:  # Keeps the source contract testable without a complete MoviePilot host.
-    from app.sdk.events import Event, TransferResultContractData, eventmanager
+# 事件总线是 V3 的公开接口；监听器只记录两种整理结果，绝不在回调中读文件或调用模型。
+try:  # 保持隔离合同测试不依赖完整宿主。
+    from app.sdk.events import eventmanager
     from app.schemas.types import EventType
-except ImportError:  # pragma: no cover - exercised by the isolated contract tests
-    Event = TransferResultContractData = eventmanager = EventType = None
+except ImportError:  # pragma: no cover - 由隔离合同测试覆盖
+    eventmanager = EventType = None
 
 
 class BundleDiagnosis(BaseModel):
@@ -83,7 +81,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "找对作品并核对整理：整包 AI 证据分析、原生候选核验和官方逐文件预览。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "2.0.0"
+    plugin_version = "2.1.0"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -98,6 +96,7 @@ class MediaGovernor(_PluginBase):
     _max_batch_bundles = 12
     _max_batch_entries = 1200
     _index_limit = 400
+    _event_index_schema = "2.1"
 
     def init_plugin(self, config: dict[str, Any] | None = None) -> None:
         """只读取启用开关；读取目录与模型调用均由用户在页面显式触发。"""
@@ -105,7 +104,8 @@ class MediaGovernor(_PluginBase):
         self._diagnosis_cache = self._read_diagnosis_cache()
         self._event_index = self._read_event_index()
         self._registered_events = False
-        self._register_transfer_events()
+        if self._enabled:
+            self._register_transfer_events()
 
     def get_state(self) -> bool:
         return self._enabled
@@ -116,7 +116,7 @@ class MediaGovernor(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> tuple[str, str]:
-        return "vue", "dist/v2.0.0/assets"
+        return "vue", "dist/v2.1.0/assets"
 
     def get_sidebar_nav(self) -> list[dict[str, Any]]:
         return []
@@ -228,6 +228,7 @@ class MediaGovernor(_PluginBase):
             "key": key, "status": status, "history_id": history_id,
             "name": name, "title": self._safe_text(self._event_value(media, "title"), 120),
             "year": self._safe_text(self._event_value(media, "year"), 8),
+            "scope": self._event_index_schema,
         }
         items = [row for row in self._event_index.get("items", []) if row.get("key") != key]
         items.append(item)
@@ -457,4 +458,8 @@ class MediaGovernor(_PluginBase):
         return BatchBundleAnalysisResponse(success=True, data=BatchBundleAnalysisData(diagnoses=diagnoses, cached=cached, analyzed=len(missing)))
 
     async def api_evidence_index(self) -> EvidenceIndexResponse:
-        return EvidenceIndexResponse(success=True, data={"items": self._event_index.get("items", []), "realtime_only": True})
+        items = [
+            item for item in self._event_index.get("items", [])
+            if isinstance(item, dict) and item.get("scope") == self._event_index_schema
+        ]
+        return EvidenceIndexResponse(success=True, data={"items": items, "realtime_only": True})

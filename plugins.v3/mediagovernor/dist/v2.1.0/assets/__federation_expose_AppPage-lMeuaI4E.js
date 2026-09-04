@@ -3,19 +3,6 @@ import { _ as _export_sfc } from './_plugin-vue_export-helper-pcqpp-6-.js';
 
 const clean = value => String(value || '').trim();
 const unique = values => [...new Set(values.filter(Boolean))];
-const pathKey = value => {
-  const normalized = clean(value).replace(/\\/g, '/').replace(/\/+/g, '/');
-  return (normalized === '/' ? normalized : normalized.replace(/\/$/, '')).toLowerCase()
-};
-
-function pathRelationship(left, right) {
-  const parent = pathKey(left), child = pathKey(right);
-  if (!parent || !child) return 'unrelated'
-  if (parent === child) return 'same'
-  if (child.startsWith(`${parent}/`)) return 'ancestor'
-  if (parent.startsWith(`${child}/`)) return 'descendant'
-  return 'unrelated'
-}
 
 function bundleFamily(value) {
   return clean(value)
@@ -29,21 +16,6 @@ function bundleFamily(value) {
     .trim()
     .toLowerCase()
     .slice(0, 120)
-}
-
-function dedupeRoots(roots) {
-  const accepted = [], skipped = [];
-  for (const root of [...roots].sort((a, b) => pathKey(a?.path).length - pathKey(b?.path).length)) {
-    const candidate = pathKey(root?.path);
-    if (!candidate) continue
-    const duplicate = accepted.find(item => {
-      const parent = pathKey(item?.path);
-      return String(item?.storage || 'local') === String(root?.storage || 'local') && (candidate === parent || candidate.startsWith(`${parent}/`))
-    });
-    if (duplicate) skipped.push(root);
-    else accepted.push(root);
-  }
-  return { roots: accepted, skipped }
 }
 
 function episodeAudit(episodes = []) {
@@ -91,6 +63,24 @@ function auditCoverage({ expected = 0, scanned = 0, limited = false } = {}) {
   const done = Math.max(0, Number(scanned) || 0);
   if (!limited && done >= total) return { complete: true, message: `已覆盖全部 ${total} 个当前包` }
   return { complete: false, message: `只覆盖 ${done}/${total} 个当前包` }
+}
+
+// 日常兜底不能把全量成功历史重新当作待检查库存。失败记录只有尚未被
+// 同来源成功记录覆盖时才保留；成功记录仅限插件已收到的实时整理事件。
+function reviewHistoryScope({ failed = [], successful = [], events = [] } = {}) {
+  const sourceKey = row => {
+    const source = row?.src_fileitem || row?.source_fileitem || row?.fileitem || {};
+    return `${row?.src_storage || source.storage || 'local'}:${row?.src || source.path || ''}`
+  };
+  const successSources = new Set(successful.map(sourceKey).filter(key => !key.endsWith(':')));
+  const activeFailed = failed.filter(row => !successSources.has(sourceKey(row)));
+  const eventSuccessIds = new Set(events
+    .filter(item => item?.status === 'success' && item?.history_id !== undefined && item?.history_id !== null)
+    .map(item => String(item.history_id)));
+  const eventSuccess = successful
+    .filter(row => eventSuccessIds.has(String(row?.id)))
+    .map(row => ({ ...row, _mediagovernor_event_success: true }));
+  return { activeFailed, eventSuccess, recovered: failed.length - activeFailed.length }
 }
 
 function strictEpisodeHints(name) {
@@ -276,20 +266,25 @@ const _sfc_main = {
 const props = __props;
 const tab = ref('identity'), loading = ref(false), notice = ref(''), cards = ref([]), selected = ref(null), preview = ref(null), sources = ref([]), scope = ref(emptyScope()), run = ref(emptyRun()), control = ref({ paused: false, stopped: false });
 let resumeWaiter = null, clock = null;
-const pageSize = 100, workers = 6, inventoryWorkers = 12, evidenceEntryLimit = 1200, videoExt = /\.(mkv|mp4|avi|m2ts|ts|mov|webm)$/i, subtitleExt = /\.(ass|ssa|srt|sub|vtt)$/i;
+const pageSize = 100, workers = 6, evidenceEntryLimit = 1200, videoExt = /\.(mkv|mp4|avi|m2ts|ts|mov|webm)$/i, subtitleExt = /\.(ass|ssa|srt|sub|vtt)$/i;
 const canUseApi = computed(() => typeof props.api?.get === 'function' && typeof props.api?.post === 'function');
-const progress = computed(() => run.value.total ? Math.round(run.value.completed * 100 / run.value.total) : 0);
+const progress = computed(() => {
+  if (!run.value.total) return 0
+  const read = Math.min(1, run.value.completed / run.value.total);
+  if (read < 1) return Math.round(read * 55)
+  if (run.value.aiTotal && run.value.aiCompleted < run.value.aiTotal) return 55 + Math.round(run.value.aiCompleted * 25 / run.value.aiTotal)
+  return 80 + Math.round(Math.min(1, run.value.resultCompleted / run.value.total) * 20)
+});
 const elapsed = computed(() => { if (!run.value.startedAt) return '0 秒'; const s = Math.round(((run.value.finishedAt || Date.now()) - run.value.startedAt) / 1000); return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒` });
 const hasRun = computed(() => Boolean(run.value.startedAt));
-computed(() => cards.value.filter(card => card.state === 'confirmed'));
 const organizationCards = computed(() => cards.value.filter(card => card.evidence || card.state === 'unavailable'));
 const fixtures = computed(() => acceptanceFixtures());
 const dataOf = value => value?.data ?? value;
 const safe = value => String(value || '').replace(/[\\/]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180);
 const unique = values => [...new Set(values.filter(Boolean))];
 const number = value => Number(value) || 0;
-function emptyScope() { return { failure: 0, success: 0, recovered: 0, currentFailures: 0, unavailable: [], directories: 0, inventoryPackages: 0, fastClear: 0, verificationQueue: 0, inventoryState: '尚未读取' } }
-function emptyRun() { return { phase: '尚未开始', total: 0, completed: 0, current: '', startedAt: 0, finishedAt: 0, stats: { confirmed: 0, selection: 0, insufficient: 0, nonMedia: 0, unavailable: 0, clear: 0 } } }
+function emptyScope() { return { failure: 0, recovered: 0, currentFailures: 0, eventSuccess: 0, unavailable: [], directories: 0, inventoryPackages: 0, fastClear: 0, verificationQueue: 0, inventoryState: '尚未读取' } }
+function emptyRun() { return { phase: '尚未开始', total: 0, completed: 0, aiTotal: 0, aiCompleted: 0, resultCompleted: 0, current: '', startedAt: 0, finishedAt: 0, stats: { confirmed: 0, selection: 0, insufficient: 0, nonMedia: 0, unavailable: 0, clear: 0 } } }
 function cleanTitle(value) { return safe(value).replace(/\.[a-z0-9]{2,5}$/i, '').replace(/[\[\]【】()]/g, ' ').replace(/[._-]+/g, ' ').replace(/\b(2160p|1080p|720p|web[ .-]?dl|web[ .-]?rip|bluray|bdrip|remux|x26[45]|h\.?26[45]|hevc|aac|dts|atmos|hdr10?\+?|dv|10bit|proper|repack|complete|中字|简繁|国语|粤语|flac|truehd|ddp?|bdrip)\b/gi, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) }
 const norm = value => cleanTitle(value).toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 const useful = value => { const name = norm(value); return name.length >= 3 && !/^(movie|video|sample|test|unknown|第?[0-9]+集?)$/i.test(name) };
@@ -300,34 +295,11 @@ function candidateNames(c) { return unique([c.title, c.original_title, c.en_titl
 function candidateMeta(c) { return [c.type_name, c.year, c.season ? `第 ${c.season} 季` : '', c.episodeCount ? `${c.episodeCount} 集` : '', `来源：${c.media_source}`].filter(Boolean).join(' · ') }
 
 async function historyRows(status, label) { const rows = []; for (let page = 1; ; page += 1) { const raw = dataOf(await props.api.get(`history/transfer?status=${status}&page=${page}&count=${pageSize}`, { feedback: 'silent' })); if (raw?.success === false) throw new Error(raw.message || `无法读取${label}`); const data = raw?.data ?? raw, batch = data?.items || data?.list || data?.data || []; if (!Array.isArray(batch)) return rows; rows.push(...batch); if (batch.length < pageSize) return rows } }
+async function eventIndex() { try { const raw = dataOf(await props.api.get('plugin/MediaGovernor/evidence_index', { feedback: 'silent' })); if (raw?.success === false) throw new Error(raw.message || '事件索引不可用'); const data = raw?.data ?? raw; return Array.isArray(data?.items) ? data.items : [] } catch (error) { scope.value.unavailable.push(error?.message || '本轮无法读取实时整理事件；只检查尚未恢复的失败记录。'); return [] } }
 async function readSources() { try { const raw = dataOf(await props.api.get('media/source', { feedback: 'silent' })); sources.value = (Array.isArray(raw) ? raw : []).map(item => ({ id: String(item?.media_source || item?.source || ''), label: safe(item?.name || item?.title || item?.media_source || item?.source), state: '待查询', hits: 0 })).filter(item => item.id); } catch { sources.value = [{ id: '', label: '媒体数据源清单不可读取', state: '不可用', hits: 0 }]; } }
-async function readDirectories() { try { const raw = dataOf(await props.api.get('storage/directories?directory_type=all', { feedback: 'silent' })); const list = Array.isArray(raw?.data) ? raw.data : Array.isArray(raw) ? raw : []; scope.value.directories = list.length; const roots = []; for (const item of list) { if (item?.library_path) roots.push({ type: 'dir', path: item.library_path, storage: item.library_storage || 'local', name: item.name || '媒体库', role: '媒体库' }); if (item?.download_path) roots.push({ type: 'dir', path: item.download_path, storage: item.storage || 'local', name: item.name || '下载目录', role: '下载目录' }); } const result = dedupeRoots(roots); if (result.skipped.length) scope.value.unavailable.push(`已合并 ${result.skipped.length} 个重叠扫描根目录，避免同一作品重复检查。`); return result.roots } catch { scope.value.unavailable.push('实际库存：当前账号无权读取已配置媒体库和下载目录，无法把历史当作库存。'); scope.value.inventoryState = '无读取权限，未扫描库存'; return [] } }
 function packageRoot(row) { const source = row?.src_fileitem || row?.source_fileitem || row?.fileitem; if (!source?.path) return null; if (source.type === 'dir') return source; const path = String(source.path), cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')); return cut > 0 ? { ...source, path: path.slice(0, cut), type: 'dir', children: [] } : null }
 function packageKey(row) { const root = packageRoot(row), source = row?.src_fileitem || row?.source_fileitem || row?.fileitem, family = source?.type === 'dir' ? '' : bundleFamily(source?.name); return root?.path ? `${itemKey(root)}${family ? `#${family}` : ''}` : `history:${row?.id || crypto.randomUUID()}` }
-function groupsFor(rows) { const map = new Map(); for (const row of rows) { const key = packageKey(row), source = row?.src_fileitem || row?.source_fileitem || row?.fileitem, group = map.get(key) || { key, source, root: packageRoot(row), family: bundleFamily(source?.name), historyIds: [], historyRows: [], titles: [], origin: '历史线索' }; group.historyIds.push(row?.id); group.historyRows.push(row); if (row?.title) group.titles.push(cleanTitle(row.title)); map.set(key, group); } return map }
-function exactSourceKey(row) { const source = row?.src_fileitem || row?.source_fileitem || row?.fileitem; return `${row?.src_storage || source?.storage || 'local'}:${row?.src || source?.path || ''}` }
-function mergeExactHistory(inventory, historyGroups) { const byKey = new Map(inventory.map(group => [group.key, group])), unmatched = []; let broad = 0; for (const legacy of historyGroups.values()) { const exact = byKey.get(legacy.key), sameFamily = !exact && inventory.find(group => String(group.root?.storage || 'local') === String(legacy.root?.storage || 'local') && pathRelationship(legacy.root?.path, group.root?.path) === 'same' && group.family === legacy.family); const current = exact || sameFamily; if (current) { current.historyIds.push(...legacy.historyIds); current.historyRows = [...(current.historyRows || []), ...(legacy.historyRows || [])]; current.titles = unique([...current.titles, ...legacy.titles]); current.origin = '当前库存 + 历史线索'; continue } const related = inventory.some(group => String(group.root?.storage || 'local') === String(legacy.root?.storage || 'local') && pathRelationship(legacy.root?.path, group.root?.path) !== 'unrelated'); if (related) broad += 1; unmatched.push(legacy); } return { groups: inventory, unmatched, broad } }
-function inventoryKey(item) { return item?.path ? itemKey(item) : '' }
-function fileFamily(item) { return bundleFamily(safe(item?.name)) || '__folder__' }
-function groupsFromFiles(current, children) { const videos = children.filter(child => child?.type !== 'dir' && videoExt.test(safe(child?.name))); const byFamily = new Map(); for (const video of videos) { const family = fileFamily(video); const bucket = byFamily.get(family) || []; bucket.push(video); byFamily.set(family, bucket); } const split = byFamily.size > 1, base = inventoryKey(current.item), result = []; for (const [family, media] of byFamily) { const items = split ? children.filter(item => item?.type !== 'dir' && fileFamily(item) === family) : children.filter(item => item?.type !== 'dir'); const key = split ? `${base}#${family}` : base; if (key) result.push({ key, source: media[0], root: current.item, role: current.item?.role, items, recursive: current.depth > 0, historyIds: [], titles: unique([cleanTitle(current.item?.name), family === '__folder__' ? '' : cleanTitle(family)]), origin: split ? '当前平铺目录（已按作品拆分）' : '当前媒体库', split, family }); } return result }
-async function inventoryGroups(roots) {
-  const found = new Map(), queue = roots.map(root => ({ item: root, depth: 0 })); let visited = 0;
-  while (queue.length) {
-    const batch = queue.splice(0, inventoryWorkers);
-    const listings = await Promise.all(batch.map(async current => {
-      try { return { current, children: dataOf(await props.api.post('storage/list', current.item, { feedback: 'silent' })) } }
-      catch { return { current, children: null } }
-    }));
-    for (const { current, children } of listings) {
-      if (!Array.isArray(children)) { scope.value.unavailable.push('有一个配置媒体库目录不可读取；本轮不能声称已覆盖全部库存。'); continue }
-      visited += children.length + 1;
-      if (children.some(child => child?.type !== 'dir' && videoExt.test(safe(child?.name)))) for (const group of groupsFromFiles(current, children)) if (!found.has(group.key)) found.set(group.key, group);
-      for (const child of children) if (child?.type === 'dir') queue.push({ item: child, depth: current.depth + 1 });
-    }
-    run.value.current = `正在建立完整库存：已读取 ${visited} 个目录项，发现 ${found.size} 个视频包`;
-  }
-  return [...found.values()]
-}
+function groupsFor(rows) { const map = new Map(); for (const row of rows) { const key = packageKey(row), source = row?.src_fileitem || row?.source_fileitem || row?.fileitem, group = map.get(key) || { key, source, root: packageRoot(row), family: bundleFamily(source?.name), recursive: source?.type === 'dir', historyIds: [], historyRows: [], titles: [], eventSuccess: false, origin: '当前整理历史' }; group.historyIds.push(row?.id); group.historyRows.push(row); group.eventSuccess ||= Boolean(row?._mediagovernor_event_success); if (row?.title) group.titles.push(cleanTitle(row.title)); map.set(key, group); } return map }
 async function treeEvidence(group) {
   if (!group.root) return { ok: false, reason: '这条历史没有可验证的当前来源包，不能据此猜作品。' }
   const entries = [], folderHints = [], names = [...group.titles, cleanTitle(group.source?.name)].filter(Boolean), episodeFiles = new Map();
@@ -338,6 +310,7 @@ async function treeEvidence(group) {
     const current = queue.shift(); let children = current.items;
     if (!children) try { children = dataOf(await props.api.post('storage/list', current.item, { feedback: 'silent' })); } catch { return { ok: false, reason: '当前来源包无法读取，不能把它当作通过。' } }
     if (!Array.isArray(children)) return { ok: false, reason: '当前来源包无法读取，不能把它当作通过。' }
+    if (!group.recursive && group.family) children = children.filter(child => child?.type === 'dir' || bundleFamily(safe(child?.name)) === group.family);
     for (const child of children) {
       if (entries.length >= evidenceEntryLimit) { complete = false; break }
       const name = safe(child?.name), depth = current.depth + 1;
@@ -374,7 +347,7 @@ async function detailFor(c) { try { return dataOf(await props.api.get(`media/${e
 function score(c, e) { const names = candidateNames(c).map(norm).filter(Boolean), hits = e.queries.filter(query => { const value = norm(query); return names.some(name => name === value || name.includes(value) || value.includes(name)) }); if (hits.length) { c.score += Math.min(8, hits.length * 2); c.reasons.push(`标题线索命中 ${hits.length} 条`); } else c.conflicts.push('候选标题与完整包名称线索没有交集'); if (c.via.some(item => item.includes('原生识别'))) { c.score += 3; c.reasons.push('MoviePilot 原生识别命中'); } const years = unique(e.queries.flatMap(query => query.match(/(?:19|20)\d{2}/g) || [])); if (years.length && c.year) { if (years.includes(c.year)) { c.score += 2; c.reasons.push('年份线索一致'); } else c.conflicts.push('年份线索冲突'); } }
 function bundlePayload(group, evidence) { return { evidence: { title_hints: unique([...(group.titles || []), ...(evidence.queries || [])]).slice(0, 30), entries: evidence.entries.slice(0, 500), episodes: evidence.episodes, video_count: evidence.videos, subtitle_count: evidence.subtitles, nfo_count: evidence.nfos } } }
 function diagnosisText(diagnosis) { if (!diagnosis) return '当前 MoviePilot 模型没有返回整包判断。'; if (diagnosis.classification === 'sample') return '模型判断这是样片，不参与作品匹配。'; if (diagnosis.classification === 'test') return '模型判断这是测试残留，不参与作品匹配。'; if (diagnosis.abstain) return '模型主动放弃判断；不会把它伪装成作品。'; return `模型判断：${diagnosis.title}${diagnosis.year ? `（${diagnosis.year}）` : ''}${diagnosis.season ? `，第 ${diagnosis.season} 季` : ''}，置信度 ${Math.round((diagnosis.confidence || 0) * 100)}%。` }
-async function diagnoseBundles(items) { const result = new Map(), batches = []; let batch = [], entries = 0, serial = 0; const push = () => { if (batch.length) batches.push(batch); batch = []; entries = 0; }; for (const item of items) { const evidence = bundlePayload(item.group, item.evidence).evidence, count = evidence.entries.length; if (batch.length && (batch.length >= 12 || entries + count > 1200)) push(); batch.push({ id: `bundle-${++serial}`, evidence, key: item.group.key }); entries += count; } push(); for (const group of batches) { try { const raw = dataOf(await props.api.post('plugin/MediaGovernor/bundle_analyze_batch', { items: group.map(({ id, evidence }) => ({ id, evidence })) }, { feedback: 'silent' })); if (raw?.success === false) throw new Error(raw.message || '模型没有完成整包分析。'); const diagnoses = raw?.data?.diagnoses || raw?.diagnoses || {}; group.forEach(item => result.set(item.key, diagnoses[item.id] || { error: '模型没有返回这个包的结构化判断。' })); } catch (error) { group.forEach(item => result.set(item.key, { error: error?.message || '无法调用当前 MoviePilot 模型；仍会继续原生候选核验。' })); } } return result }
+async function diagnoseBundles(items) { const result = new Map(), batches = []; let batch = [], entries = 0, serial = 0; const push = () => { if (batch.length) batches.push(batch); batch = []; entries = 0; }; for (const item of items) { const evidence = bundlePayload(item.group, item.evidence).evidence, count = evidence.entries.length; if (batch.length && (batch.length >= 12 || entries + count > 1200)) push(); batch.push({ id: `bundle-${++serial}`, evidence, key: item.group.key }); entries += count; } push(); run.value.aiTotal = items.length; for (let index = 0; index < batches.length; index += 1) { if (!(await waitIfPaused())) break; const group = batches[index]; run.value.phase = `正在分析可疑包：第 ${index + 1}/${batches.length} 批`; run.value.current = `本批 ${group.length} 个包；已完成 ${run.value.aiCompleted}/${run.value.aiTotal} 个可疑包`; try { const raw = dataOf(await props.api.post('plugin/MediaGovernor/bundle_analyze_batch', { items: group.map(({ id, evidence }) => ({ id, evidence })) }, { feedback: 'silent' })); if (raw?.success === false) throw new Error(raw.message || '模型没有完成整包分析。'); const diagnoses = raw?.data?.diagnoses || raw?.diagnoses || {}; group.forEach(item => result.set(item.key, diagnoses[item.id] || { error: '模型没有返回这个包的结构化判断。' })); } catch (error) { group.forEach(item => result.set(item.key, { error: error?.message || '当前模型未返回结果。' })); } finally { run.value.aiCompleted += group.length; } } return result }
 function searchPlan(e, diagnosis) { const aiTitles = diagnosis && !diagnosis.abstain ? [[diagnosis.title, diagnosis.year].filter(Boolean).join(' '), diagnosis.title, diagnosis.original_title] : []; return unique([...aiTitles, ...e.folderHints, ...e.queries].filter(useful)).slice(0, 1) }
 function videoSource(source) { return source?.id && !/(music|audio)/i.test(source.id) && !/(音乐|音频)/.test(source.label || '') }
 function candidateType(c) { return String(c.type_name || '').toLowerCase() }
@@ -382,39 +355,42 @@ function hardReject(c, e, diagnosis) { const type = candidateType(c); if (/(musi
 async function nativeCandidateFor(group) { if (!group.source?.path) return null; try { return candidateOf(dataOf(await props.api.get(`media/recognize_file?path=${encodeURIComponent(group.source.path)}`, { feedback: 'silent' })), '来源文件原生识别', cleanTitle(group.source.name)) } catch { return null } }
 function currentHistory(group) { return (group.historyRows || []).find(row => row?.status !== false) || (group.historyRows || [])[0] || {} }
 function triageIssues(group, evidence) { return initialIssueSignals({ activeFailure: (group.historyRows || []).some(row => row?.status === false), duplicateEpisodes: evidence.duplicateEpisodes || [] }) }
+function historyMatchesSource(group, evidence) { const historyNames = unique(group.titles || []).map(norm).filter(Boolean), sourceNames = unique([...(evidence.folderHints || []), ...(evidence.queries || [])]).map(norm).filter(Boolean); if (!historyNames.length || !sourceNames.length) return false; return historyNames.some(title => sourceNames.some(name => title === name || title.includes(name) || name.includes(title))) }
+function needsModelReview(group, evidence, target) { if (!evidence.ok) return false; if (group.eventSuccess || triageIssues(group, evidence).length || (target?.issues || []).length) return true; const history = currentHistory(group); if (!history?.title || !history?.type) return true; return !historyMatchesSource(group, evidence) }
+function baselineCard(group, evidence, target) { if (!evidence.ok) return { ...group, state: 'unavailable', reason: evidence.reason }; return { ...group, state: 'clear', reason: '当前来源、整理历史和硬链接目标一致；没有触发 AI 兜底。', evidence, target } }
 async function candidatesFor(group, e, diagnosis, native) { const map = new Map(), add = c => { if (c) map.set(candidateKey(c), mergeCandidate(map.get(candidateKey(c)), c)); }; add(native); e.searchQueries = searchPlan(e, diagnosis); for (const query of e.searchQueries) { try { add(candidateOf(dataOf(await props.api.get(`media/recognize?title=${encodeURIComponent(query)}`, { feedback: 'silent' })), '包名原生识别', query)); } catch { /* Native lookup is optional. */ } } if (!map.size) { const fallbackSources = sources.value.filter(videoSource).filter(source => /(douban|themoviedb|bangumi|anilist|tvdb)/i.test(source.id)).sort((a, b) => Number(/douban|themoviedb/i.test(b.id)) - Number(/douban|themoviedb/i.test(a.id))).slice(0, 2); for (const query of e.searchQueries) for (const source of fallbackSources) { const params = new URLSearchParams({ title: query, type: 'media', count: '6', media_source: source.id }); try { const raw = dataOf(await props.api.get(`media/search?${params}`, { feedback: 'silent' })); const rows = Array.isArray(raw) ? raw.slice(0, 6) : []; rows.forEach(item => add(candidateOf(item, `官方搜索：${source.label}`, query))); source.hits += rows.length; source.state = rows.length ? '有结果' : source.state === '待查询' ? '无结果' : source.state; } catch { source.state = '不可用'; } } } const shortlist = [...map.values()].slice(0, 6); await Promise.all(shortlist.map(async c => { const d = await detailFor(c); c.original_title ||= safe(d.original_title || d.original_name); c.en_title ||= safe(d.en_title || d.english_title); c.names = unique([...(c.names || []), ...(Array.isArray(d.names) ? d.names : []), ...(Array.isArray(d.aliases) ? d.aliases : [])].map(safe)); c.year ||= String(d.year || d.release_year || d.release_date || '').slice(0, 4); c.episodeCount = number(d.number_of_episodes || d.episode_count) || undefined; score(c, e); if (diagnosis?.title && candidateNames(c).map(norm).some(name => name === norm(diagnosis.title))) { c.score += 4; c.reasons.push('整包模型判断与官方候选同名'); } const rejected = hardReject(c, e, diagnosis); if (rejected) c.rejection = rejected; })); e.rejectedCandidates = shortlist.filter(c => c.rejection).length; return shortlist.filter(c => !c.rejection).sort((a, b) => b.score - a.score) }
-async function inspectGroup(group, evidence, target, diagnosis) { if (!evidence.ok) return { ...group, state: 'unavailable', reason: evidence.reason }; const issues = unique([...triageIssues(group, evidence), ...(target?.issues || []), ...historyIdentityAudit(currentHistory(group), diagnosis)]); if (!issues.length) return { ...group, state: 'clear', reason: '完整包结构、当前硬链接目标和模型判断均与现有整理身份一致；未发现可证明的当前问题。', evidence, diagnosis }; const native = await nativeCandidateFor(group); const candidates = await candidatesFor(group, evidence, diagnosis, native); const resolved = resolveIdentity(candidates, diagnosis); return { ...group, ...resolved, state: resolved.state === 'confirmed' ? 'confirmed' : resolved.state, reason: `${issues.join('；')}。${diagnosisText(diagnosis)} ${resolved.reason}`, evidence, diagnosis } }
+async function inspectGroup(group, evidence, target, diagnosis) { if (!evidence.ok) return { ...group, state: 'unavailable', reason: evidence.reason }; if (diagnosis?.error) return { ...group, state: 'unavailable', reason: `模型未完成：${diagnosis.error}；没有把这个包伪装成已检查。`, evidence, diagnosis }; const issues = unique([...triageIssues(group, evidence), ...(target?.issues || []), ...historyIdentityAudit(currentHistory(group), diagnosis)]); if (!issues.length) return { ...group, state: 'clear', reason: '完整包结构、当前硬链接目标和模型判断均与现有整理身份一致；未发现可证明的当前问题。', evidence, diagnosis }; const native = await nativeCandidateFor(group); const candidates = await candidatesFor(group, evidence, diagnosis, native); const resolved = resolveIdentity(candidates, diagnosis); return { ...group, ...resolved, state: resolved.state === 'confirmed' ? 'confirmed' : resolved.state, reason: `${issues.join('；')}。${diagnosisText(diagnosis)} ${resolved.reason}`, evidence, diagnosis } }
 function organizationIssues(card) { if (!card?.evidence) return ['当前文件不可读，只能标记为历史残留或读取失败']; return organizationAudit({ evidence: card.evidence, identity: card.identity, diagnosis: card.diagnosis }) }
 function addStat(card) { if (card.state === 'clear') { run.value.stats.clear += 1; scope.value.fastClear += 1; } else if (card.state === 'confirmed') run.value.stats.confirmed += 1; else if (card.state === 'needs_selection') run.value.stats.selection += 1; else if (card.state === 'insufficient') run.value.stats.insufficient += 1; else if (card.state === 'non_media') run.value.stats.nonMedia += 1; else run.value.stats.unavailable += 1; }
 async function waitIfPaused() { while (control.value.paused && !control.value.stopped) await new Promise(resolve => { resumeWaiter = resolve; }); return !control.value.stopped }
 function pause() { control.value.paused = true; run.value.phase = '已暂停：不再派发新包'; }
 function resume() { control.value.paused = false; run.value.phase = '继续检查'; resumeWaiter?.(); resumeWaiter = null; }
 function stop() { control.value.stopped = true; control.value.paused = false; run.value.phase = '正在停止：已发出的读取请求会结束'; resumeWaiter?.(); resumeWaiter = null; }
+async function prepareGroups(groups) { const result = new Array(groups.length); let next = 0; const worker = async () => { while (next < groups.length && await waitIfPaused()) { const index = next++; const group = groups[index]; run.value.current = `正在读取来源包 ${index + 1}/${groups.length}`; try { result[index] = { group, evidence: await treeEvidence(group), target: await currentTargetAudit(group) }; } catch { result[index] = { group, evidence: { ok: false, reason: '读取这个来源包时出现异常；没有进行任何文件操作。' }, target: { issues: [] } }; } finally { run.value.completed += 1; } } }; await Promise.all(Array.from({ length: Math.min(workers, groups.length) }, worker)); return result.filter(Boolean) }
 async function inspect() {
   if (!canUseApi.value || loading.value) { notice.value = '当前 MoviePilot 没有注入认证 API，无法安全检查。'; return }
   loading.value = true; cards.value = []; selected.value = null; preview.value = null; scope.value = emptyScope(); control.value = { paused: false, stopped: false };
-  run.value = { ...emptyRun(), phase: '正在读取完整媒体库存', startedAt: Date.now() }; clock = window.setInterval(() => { run.value = { ...run.value }; }, 1000);
+  run.value = { ...emptyRun(), phase: '正在读取当前整理历史', startedAt: Date.now() }; clock = window.setInterval(() => { run.value = { ...run.value }; }, 1000);
   try {
-    const [failed, successful, _sources, roots] = await Promise.all([historyRows(false, '失败整理历史'), historyRows(true, '成功整理历史'), readSources(), readDirectories()]);
-    scope.value.failure = failed.length; scope.value.success = successful.length;
-    const [inventory, failureGroups, successGroups] = await Promise.all([inventoryGroups(roots), Promise.resolve(groupsFor(failed)), Promise.resolve(groupsFor(successful))]);
-    const successSources = new Set(successful.map(exactSourceKey).filter(Boolean));
-    const currentFailureGroups = new Map([...failureGroups].filter(([, group]) => !(group.historyRows || []).every(row => successSources.has(exactSourceKey(row)))));
-    const sourceInventory = inventory.filter(group => group.role !== '媒体库');
-    const withSuccess = mergeExactHistory(sourceInventory, successGroups), merged = mergeExactHistory(withSuccess.groups, currentFailureGroups), groups = [...merged.groups, ...merged.unmatched];
-    if (merged.broad) scope.value.unavailable.push(`${merged.broad} 个当前失败来源无法精确对应当前包；会显示为未核验，不会当作通过。`);
-    scope.value.inventoryPackages = sourceInventory.length; scope.value.recovered = failureGroups.size - currentFailureGroups.size; scope.value.currentFailures = currentFailureGroups.size;
-    const coverage = auditCoverage({ expected: sourceInventory.length, scanned: groups.length, limited: Boolean(scope.value.unavailable.length) });
-    scope.value.inventoryState = roots.length ? `${coverage.message}；已读取所有可访问的来源包，媒体库目录只用于核对当前硬链接目标，并对每个完整包统一请求模型判断。` : '没有可读的配置媒体库或下载目录；未把历史伪装成库存。';
-    run.value.total = groups.length; run.value.phase = `范围已建立：${coverage.message}；正在读取完整包结构`;
-    const prepared = await Promise.all(groups.map(async group => ({ group, evidence: await treeEvidence(group), target: await currentTargetAudit(group) })));
-    const analyzable = prepared.filter(item => item.evidence.ok);
-    run.value.phase = `完整结构与当前硬链接目标已读取：${analyzable.length} 个包，按每批最多 12 个交给模型统一判断`;
-    const diagnoses = await diagnoseBundles(analyzable), queue = [...prepared];
-    const worker = async () => { while (queue.length && await waitIfPaused()) { const item = queue.shift(); if (!item) return; run.value.current = `正在核验第 ${run.value.completed + 1}/${run.value.total} 个当前包`; let card; try { card = await inspectGroup(item.group, item.evidence, item.target, diagnoses.get(item.group.key) || { error: '这个包没有获得模型判断，不能当作通过。' }); } catch { card = { ...item.group, state: 'unavailable', reason: '读取这个包时出现异常；没有进行任何文件操作。' }; } if (card.state !== 'clear') cards.value = [...cards.value, card]; run.value.completed += 1; addStat(card); } };
-    await Promise.all(Array.from({ length: Math.min(workers, groups.length) }, worker)); scope.value.verificationQueue = cards.value.length; run.value.finishedAt = Date.now();
-    if (control.value.stopped) notice.value = `已停止：完成 ${run.value.completed}/${run.value.total} 个包。已完成部分保留；全程零写入。`;
-    else { run.value.phase = '检查完成'; notice.value = `${coverage.complete ? '完整覆盖已完成' : '检查未覆盖完整库存'}：${run.value.completed} 个包中 ${scope.value.fastClear} 个与现有整理身份一致，${cards.value.length} 个需要查看；全程零写入。`; }
+    const [failed, successful, events, _sources] = await Promise.all([historyRows(false, '失败整理历史'), historyRows(true, '成功整理历史'), eventIndex(), readSources()]);
+    scope.value.failure = failed.length;
+    const { activeFailed, eventSuccess, recovered } = reviewHistoryScope({ failed, successful, events });
+    const groups = [...groupsFor([...eventSuccess, ...activeFailed]).values()];
+    scope.value.recovered = recovered; scope.value.currentFailures = activeFailed.length; scope.value.eventSuccess = eventSuccess.length; scope.value.inventoryPackages = groups.length;
+    run.value.total = groups.length; run.value.phase = `范围已建立：${groups.length} 个当前整理来源包；正在读取必要证据`;
+    const prepared = await prepareGroups(groups), coverage = auditCoverage({ expected: groups.length, scanned: prepared.length, limited: control.value.stopped || Boolean(scope.value.unavailable.length) });
+    scope.value.inventoryState = `${coverage.message}；本轮只检查未恢复失败 ${activeFailed.length} 条和插件启用后记录的成功整理 ${eventSuccess.length} 条，不扫描整个媒体库，也不把历史失败次数当作问题数。`;
+    const modelQueue = prepared.filter(item => needsModelReview(item.group, item.evidence, item.target));
+    const baseline = prepared.filter(item => !needsModelReview(item.group, item.evidence, item.target)).map(item => baselineCard(item.group, item.evidence, item.target));
+    baseline.forEach(card => addStat(card));
+    cards.value = baseline.filter(card => card.state !== 'clear');
+    run.value.resultCompleted = baseline.length;
+    run.value.phase = `规则筛选完成：${baseline.length} 个无需 AI，${modelQueue.length} 个可疑包进入模型队列`;
+    const diagnoses = await diagnoseBundles(modelQueue), queue = [...modelQueue];
+    const worker = async () => { while (queue.length && await waitIfPaused()) { const item = queue.shift(); if (!item) return; run.value.current = `正在核验可疑包 ${run.value.resultCompleted + 1}/${prepared.length}`; let card; try { card = await inspectGroup(item.group, item.evidence, item.target, diagnoses.get(item.group.key) || { error: control.value.stopped ? '检查已停止' : '模型没有返回这个包的结构化判断。' }); } catch { card = { ...item.group, state: 'unavailable', reason: '核验这个包时出现异常；没有进行任何文件操作。' }; } if (card.state !== 'clear') cards.value = [...cards.value, card]; run.value.resultCompleted += 1; addStat(card); } };
+    await Promise.all(Array.from({ length: Math.min(workers, modelQueue.length) }, worker)); scope.value.verificationQueue = cards.value.length; run.value.finishedAt = Date.now();
+    if (control.value.stopped) notice.value = `已停止：已读取 ${run.value.completed}/${run.value.total} 个来源包，已产出 ${run.value.resultCompleted} 个结果；全程零写入。`;
+    else { run.value.phase = '检查完成'; notice.value = `${coverage.complete ? '完整覆盖已完成' : '检查未覆盖完整范围'}：${run.value.resultCompleted} 个来源包中 ${scope.value.fastClear} 个无需 AI，${cards.value.length} 个需要查看；全程零写入。`; }
   } catch (error) { run.value.phase = '检查未完成'; notice.value = error?.message || '无法建立当前媒体库存；没有改动文件。'; }
   finally { loading.value = false; if (clock) window.clearInterval(clock); clock = null; }
 }
@@ -429,16 +405,16 @@ return (_ctx, _cache) => {
   return (_openBlock(), _createElementBlock("main", _hoisted_1, [
     _createElementVNode("header", _hoisted_2, [
       _cache[5] || (_cache[5] = _createElementVNode("div", null, [
-        _createElementVNode("p", { class: "eyebrow" }, "MediaGovernor 2.0"),
+        _createElementVNode("p", { class: "eyebrow" }, "MediaGovernor 2.1"),
         _createElementVNode("h1", null, "媒体治理工作台"),
-        _createElementVNode("p", null, "每次读取全部可访问的当前包及完整目录结构。身份未核验、读取失败或覆盖不完整都不会被标成通过。")
+        _createElementVNode("p", null, "只检查尚未恢复的失败整理，以及插件启用后新发生的整理；不再把全库或旧历史当作待检查包。")
       ], -1)),
       _createElementVNode("div", _hoisted_3, [
         _createElementVNode("button", {
           class: "primary",
           disabled: loading.value,
           onClick: inspect
-        }, _toDisplayString(loading.value ? '检查进行中…' : hasRun.value ? '重新检查' : '开始完整检查'), 9, _hoisted_4),
+        }, _toDisplayString(loading.value ? '检查进行中…' : hasRun.value ? '重新检查' : '开始检查'), 9, _hoisted_4),
         (loading.value && !control.value.paused)
           ? (_openBlock(), _createElementBlock("button", {
               key: 0,
@@ -465,7 +441,7 @@ return (_ctx, _cache) => {
     _createElementVNode("section", _hoisted_5, [
       _createElementVNode("div", _hoisted_6, [
         _createElementVNode("strong", null, _toDisplayString(run.value.phase), 1),
-        _createElementVNode("span", null, _toDisplayString(run.value.completed) + "/" + _toDisplayString(run.value.total) + " 个当前包 · " + _toDisplayString(elapsed.value), 1)
+        _createElementVNode("span", null, "已读 " + _toDisplayString(run.value.completed) + "/" + _toDisplayString(run.value.total) + " · AI " + _toDisplayString(run.value.aiCompleted) + "/" + _toDisplayString(run.value.aiTotal) + " · 已产出 " + _toDisplayString(run.value.resultCompleted) + " · " + _toDisplayString(elapsed.value), 1)
       ]),
       _createElementVNode("div", _hoisted_7, [
         _createElementVNode("i", {
@@ -473,11 +449,11 @@ return (_ctx, _cache) => {
         }, null, 4)
       ]),
       (run.value.current)
-        ? (_openBlock(), _createElementBlock("p", _hoisted_8, _toDisplayString(run.value.current) + "。先读取完整结构和当前硬链接目标，再统一批量核验作品身份。", 1))
+        ? (_openBlock(), _createElementBlock("p", _hoisted_8, _toDisplayString(run.value.current) + "。停止会阻止后续读取和模型批次；已完成结果保留。", 1))
         : _createCommentVNode("", true),
       _createElementVNode("div", _hoisted_9, [
         _createElementVNode("span", null, [
-          _cache[6] || (_cache[6] = _createTextVNode("身份一致 ", -1)),
+          _cache[6] || (_cache[6] = _createTextVNode("规则通过 ", -1)),
           _createElementVNode("b", null, _toDisplayString(run.value.stats.clear), 1)
         ]),
         _createElementVNode("span", null, [
@@ -502,11 +478,11 @@ return (_ctx, _cache) => {
       _cache[16] || (_cache[16] = _createElementVNode("h2", null, "这次到底查了什么", -1)),
       _createElementVNode("div", _hoisted_11, [
         _createElementVNode("span", null, [
-          _cache[11] || (_cache[11] = _createTextVNode("当前库存包 ", -1)),
+          _cache[11] || (_cache[11] = _createTextVNode("当前来源包 ", -1)),
           _createElementVNode("b", null, _toDisplayString(scope.value.inventoryPackages), 1)
         ]),
         _createElementVNode("span", null, [
-          _cache[12] || (_cache[12] = _createTextVNode("身份一致 ", -1)),
+          _cache[12] || (_cache[12] = _createTextVNode("规则通过 ", -1)),
           _createElementVNode("b", null, _toDisplayString(scope.value.fastClear), 1)
         ]),
         _createElementVNode("span", null, [
@@ -514,15 +490,15 @@ return (_ctx, _cache) => {
           _createElementVNode("b", null, _toDisplayString(scope.value.verificationQueue), 1)
         ]),
         _createElementVNode("span", null, [
-          _cache[14] || (_cache[14] = _createTextVNode("失败历史 ", -1)),
-          _createElementVNode("b", null, _toDisplayString(scope.value.failure), 1)
+          _cache[14] || (_cache[14] = _createTextVNode("未恢复失败 ", -1)),
+          _createElementVNode("b", null, _toDisplayString(scope.value.currentFailures), 1)
         ]),
         _createElementVNode("span", null, [
-          _cache[15] || (_cache[15] = _createTextVNode("成功历史 ", -1)),
-          _createElementVNode("b", null, _toDisplayString(scope.value.success), 1)
+          _cache[15] || (_cache[15] = _createTextVNode("新成功整理 ", -1)),
+          _createElementVNode("b", null, _toDisplayString(scope.value.eventSuccess), 1)
         ])
       ]),
-      _createElementVNode("p", null, "先读取当前媒体库和下载目录的完整包结构，再用整理历史逐项交叉核验；失败历史不是问题总数，也不会替代实际文件。" + _toDisplayString(scope.value.inventoryState), 1),
+      _createElementVNode("p", null, "失败历史只是线索，不是问题总数。安装 2.1 后会记录新的成功/失败整理；成功记录也会做整包核验，专门抓“表面成功但分错”的情况。不会递归扫描整个媒体库。" + _toDisplayString(scope.value.inventoryState), 1),
       (scope.value.unavailable.length)
         ? (_openBlock(), _createElementBlock("p", _hoisted_12, _toDisplayString(scope.value.unavailable.join('；')), 1))
         : _createCommentVNode("", true)
@@ -782,6 +758,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-45acb8c6"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-bd53aba8"]]);
 
 export { AppPage as default };
