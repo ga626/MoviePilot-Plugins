@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { acceptanceFixtures, bundleFamily, dedupeRoots, episodeAudit, organizationAudit, pathRelationship, resolveIdentity } from './governance.js'
+import { acceptanceFixtures, bundleFamily, dedupeRoots, episodeAudit, initialIssueSignals, organizationAudit, pathRelationship, resolveIdentity, strictEpisodeHints } from './governance.js'
 
 test('重叠根目录只保留最小可扫描范围', () => {
   const result = dedupeRoots([{ path: '/library', storage: 'local' }, { path: '/library/tv', storage: 'local' }, { path: '/downloads', storage: 'local' }])
@@ -17,10 +17,24 @@ test('候选只有在明显领先时才自动确认', () => {
   assert.equal(resolveIdentity([{ title: 'A', score: 12, conflicts: [] }, { title: 'B', score: 8, conflicts: [] }]).state, 'confirmed')
 })
 
-test('整理审计会锁定缺集和目录扫描已记录的重复集', () => {
+test('整理审计只锁定可证明的重复集，不把部分下载当成错误', () => {
   const issues = organizationAudit({ evidence: { episodes: [1, 3], duplicateEpisodes: [1], videos: 3 }, identity: { title: 'A', type_name: 'tv', episodeCount: 3 } })
   assert.equal(issues.some(item => item.includes('重复集号')), true)
-  assert.equal(issues.some(item => item.includes('集号缺失')), true)
+  assert.equal(issues.some(item => item.includes('集号缺失')), false)
+})
+
+test('目录名差异、历史线索和集号间隔不能单独成为问题', () => {
+  assert.deepEqual(initialIssueSignals(), [])
+  assert.deepEqual(initialIssueSignals({ duplicateEpisodes: [] }), [])
+  assert.deepEqual(initialIssueSignals({ activeFailure: true }), ['此当前包仍只有失败整理记录，没有对应成功记录，需要官方预览核验'])
+  assert.deepEqual(initialIssueSignals({ duplicateEpisodes: [3] }), ['不同视频文件重复标为同一集：3'])
+})
+
+test('集号只接受明确的剧集格式，清晰度数字不能伪造缺集', () => {
+  assert.deepEqual(strictEpisodeHints('示例剧.S01E02.2160p.mkv'), [2])
+  assert.deepEqual(strictEpisodeHints('示例剧.EP12.mkv'), [12])
+  assert.deepEqual(strictEpisodeHints('示例动画.[03].mkv'), [3])
+  assert.deepEqual(strictEpisodeHints('示例电影.2024.2160p.mkv'), [])
 })
 
 test('用户可见样例全部通过同一规则', () => {
