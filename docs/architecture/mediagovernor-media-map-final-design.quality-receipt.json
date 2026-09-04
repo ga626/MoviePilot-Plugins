@@ -1,0 +1,16 @@
+{
+  "schema": "mediagovernor-report-local-validation/v1",
+  "status": "partial",
+  "checked_at": "2026-09-04T21:30:00+08:00",
+  "report_path": "D:\\Projects\\NAS docker\\media-next\\plugins\\moviepilot-media-governor\\docs\\architecture\\mediagovernor-media-map-final-design.md",
+  "evidence_path": "D:\\Projects\\NAS docker\\media-next\\plugins\\moviepilot-media-governor\\docs\\architecture\\mediagovernor-media-map-final-design.evidence.json",
+  "report_sha256": "631589854586EF70FADD49D27CE1E3FC0561A542443D6878BC5A0B5A631FB650",
+  "evidence_sha256": "772F940110F28F4371B664C4B23E4F0F243DE76C6C17BBED280AEA02209B21AC",
+  "checks": [
+    {"name": "report_exists", "status": "pass"},
+    {"name": "evidence_json_parse", "status": "pass"},
+    {"name": "report_and_evidence_hash", "status": "pass"},
+    {"name": "research_quality_checker", "status": "blocked", "reason": "KnowledgeRadar 当前本地 .venv 缺少 httpx；没有安装依赖来制造 green。"}
+  ],
+  "meaning": "报告、证据登记与哈希已核验；深度报告质量脚本环境阻断，因此本回执不是 quality pass。"
+}
