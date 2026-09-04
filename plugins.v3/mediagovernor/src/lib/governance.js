@@ -63,6 +63,33 @@ export function initialIssueSignals({ activeFailure = false, duplicateEpisodes =
   return issues
 }
 
+const mediaKind = value => {
+  const text = clean(value).toLowerCase()
+  if (/(tv|series|电视剧|剧集|动漫|动画|综艺|纪录片)/i.test(text)) return 'tv'
+  if (/(movie|film|电影)/i.test(text)) return 'movie'
+  return ''
+}
+
+export function historyIdentityAudit(history = {}, diagnosis = null) {
+  if (!clean(history.title) && !(history.titles || []).some(clean)) return ['当前包没有可核验整理记录']
+  if (!diagnosis || diagnosis.error || diagnosis.abstain || diagnosis.confidence < 0.5) return ['作品身份尚未核验']
+  const titles = [history.title, ...(history.titles || [])].map(value => clean(value)).filter(Boolean)
+  const diagnosisTitles = [diagnosis.title, diagnosis.original_title].map(value => clean(value)).filter(Boolean)
+  if (titles.length && diagnosisTitles.length && !titles.some(title => diagnosisTitles.some(candidate => title.toLowerCase() === candidate.toLowerCase()))) return ['作品名称与现有整理记录不一致']
+  if (history.year && diagnosis.year && clean(history.year) !== clean(diagnosis.year)) return ['作品年份与现有整理记录不一致']
+  const expectedKind = mediaKind(history.type)
+  const actualKind = mediaKind(diagnosis.media_type)
+  if (expectedKind && actualKind && expectedKind !== actualKind) return ['作品类型与现有整理记录不一致']
+  return []
+}
+
+export function auditCoverage({ expected = 0, scanned = 0, limited = false } = {}) {
+  const total = Math.max(0, Number(expected) || 0)
+  const done = Math.max(0, Number(scanned) || 0)
+  if (!limited && done >= total) return { complete: true, message: `已覆盖全部 ${total} 个当前包` }
+  return { complete: false, message: `只覆盖 ${done}/${total} 个当前包` }
+}
+
 export function strictEpisodeHints(name) {
   const value = clean(name)
   const season = value.match(/(?:^|[. _-])s\d{1,2}[. _-]*e(\d{1,3})(?:[. _-]*e(\d{1,3}))?(?=$|[. _-])/i)
