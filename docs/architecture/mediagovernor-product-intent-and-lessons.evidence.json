@@ -1,0 +1,88 @@
+{
+  "schema": "mediagovernor-archaeology-evidence/v1",
+  "artifact": {
+    "report_path": "docs/architecture/mediagovernor-product-intent-and-lessons.md",
+    "created_at": "2026-09-05T00:00:00+08:00",
+    "purpose": "汇总已确认的产品意图、架构方向和开发错误，不实现功能。"
+  },
+  "sources": [
+    {
+      "id": "S1",
+      "type": "conversation",
+      "title": "当前对话与关联前序任务记录",
+      "facts_used": [
+        "用户持续确认原生整理为第一道系统、插件为最终兜底。",
+        "用户要同时发现真正失败和表面成功但错误的整理。",
+        "用户要求只显示问题、先预览、确认后官方重建硬链接。",
+        "用户否定了以历史 47 条、假候选和反复安装试错为核心的路线。"
+      ],
+      "strength": "strong"
+    },
+    {
+      "id": "S2",
+      "type": "local_document",
+      "paths": [
+        "docs/architecture/media-governor-scope.md",
+        "docs/architecture/mediagovernor-v1.1-readonly-reassessment.md",
+        "docs/architecture/mediagovernor-v1.1-runtime-failure-reassessment.md",
+        "docs/architecture/mediagovernor-event-driven-fallback-design.md",
+        "docs/architecture/mediagovernor-media-map-final-design.md",
+        "docs/architecture/mediagovernor-product-reset-research-2026-09-05.md"
+      ],
+      "facts_used": [
+        "范围、安全边界、媒体地图、事件与对账、AI 降级、预览和受控重建的收敛设计。",
+        "47 条、耗时、重复候选和零 finding 的运行复盘。"
+      ],
+      "strength": "strong"
+    },
+    {
+      "id": "S3",
+      "type": "local_code",
+      "paths": [
+        "plugins.v3/mediagovernor/src/components/AppPage.vue",
+        "plugins.v3/mediagovernor/src/lib/governance.js",
+        "plugins.v3/mediagovernor/src/lib/governance.test.mjs"
+      ],
+      "facts_used": [
+        "当前 AI 仅处理 preliminary finding，问题分类和测试不能证明假成功已被完整发现。"
+      ],
+      "strength": "strong"
+    },
+    {
+      "id": "S4",
+      "type": "git_history",
+      "facts_used": [
+        "从 v0.1.0 到 v3.0.0 的连续 PR/Release 显示，范围、AI、审计、地图和修复多次在真实安装反馈后同时调整。"
+      ],
+      "strength": "strong"
+    }
+  ],
+  "claims": [
+    {
+      "id": "C1",
+      "claim": "MediaGovernor 的最终定位是原生整理后的质量保障，而不是替代原生整理。",
+      "sources": ["S1", "S2"]
+    },
+    {
+      "id": "C2",
+      "claim": "产品必须同时处理真正失败和表面成功但错误两类问题，判断以当前事实与官方预览为准。",
+      "sources": ["S1", "S2", "S3"]
+    },
+    {
+      "id": "C3",
+      "claim": "反复失败的共因是缺少金标准验收、把历史/顶层目录当真实对象、并让 AI 与规则在错误的位置决定结论。",
+      "sources": ["S1", "S2", "S3", "S4"]
+    },
+    {
+      "id": "C4",
+      "claim": "后续开发必须分层、先 fixture 后 NAS、先预览后执行；无法确认必须显式呈现。",
+      "sources": ["S1", "S2", "S3"]
+    }
+  ],
+  "boundaries": [
+    "本轮未读取真实媒体、下载目录、数据库、Cookie 或 NAS 日志。",
+    "报告不把过去的设计或发布记录当作当前版本已经实现用户目标的证明。",
+    "用户会话可见记录和本仓材料足以归纳产品意图；未对不可见的已删除/不可读取历史作推断。"
+  ],
+  "code_modified": false
+}

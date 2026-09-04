@@ -1,0 +1,58 @@
+{
+  "schema": "knowledgeradar-research-evidence/v1",
+  "artifact": {
+    "report_path": "docs/architecture/mediagovernor-next-pr-validation-foundation-plan-2026-09-05.md",
+    "created_at": "2026-09-05T00:00:00+08:00",
+    "scope": "只读的下一阶段 PR 验收底座规划；不改插件、NAS、媒体或发布状态"
+  },
+  "research_task": {
+    "task_id": "kr-research-2b7b835e4c413135",
+    "objective": "规划一个能在安装前证明 MediaGovernor 已知核心场景正确性的单一 PR。"
+  },
+  "tool_calls": [
+    {"tool": "mcp__knowledgeradar__health_check", "args_summary": {"mode": "summary"}, "status": "ok"},
+    {"tool": "mcp__knowledgeradar__get_capabilities", "args_summary": {"summary": true}, "status": "ok"},
+    {"tool": "mcp__knowledgeradar__kr_research", "args_summary": {"mode": "first_wave", "budget": "deep"}, "status": "ok", "research_task_id": "kr-research-2b7b835e4c413135"},
+    {"tool": "mcp__knowledgeradar__kr_web_search", "args_summary": {"topics": ["Vitest mocking", "Playwright mock APIs", "MoviePilot V3 plugin testing"]}, "status": "ok", "receipt_ids": ["receipt-a23284305e484574", "receipt-b1c08feb0363d0f5", "receipt-3b6b63e61f56416c"]},
+    {"tool": "mcp__knowledgeradar__extract_web_page", "args_summary": {"sources": ["Vitest Mocking", "Playwright Mock APIs", "MoviePilot Plugin Development"]}, "status": "ok", "receipt_ids": ["receipt-3f42a5ec17ffa146", "receipt-f82dd56dab25a8cf"]},
+    {"tool": "local_source_read", "args_summary": {"surfaces": ["tests/v3/mediagovernor/test_plugin.py", "plugins.v3/mediagovernor/src/lib/governance.test.mjs", "plugins.v3/mediagovernor/src/components/AppPage.vue", "plugins.v3/mediagovernor/package.json", "既有两份产品报告"]}, "status": "ok"}
+  ],
+  "evidence_items": [
+    {"id": "E1", "type": "local_code", "title": "当前 Python 合同测试", "path": "tests/v3/mediagovernor/test_plugin.py", "fact": "测试假基类、版本、路由、脱敏与局部 API 合同，但没有以真实问题答案驱动下载树到页面结论的完整判卷。", "strength": "strong"},
+    {"id": "E2", "type": "local_code", "title": "当前前端纯规则测试", "path": "plugins.v3/mediagovernor/src/lib/governance.test.mjs", "fact": "仅覆盖少量分包、指纹、集号和分类纯规则；没有 fixture 驱动的前端流程测试。", "strength": "strong"},
+    {"id": "E3", "type": "local_code", "title": "当前页面编排", "path": "plugins.v3/mediagovernor/src/components/AppPage.vue", "fact": "页面直接组织目录、历史、识别与预览调用；当前包只有 node:test 合同脚本，尚无组件测试依赖或可见样本回执。", "strength": "strong"},
+    {"id": "E4", "type": "local_code", "title": "产品意图和失败复盘", "path": "docs/architecture/mediagovernor-product-intent-and-lessons.md", "fact": "已确认核心问题是原生真失败和表面成功但错误；此前反复失败的共因包括没有金标准、把历史当范围、以及将安装当首次产品测试。", "strength": "strong"},
+    {"id": "E5", "type": "web", "title": "MoviePilot V3 插件开发指南", "url": "https://github.com/jxxghp/MoviePilot-Plugins/blob/main/docs/Plugin_Development.md", "fact": "关键纯逻辑、配置和安全边界应有测试；真实网络、下载器、媒体服务器或账号使用 mock 或明确集成测试；并须在真实 V3 核验安装、生命周期、路由注册与 Vue 构建。", "strength": "strong", "receipt_id": "receipt-f82dd56dab25a8cf"},
+    {"id": "E6", "type": "web", "title": "Vitest Mocking", "url": "https://vitest.dev/guide/mocking", "fact": "测试可用假模块、函数、环境和时间隔离依赖，并必须在测试之间复位 mock 状态。", "strength": "strong", "receipt_id": "receipt-3f42a5ec17ffa146"},
+    {"id": "E7", "type": "web", "title": "Playwright Mock APIs", "url": "https://playwright.dev/docs/mock", "fact": "页面的 HTTP 请求可用固定回应或 HAR 重放，允许在不调用真实 API 的前提下验证页面输出。", "strength": "strong", "receipt_id": "receipt-f82dd56dab25a8cf"}
+  ],
+  "claims": [
+    {"id": "C1", "claim": "下一 PR 应先建立脱敏金标准、宿主适配替身、端到端页面判卷和可见验收回执，而不是继续调扫描阈值。", "supports": ["E1", "E2", "E3", "E4", "E5", "E6", "E7"]},
+    {"id": "C2", "claim": "mock 金标准与最小真实 V3 加载验收是互补关系；任一单独通过都不能证明另一层。", "supports": ["E5", "E6", "E7"]},
+    {"id": "C3", "claim": "该 PR 不应发 Release 或要求用户安装，因为它交付的是后续产品候选的验收能力，而非已实现的扫描功能。", "supports": ["E1", "E2", "E4", "E5"]},
+    {"id": "C4", "claim": "后续候选只有在已知真失败、假成功和正常案例的金标准均通过、且输出有可见回执后，才可进入一次冻结的真实宿主加载验收。", "supports": ["E4", "E5", "E6", "E7"]}
+  ],
+  "roadmap": [
+    {"phase": "fixture", "input": "已确认的产品意图、历史失败模式和脱敏规则", "output": "十个以上金标准样本与 schema", "dependency": "无", "acceptance": "真失败、假成功、正常和未知状态均有可读预期答案，且不含真实资料。"},
+    {"phase": "adapter_and_tests", "input": "金标准样本与当前宿主公开调用形状", "output": "可替换宿主适配器、后端合同测试和前端流程测试", "dependency": "fixture", "acceptance": "实际页面编排通过替身跑完每个样本；无 AI、无文件写入、无官方执行整理。"},
+    {"phase": "visible_receipt", "input": "测试实际结果", "output": "本地可打开的验收回执页", "dependency": "adapter_and_tests", "acceptance": "逐项显示预期、实际、差异、耗时和候选源码 SHA；失败不产生通过回执。"},
+    {"phase": "candidate_gate", "input": "干净候选源码和全部定向检查", "output": "可供后续功能 PR 复用的验收门禁", "dependency": "visible_receipt", "acceptance": "金标准、构建、版本、CSS、差异检查均通过；本 PR 不发布、不安装。"}
+  ],
+  "coverage": {
+    "used": ["local_code", "local_architecture_reports", "official_MoviePilot_documentation", "official_test_tool_documentation"],
+    "considered_source_ecologies": [
+      {"source_ecology": "github_repository_ecology", "outcome": "used", "reason": "官方 MoviePilot 插件开发文档是宿主合同的直接来源。"},
+      {"source_ecology": "generic_web_ecology", "outcome": "used", "reason": "Vitest 与 Playwright 官方测试文档说明可复现 mock/页面测试的能力边界。"},
+      {"source_ecology": "academic_literature_ecology", "outcome": "not_relevant", "reason": "本次是特定宿主插件测试合同与工程验收规划，学术资料不增加决定性证据。"},
+      {"source_ecology": "Chinese_video_platform", "outcome": "not_relevant", "reason": "用户体验痛点已由本地运行复盘确认，短视频不能证明 MoviePilot 接口或测试合同。"}
+    ],
+    "blocked_or_degraded": [
+      {"surface": "GitHub 仓库搜索", "reason": "首轮 GitHub 搜索返回零候选；改用公开官方文档的正文抽取作为直接证据。"}
+    ],
+    "not_used": [
+      {"surface": "live_nas_or_media", "reason": "本轮只读规划，未获真实安装、启用、读取媒体或写入授权。"},
+      {"surface": "live_write_validation", "reason": "本 PR 规划明确排除修复和硬链接写入。"}
+    ]
+  },
+  "code_modified": false
+}

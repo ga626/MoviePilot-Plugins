@@ -1,0 +1,10 @@
+{
+  "schema": "knowledgeradar-research-quality-receipt/v1",
+  "status": "pass",
+  "checked_at": "2026-09-05T00:05:05+08:00",
+  "report_path": "D:\\Projects\\NAS docker\\media-next\\plugins\\moviepilot-media-governor\\docs\\architecture\\mediagovernor-product-reset-research-2026-09-05.md",
+  "evidence_path": "D:\\Projects\\NAS docker\\media-next\\plugins\\moviepilot-media-governor\\docs\\architecture\\mediagovernor-product-reset-research-2026-09-05.evidence.json",
+  "report_sha256": "321214ab52c8c7717a6749533e210fb0707dfdc867c36e7925e4167c7c052091",
+  "evidence_sha256": "cac3ae0e2c09062e6a21bb80ae9af70b633cb3c7656b9c57764604ac457b8c04",
+  "quality_check_schema": "knowledgeradar-research-quality-check/v1"
+}
