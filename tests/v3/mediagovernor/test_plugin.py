@@ -73,24 +73,24 @@ def test_versions_and_federation_assets_are_synced() -> None:
     manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
     source = PLUGIN.read_text(encoding="utf-8")
-    assert manifest["version"] == package["version"] == "1.8.0"
-    assert list(manifest["history"])[0] == "v1.8.0"
-    assert 'plugin_version = "1.8.0"' in source
-    assert 'return "vue", "dist/v1.8.0/assets"' in source
-    assert "assetsDir: 'v1.8.0/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
+    assert manifest["version"] == package["version"] == "1.9.0"
+    assert list(manifest["history"])[0] == "v1.9.0"
+    assert 'plugin_version = "1.9.0"' in source
+    assert 'return "vue", "dist/v1.9.0/assets"' in source
+    assert "assetsDir: 'v1.9.0/assets'" in (ROOT / "plugins.v3/mediagovernor/vite.config.js").read_text(encoding="utf-8")
 
 
-def test_plugin_exposes_only_authenticated_readonly_bundle_analysis() -> None:
+def test_plugin_exposes_only_authenticated_evidence_and_analysis_interfaces() -> None:
     module = _load_plugin()
     instance = module.MediaGovernor()
-    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v1.8.0/assets")
+    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v1.9.0/assets")
     instance.init_plugin({"enabled": True})
     assert instance.get_state() is True
     api = instance.get_api()
-    assert len(api) == 1
-    assert api[0]["path"] == "/bundle_analyze"
-    assert api[0]["auth"] == "bear"
+    assert [item["path"] for item in api] == ["/bundle_analyze", "/bundle_analyze_batch", "/evidence_index"]
+    assert all(item["auth"] == "bear" for item in api)
     assert api[0]["response_model"] is module.BundleAnalysisResponse
+    assert api[1]["response_model"] is module.BatchBundleAnalysisResponse
     assert instance.get_command() == instance.get_service() == []
     assert instance.stop_service() is None
     modules = {node.module or "" for node in ast.walk(ast.parse(PLUGIN.read_text(encoding="utf-8"))) if isinstance(node, ast.ImportFrom)}
@@ -144,9 +144,28 @@ def test_same_sanitized_bundle_reuses_in_memory_model_diagnosis() -> None:
     assert _FakeLLM.calls == 1
 
 
+def test_batch_rejects_paths_and_uses_one_model_call_for_multiple_bundles() -> None:
+    module = _load_plugin()
+    instance = module.MediaGovernor()
+    instance.init_plugin({"enabled": True})
+    _FakeLLM.calls = 0
+
+    class Request:
+        async def json(self):
+            return {"items": [
+                {"id": "bundle-1", "evidence": {"entries": [{"name": "Cowboy.Bebop.S01E01.mkv", "path": "/not/sent"}], "video_count": 1}},
+                {"id": "bundle-2", "evidence": {"entries": [{"name": "Cowboy.Bebop.S01E02.mkv"}], "video_count": 1}},
+            ]}
+
+    result = asyncio.run(instance.api_bundle_analyze_batch(Request()))
+    assert result.success
+    assert set(result.data.diagnoses) == {"bundle-1", "bundle-2"}
+    assert _FakeLLM.calls == 1
+
+
 def test_frontend_uses_one_bundle_tree_then_model_and_official_verification() -> None:
     page = PAGE.read_text(encoding="utf-8")
-    for endpoint in ("history/transfer?status=${status}", "storage/directories?directory_type=all", "storage/list", "plugin/MediaGovernor/bundle_analyze", "media/source", "media/recognize", "media/recognize_file", "media/search", "transfer/manual/history", "transfer/manual/target-path", "transfer/manual"):
+    for endpoint in ("history/transfer?status=${status}", "storage/directories?directory_type=all", "storage/list", "plugin/MediaGovernor/bundle_analyze_batch", "media/source", "media/recognize", "media/recognize_file", "media/search", "transfer/manual/history", "transfer/manual/target-path", "transfer/manual"):
         assert endpoint in page
     assert "inventoryGroups(roots)" in page
     assert "groupsFromFiles(current, children)" in page
@@ -157,7 +176,7 @@ def test_frontend_uses_one_bundle_tree_then_model_and_official_verification() ->
     assert "inventoryNodeLimit" in page
     assert "replace(/[\\[\\]【】()]/g, ' ')" in page
     assert "strictEpisodeHints" in page
-    assert "bundlePayload" in page and "diagnoseBundle" in page and "diagnosisText" in page
+    assert "bundlePayload" in page and "diagnoseBundles" in page and "diagnosisText" in page
     assert "整包模型判断" in page and "查看发送给模型的目录结构" in page
     assert "候选总集数" in page and "hardReject" in page
     assert "videoSource" in page and "music|audio" in page
@@ -171,14 +190,16 @@ def test_frontend_uses_one_bundle_tree_then_model_and_official_verification() ->
     assert "fetch(" not in page and "axios" not in page
 
 
-def test_organization_is_preview_only_and_cannot_hide_old_link_deletion() -> None:
+def test_organization_uses_the_official_guarded_link_rebuild_path() -> None:
     page = PAGE.read_text(encoding="utf-8")
     payload = page[page.index("function previewPayload"):page.index("function previewIssues")]
     assert "preview: true" in payload
     assert "reorganize: false" in payload
-    assert "官方逐文件计划" in page and "旧硬链接清理仍锁定" in page
-    assert "确认执行官方重整" not in page
-    assert "function repair" not in page
+    assert "官方逐文件计划" in page and "确认按此预览重建" in page
+    assert "async function repairOrganization" in page
+    assert "transfer/manual" in page and "preview: false" in page
+    assert "reorganize: false" in page
+    assert "storage/delete" not in page
 
 
 def test_release_sources_do_not_ship_legacy_private_governor() -> None:
