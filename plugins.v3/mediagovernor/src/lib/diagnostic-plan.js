@@ -1,9 +1,9 @@
-/** 诊断范围先由“有当前整理关系”决定，不能由旧规则是否已报错决定。 */
+/** 所有完整读取到的视频作品单元都要识别；历史不得决定诊断范围。 */
 export function identityTargets (units = []) {
-  return units.filter(unit => unit?.complete && unit?.history?.length && unit?.summary?.video_count)
+  return units.filter(unit => unit?.complete && unit?.summary?.video_count)
 }
 
-/** AI 只接住原生识别明确弃权的项目，避免为所有正常项目重复花费 token。 */
+/** AI 读取所有作品单元的整组证据，用来交叉核对原生识别而不是只接失败项。 */
 export function aiFallbackTargets (units = []) {
-  return identityTargets(units).filter(unit => !unit.diagnosis || unit.diagnosis.abstain || unit.diagnosis.confidence < 0.5)
+  return identityTargets(units)
 }

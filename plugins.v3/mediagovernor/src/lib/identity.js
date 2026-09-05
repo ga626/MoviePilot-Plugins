@@ -1,0 +1,61 @@
+import { cleanTitle } from './governance.js'
+
+const text = value => String(value || '').trim()
+const mediaKind = value => /tv|series|电视剧|剧集|动漫|动画|综艺|纪录片/i.test(text(value)) ? 'tv' : /movie|film|电影/i.test(text(value)) ? 'movie' : 'unknown'
+
+export function identityFromRaw (raw = {}) {
+  const value = raw?.media_info || raw?.mediaInfo || raw?.media || raw || {}
+  const title = text(value.title || value.name || value.media_name).slice(0, 120)
+  return {
+    title,
+    original_title: text(value.original_title || value.originalName).slice(0, 120),
+    year: text(value.year),
+    media_type: mediaKind(value.type || value.media_type || value.mtype),
+    season: Number(value.season || value.season_number || 0) || 0,
+    media_source: text(value.media_source || value.source),
+    media_id: text(value.media_id || value.id),
+    confidence: title ? 0.8 : 0,
+    abstain: !title,
+  }
+}
+
+export const identityKey = value => value?.media_source && value?.media_id ? `${value.media_source}:${value.media_id}` : ''
+
+const comparableNames = value => [value?.title, value?.original_title].map(cleanTitle).filter(Boolean)
+
+export function sameWork (left, right) {
+  const leftNames = comparableNames(left); const rightNames = comparableNames(right)
+  const titleMatches = leftNames.some(a => rightNames.some(b => a === b || (Math.min(a.length, b.length) >= 5 && (a.includes(b) || b.includes(a)))))
+  const yearMatches = !left?.year || !right?.year || String(left.year) === String(right.year)
+  const typeMatches = !left?.media_type || !right?.media_type || left.media_type === 'unknown' || right.media_type === 'unknown' || left.media_type === right.media_type
+  return Boolean(titleMatches && yearMatches && typeMatches)
+}
+
+export function sameIdentity (left, right) {
+  const a = identityKey(left); const b = identityKey(right)
+  return Boolean(a && b && a === b)
+}
+
+export function chooseGroundedCandidate (hint = {}, rawCandidates = []) {
+  const candidates = rawCandidates.map(identityFromRaw).filter(item => identityKey(item))
+  const wanted = cleanTitle(hint.title || hint.original_title)
+  const scored = candidates.map(candidate => {
+    const names = [candidate.title, candidate.original_title].map(cleanTitle).filter(Boolean)
+    const titleScore = wanted && names.some(name => name === wanted) ? 4 : wanted && names.some(name => name.includes(wanted) || wanted.includes(name)) ? 2 : 0
+    const yearScore = !hint.year || !candidate.year ? 0 : String(hint.year) === String(candidate.year) ? 2 : -3
+    const typeScore = !hint.media_type || hint.media_type === 'unknown' || candidate.media_type === 'unknown' ? 0 : hint.media_type === candidate.media_type ? 1 : -3
+    return { candidate, score: titleScore + yearScore + typeScore }
+  }).filter(item => item.score >= 3).sort((a, b) => b.score - a.score)
+  const best = scored[0]
+  const unique = best && !scored.slice(1).some(item => item.score === best.score && !sameIdentity(item.candidate, best.candidate))
+  return { selected: unique ? best.candidate : null, candidates: scored.slice(0, 6).map(item => item.candidate) }
+}
+
+export function reconcileIdentities (nativeIdentity, aiGrounded) {
+  const native = identityKey(nativeIdentity) ? nativeIdentity : null
+  const ai = identityKey(aiGrounded?.selected) ? aiGrounded.selected : null
+  const candidates = [...new Map([native, ...(aiGrounded?.candidates || [])].filter(Boolean).map(item => [identityKey(item), item])).values()]
+  if (native && ai && (sameIdentity(native, ai) || sameWork(native, ai))) return { identity: { ...native, confidence: 1, abstain: false }, candidates, reason: '原生识别与整包 AI 证据指向同一作品' }
+  if (!native && ai) return { identity: { ...ai, confidence: 0.9, abstain: false }, candidates, reason: 'AI 候选已由 MoviePilot 数据源唯一落地' }
+  return { identity: { abstain: true, confidence: 0, title: '', media_type: 'unknown' }, candidates, reason: native && !ai ? '原生识别缺少整包证据确认' : native && ai ? '原生识别与整包证据冲突' : '没有唯一作品身份' }
+}
