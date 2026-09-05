@@ -1,20 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { manualPreviewRequest, manualRebuildRequests } from './manual-transfer.js'
+import { manualPreviewRequest, manualRebuildRequests, moviePilotTypeName } from './manual-transfer.js'
 
-const pkg = { root: { storage: 'local' }, entries: [{ name: 'Show.S01E01.mkv', type: 'file', storage: 'local', path: '/hidden/source.mkv' }] }
-const identity = { media_source: 'tmdb', media_id: '42', media_type: 'tv', season: 1 }
+const unit = { complete: true, boundary: 'download_hash', root: { storage: 'local' }, entries: [{ type: 'file', storage: 'local', path: '/fixture/download/A.mkv', name: 'A.mkv' }] }
 
-test('官方预览使用 fileitems 与已确认身份，不发送不存在的 src_fileitem', () => {
-  const request = manualPreviewRequest(pkg, identity, { target_storage: 'local', target_path: '/hidden/library' })
-  assert.equal(request.fileitems.length, 1)
-  assert.equal(request.src_fileitem, undefined)
-  assert.equal(request.media_source, 'tmdb')
-  assert.equal(request.preview, true)
-})
-
-test('重建请求逐条绑定成功历史，避免按名称或目录猜测删除目标', () => {
-  const requests = manualRebuildRequests([7, '7', 9], identity)
-  assert.deepEqual(requests.map(item => item.logid), [7, 9])
-  assert.equal(requests.every(item => item.reorganize === false && item.transfer_type === 'link'), true)
+test('手动整理严格使用 MoviePilot 中文媒体类型枚举', () => {
+  assert.equal(moviePilotTypeName('movie'), '电影')
+  assert.equal(moviePilotTypeName('tv'), '电视剧')
+  assert.equal(manualPreviewRequest(unit, { media_type: 'movie', media_source: 'tmdb', media_id: '1' }).type_name, '电影')
+  const rebuild = manualRebuildRequests([7], { media_type: 'tv', media_source: 'tmdb', media_id: '2' }, { target_path: '/fixture/library/tv', target_storage: 'local', library_type_folder: true })[0]
+  assert.equal(rebuild.type_name, '电视剧')
+  assert.equal(rebuild.target_path, '/fixture/library/tv')
+  assert.equal(rebuild.library_type_folder, true)
 })

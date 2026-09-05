@@ -22,13 +22,15 @@ test('同一下载任务编号合并散文件；无编号顶层目录保持临�
 test('证据未读全时不可自动重建；完整且身份、预览、历史齐备才放行', () => {
   const pkg = appendTreeEvidence({ id: 'p', root: roots[0], roots: [roots[0]], boundary: 'download_hash', history: [{ id: 9, status: true, src: roots[0].path }] }, [{ complete: true, entries: [roots[0]] }])
   assert.equal(packageEvidence(pkg).video_count, 1)
-  assert.equal(repairAdmission(pkg, { media_source: 'tmdb', media_id: '1' }, { summary: { total: 1, failed: 0 } }).allowed, true)
+  const preview = { summary: { total: 1, success: 1, failed: 0 }, items: [{ source: roots[0].path, target: '/library/A.mkv', success: true }] }
+  assert.equal(repairAdmission(pkg, { media_source: 'tmdb', media_id: '1' }, preview).allowed, true)
   assert.equal(repairAdmission({ ...pkg, complete: false }, { media_source: 'tmdb', media_id: '1' }, { summary: { total: 1, failed: 0 } }).allowed, false)
+  assert.equal(repairAdmission({ ...pkg, entries: [...pkg.entries, roots[1]] }, { media_source: 'tmdb', media_id: '1' }, preview).allowed, false)
 })
 
 test('真正失败没有旧成功目标时只建立新硬链接，不猜测删除对象', () => {
   const pkg = appendTreeEvidence({ id: 'p', root: roots[0], roots: [roots[0]], boundary: 'download_hash', history: [{ id: 10, status: false, src: roots[0].path }] }, [{ complete: true, entries: [roots[0]] }])
-  const admission = repairAdmission(pkg, { media_source: 'tmdb', media_id: '1' }, { summary: { total: 1, failed: 0 } })
+  const admission = repairAdmission(pkg, { media_source: 'tmdb', media_id: '1' }, { summary: { total: 1, success: 1, failed: 0 }, items: [{ source: roots[0].path, target: '/library/A.mkv', success: true }] })
   assert.equal(admission.allowed, true)
   assert.equal(admission.mode, 'create')
 })

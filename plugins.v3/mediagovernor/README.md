@@ -1,6 +1,6 @@
 # 媒体治理（MediaGovernor）
 
-MoviePilot V3 的最后一道整理兜底。MoviePilot 仍是唯一执行整理、删除旧硬链接和重建新硬链接的主体；本插件只负责找出需要复核的包、给出作品候选，并调用官方预览。
+MoviePilot V3 的最后一道整理兜底。MoviePilot 仍是唯一执行整理、删除旧硬链接和重建新硬链接的主体；本插件把下载包拆成作品单元，用整组 AI 证据与 MoviePilot 数据源确认身份，再以官方逐文件预览和当前目标的差异判定问题。
 
 ## 检查什么
 
@@ -10,7 +10,7 @@ MoviePilot V3 的最后一道整理兜底。MoviePilot 仍是唯一执行整理�
 
 ## 整理正确
 
-确认作品后，页面依次调用 MoviePilot 的 `transfer/manual/history`、`transfer/manual/target-path` 和 `transfer/manual` 预览。预览完整才可由用户二次确认执行；最终仍由 MoviePilot 清理命中成功历史的旧媒体库硬链接，再从下载原文件重建。插件不调用 `storage/delete`，不会删除下载原文件。
+确认作品后，页面依次调用 MoviePilot 的 `transfer/manual/target-path` 和 `transfer/manual` 预览。预览完整才可由用户二次确认执行；最终仍由 MoviePilot 清理命中成功历史的旧媒体库硬链接，再从下载原文件重建。插件不调用 `storage/delete`，不会删除下载原文件。
 
 ## 边界
 
@@ -21,6 +21,6 @@ MoviePilot V3 的最后一道整理兜底。MoviePilot 仍是唯一执行整理�
 
 ## 开发验收
 
-`pnpm test:golden` 会运行 12 个完全脱敏的金标准场景，并在仓库的 `runtime/` 生成可打开的验收回执。它覆盖真失败、已恢复旧失败、分类/季/集/身份错误、同名冲突、部分成功、手工目标丢失、未覆盖与正常项目。
+`pnpm test:golden` 会运行 15 个完全脱敏的端到端金标准场景，并在仓库的 `runtime/` 生成可打开的验收回执。它覆盖作品拆分、原生与 AI 交叉确认、动画/真人版冲突、官方预览、真失败、分类/季/集/身份错误、正常项目和安全执行门。
 
 这套回执是候选门禁，不是 NAS 验收：候选仍需通过真实 V3 的加载、启停和页面注册检查。任何新发现的真实问题都必须先脱敏加入金标准，再修改识别或整理逻辑。

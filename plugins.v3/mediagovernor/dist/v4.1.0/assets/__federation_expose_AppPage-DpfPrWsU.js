@@ -1,0 +1,1069 @@
+import { importShared } from './__federation_fn_import-JrT3xvdd.js';
+import { _ as _export_sfc } from './_plugin-vue_export-helper-pcqpp-6-.js';
+
+const text$1 = value => String(value || '').trim();
+const unique = values => [...new Set(values.filter(Boolean))];
+
+const videoPattern = /\.(mkv|mp4|avi|m2ts|ts|mov|webm)$/i;
+const subtitlePattern = /\.(ass|ssa|srt|sub|vtt)$/i;
+
+function cleanTitle(value) {
+  return text$1(value).replace(/\.[a-z0-9]{2,5}$/i, '').replace(/[\[【(（].*?[\]】)）]/g, ' ')
+    .replace(/\b(2160p|1080p|720p|web[ .-]?(dl|rip)|bluray|bdrip|remux|x26[45]|h\.?26[45]|hevc|aac|dts|atmos|hdr10?\+?|dv|10bit|proper|repack|complete|中字|简繁|国语|粤语)\b/gi, ' ')
+    .replace(/[._-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)
+}
+
+function strictEpisodeHints(value) {
+  const name = text$1(value); const found = [];
+  for (const match of name.matchAll(/\bS\d{1,2}E(\d{1,3})\b/ig)) found.push(Number(match[1]));
+  for (const match of name.matchAll(/\b(?:EP|E)(\d{1,3})\b/ig)) found.push(Number(match[1]));
+  for (const match of name.matchAll(/[\[【](\d{1,3})[\]】]/g)) found.push(Number(match[1]));
+  return unique(found.filter(value => value > 0 && value < 1000)).sort((a, b) => a - b)
+}
+
+function fileFingerprint(item = {}) {
+  return [text$1(item.name), text$1(item.type), Number(item.size) || 0, text$1(item.modify_time || item.mtime)].join('|')
+}
+
+function unitFingerprint(unit = {}) {
+  return [text$1(unit.root?.path || unit.root), ...(unit.entries || []).map(fileFingerprint).sort()].join('\n')
+}
+
+function rootFingerprint(items = []) { return [...items].map(fileFingerprint).sort().join('\n') }
+
+function pathKey(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '').toLowerCase()
+}
+
+function isRootPath(value) {
+  const path = pathKey(value);
+  return !path || path === '/' || /^[a-z]:$/i.test(path)
+}
+
+function isWithinPath(value, root) {
+  const path = pathKey(value); const base = pathKey(root);
+  return Boolean(path && base && (path === base || path.startsWith(`${base}/`)))
+}
+
+/** 把“目录配置”显式转换为 FileItem；配置对象本身绝不能送进 storage/list。 */
+function configuredDownloadRoots(configurations = []) {
+  const roots = []; const rejected = []; const seen = new Set();
+  for (const configuration of configurations) {
+    const path = String(configuration?.download_path || '').trim();
+    const storage = String(configuration?.storage || 'local').trim() || 'local';
+    if (isRootPath(path)) { rejected.push({ name: text$1(configuration?.name) || '未命名目录配置', reason: '下载目录为空或指向容器根目录' }); continue }
+    const key = `${storage}:${pathKey(path)}`;
+    if (seen.has(key)) continue
+    seen.add(key);
+    roots.push({ type: 'dir', storage, path, name: text$1(configuration?.name) || path, configured: true, media_type: text$1(configuration?.media_type), media_category: text$1(configuration?.media_category) });
+  }
+  return { roots, rejected }
+}
+
+function configuredLibraryRoots(configurations = []) {
+  const roots = []; const seen = new Set();
+  for (const configuration of configurations) {
+    const path = String(configuration?.library_path || '').trim();
+    const storage = String(configuration?.library_storage || 'local').trim() || 'local';
+    if (isRootPath(path)) continue
+    const key = `${storage}:${pathKey(path)}`;
+    if (seen.has(key)) continue
+    seen.add(key);
+    roots.push({ type: 'dir', storage, path, name: text$1(configuration?.name) || path, media_type: text$1(configuration?.media_type), media_category: text$1(configuration?.media_category) });
+  }
+  return roots
+}
+
+function libraryRootForPath(path, roots = []) {
+  return [...roots].filter(root => isWithinPath(path, root?.path)).sort((left, right) => pathKey(right?.path).length - pathKey(left?.path).length)[0] || null
+}
+
+function sourcePath(row = {}) {
+  const item = row.src_fileitem || row.source_fileitem || row.fileitem || {};
+  return String(item.path || row.src || row.source || '')
+}
+
+function destinationPath(row = {}) {
+  const item = row.dest_fileitem || {};
+  return String(item.path || row.dest || '')
+}
+
+function latestFirst(left, right) {
+  const leftDate = Date.parse(left?.date || '') || 0; const rightDate = Date.parse(right?.date || '') || 0;
+  if (leftDate !== rightDate) return rightDate - leftDate
+  const sequence = value => Number(String(value || '').match(/(\d+)$/)?.[1] || 0);
+  return sequence(right?.id) - sequence(left?.id)
+}
+
+/** 同一源文件的旧整理记录只作审计依据，当前目标只认该源文件最近一次结果。 */
+function latestHistoryRows(rows = []) {
+  const bySource = new Map();
+  for (const row of [...rows].sort(latestFirst)) {
+    const source = pathKey(sourcePath(row)) || `history:${row?.id || bySource.size}`;
+    if (!bySource.has(source)) bySource.set(source, row);
+  }
+  return [...bySource.values()].sort(latestFirst)
+}
+
+function createDownloadUnits(root, children = []) {
+  // 顶层目录或顶层视频各是一个下载单元；不再用相似标题拼成虚构“包”。
+  return children.filter(item => item?.type === 'dir' || videoPattern.test(item?.name || '')).map(item => ({
+    id: `${root?.storage || 'local'}:${item?.path || item?.name}`, root: item, entries: [], status: 'pending',
+  }))
+}
+
+/** 地图只持久化媒体库根摘要；具体存在性由整理历史指向的目标目录逐一核验。 */
+function libraryRootSnapshot(roots = []) {
+  return roots.filter(root => root && typeof root === 'object').map(root => ({
+    id: `${root.storage || 'local'}:${root.path || root.name || ''}`,
+    root,
+    fingerprint: fileFingerprint(root),
+    video_count: 0,
+    episodes: [],
+    category: cleanTitle(root.name) || '媒体库根',
+  }))
+}
+
+function summarizeUnit(unit = {}) {
+  const episodeFiles = new Map(); let video_count = 0; let subtitle_count = 0; let nfo_count = 0;
+  for (const item of unit.entries || []) {
+    const name = text$1(item.name);
+    if (videoPattern.test(name)) { video_count += 1; for (const episode of strictEpisodeHints(name)) episodeFiles.set(episode, [...(episodeFiles.get(episode) || []), name]); }
+    else if (subtitlePattern.test(name)) subtitle_count += 1;
+    else if (/\.nfo$/i.test(name)) nfo_count += 1;
+  }
+  const episodes = [...episodeFiles.keys()].sort((a, b) => a - b);
+  const duplicateEpisodes = [...episodeFiles].filter(([, files]) => new Set(files).size > 1).map(([episode]) => episode);
+  return { video_count, subtitle_count, nfo_count, episodes, duplicateEpisodes, fingerprint: unitFingerprint(unit), names: unique([cleanTitle(unit.root?.name), ...(unit.entries || []).map(item => cleanTitle(item.name))].filter(Boolean)).slice(0, 50) }
+}
+
+function findingLabel(kind) {
+  return ({ native_failure: '原生整理失败', category_error: '目录分类错误', hierarchy_error: '目录层级错误', episode_error: '剧集对应错误', identity_error: '作品识别错误', unconfirmed: '无法确认', uncovered: '尚未覆盖' })[kind] || '需要核对'
+}
+
+/** 所有完整读取到的视频作品单元都要识别；历史不得决定诊断范围。 */
+function identityTargets (units = []) {
+  return units.filter(unit => unit?.complete && unit?.summary?.video_count)
+}
+
+/** AI 读取所有作品单元的整组证据，用来交叉核对原生识别而不是只接失败项。 */
+function aiFallbackTargets (units = []) {
+  return identityTargets(units)
+}
+
+/**
+ * MoviePilot 的联邦页面在不同宿主版本会多包一层或两层 data。
+ * 业务代码只接受最终负载；失败响应始终原样抛出，不能被误当成空数据。
+ */
+function unwrapMoviePilotResponse (value) {
+  let current = value;
+  const seen = new Set();
+  for (let depth = 0; depth < 6 && current && typeof current === 'object'; depth += 1) {
+    if (seen.has(current)) break
+    seen.add(current);
+    if (current.success === false) throw new Error(current.message || 'MoviePilot 请求失败')
+    if (!Object.prototype.hasOwnProperty.call(current, 'data') || current.data === undefined) break
+    current = current.data;
+  }
+  return current
+}
+
+function historySucceeded (row = {}, fallback = null) {
+  const value = row.status;
+  if (typeof value === 'boolean') return value
+  if (value == null || value === '') return fallback
+  return ['true', 'success', 'succeeded', 'ok', '完成', '成功'].includes(String(value).trim().toLowerCase())
+}
+
+function normaliseHistoryRows (rows = [], fallback = null) {
+  return (Array.isArray(rows) ? rows : []).map(row => ({ ...row, status: historySucceeded(row, fallback) }))
+}
+
+function officialPreviewItems (preview = {}) {
+  const rows = Array.isArray(preview?.items) ? preview.items : Array.isArray(preview?.data?.items) ? preview.data.items : [];
+  return rows.filter(item => item && item.success !== false && item.target)
+}
+
+function previewComplete (preview = {}, sourceCount = 0) {
+  const summary = preview?.summary || preview?.data?.summary || {};
+  return Number(summary.total) === Number(sourceCount) && Number(summary.success) === Number(sourceCount) && Number(summary.failed || 0) === 0 && officialPreviewItems(preview).length === Number(sourceCount)
+}
+
+const seasonOf$1 = value => Number(String(value || '').replace(/\\/g, '/').match(/\/(?:s|season)[ ._-]?(\d{1,2})(?=\/|$)/i)?.[1] || 0);
+const parentTitle = value => cleanTitle(String(value || '').replace(/\\/g, '/').split('/').slice(-2, -1)[0] || '');
+
+/** 一个作品单元只输出一个结论；details 在详情页解释所有逐文件差异。 */
+function evaluateOfficialPreview ({ unit, identity, preview, presentPaths = new Set(), libraryRootFor = () => null } = {}) {
+  const finding = (kind, reason, details = []) => ({ kind, reason, details, strength: 'strong', unit_id: unit?.id || '', history_id: latestHistoryRows(unit?.history || [])[0]?.id || null });
+  if (!unit?.complete) return finding('uncovered', '文件没有完整读取，暂时不能判断')
+  if (!identity || identity.abstain || !identity.media_source || !identity.media_id) return finding('unconfirmed', unit?.identity_reason || '作品身份还没有确认')
+  const sourceCount = (unit.entries || []).filter(item => item?.path).length;
+  if (!previewComplete(preview, sourceCount)) return finding('unconfirmed', unit?.preview_error || 'MoviePilot 没有生成完整逐文件预览')
+  const expected = officialPreviewItems(preview).map(item => pathKey(item.target));
+  const successful = latestHistoryRows(unit.history || []).filter(row => row?.status === true && destinationPath(row));
+  const current = successful.map(row => pathKey(destinationPath(row))).filter(path => presentPaths.has(path));
+  const expectedPresent = expected.filter(path => presentPaths.has(path));
+  if (!current.length) {
+    if (expectedPresent.length === expected.length) return null
+    return finding('native_failure', '原文件仍在，但官方应有目标没有完整建立', expected.filter(path => !presentPaths.has(path)))
+  }
+  const missing = expected.filter(path => !presentPaths.has(path));
+  const unexpected = current.filter(path => !expected.includes(path));
+  if (!missing.length && !unexpected.length) return null
+  const details = [`缺少 ${missing.length} 个应有目标`, `存在 ${unexpected.length} 个错误目标`];
+  const expectedRoots = new Set(expected.map(libraryRootFor).filter(Boolean).map(root => root.media_type || root.media_category || root.name));
+  const currentRoots = new Set(current.map(libraryRootFor).filter(Boolean).map(root => root.media_type || root.media_category || root.name));
+  if (expectedRoots.size && currentRoots.size && ![...expectedRoots].some(value => currentRoots.has(value))) return finding('category_error', '当前硬链接放错了媒体库分类', details)
+  const expectedSeasons = new Set(expected.map(seasonOf$1).filter(Boolean)); const currentSeasons = new Set(current.map(seasonOf$1).filter(Boolean));
+  if (expectedSeasons.size && currentSeasons.size && ![...expectedSeasons].some(value => currentSeasons.has(value))) return finding('hierarchy_error', '当前硬链接放错了季目录', details)
+  const expectedEpisodes = expected.flatMap(strictEpisodeHints); const currentEpisodes = current.flatMap(strictEpisodeHints);
+  if (expectedEpisodes.length && currentEpisodes.length && expectedEpisodes.join(',') !== currentEpisodes.join(',')) return finding('episode_error', '当前文件与应有集号对应不上', details)
+  const expectedTitles = new Set(expected.map(parentTitle).filter(Boolean)); const currentTitles = new Set(current.map(parentTitle).filter(Boolean));
+  if (expectedTitles.size && currentTitles.size && ![...expectedTitles].some(value => currentTitles.has(value))) return finding('identity_error', '当前硬链接归到了另一部作品', details)
+  return finding('hierarchy_error', '当前硬链接位置与 MoviePilot 官方预览不一致', details)
+}
+
+const stable = value => String(value || '').trim();
+const idFor = value => String(value || '').replace(/[^a-zA-Z0-9:_-]/g, '_').slice(0, 160);
+
+/**
+ * 把目录第一层“候选根”与历史关联为下载包。download_hash 是强证据；顶层目录只是降级边界。
+ * 不以相似标题合并，因此无法确认的散件绝不会被伪装为同一下载任务。
+ */
+function createEvidencePackages (roots = [], histories = []) {
+  const rootRows = roots.map(root => ({ root, history: histories.filter(row => isWithinPath(sourcePath(row), root?.path)) }));
+  const buckets = new Map();
+  for (const item of rootRows) {
+    const hashes = [...new Set(item.history.map(row => stable(row?.download_hash)).filter(Boolean))];
+    const key = hashes.length === 1 ? `hash:${hashes[0]}` : `root:${pathKey(item.root?.path || item.root?.name)}`;
+    const bucket = buckets.get(key) || { key, roots: [], history: [], hashes: new Set(), boundary: hashes.length === 1 ? 'download_hash' : 'top_level' };
+    bucket.roots.push(item.root); bucket.history.push(...item.history); hashes.forEach(hash => bucket.hashes.add(hash));
+    if (hashes.length > 1) bucket.boundary = 'conflict';
+    buckets.set(key, bucket);
+  }
+  return [...buckets.values()].map(bucket => {
+    const history = latestHistoryRows(bucket.history);
+    const hashes = [...bucket.hashes];
+    return {
+      id: idFor(bucket.key), roots: bucket.roots, root: bucket.roots[0], history,
+      download_hashes: hashes, boundary: bucket.boundary,
+      boundary_reason: boundaryReason(bucket.boundary, bucket.roots.length, hashes.length),
+      entries: [], complete: true,
+    }
+  })
+}
+
+function boundaryReason (boundary, rootCount = 0, hashCount = 0) {
+  if (boundary === 'download_hash') return `已由同一下载任务编号关联${rootCount > 1 ? ` ${rootCount} 个顶层项目` : ''}`
+  if (boundary === 'conflict') return `同一顶层项目关联到 ${hashCount} 个下载任务编号，不能自动合并`
+  return '没有可用下载任务编号；仅按顶层目录暂时分组，不能自动重建'
+}
+
+function appendTreeEvidence (pkg, trees = []) {
+  const entries = []; let complete = pkg?.complete !== false;
+  for (const tree of trees) {
+    entries.push(...(tree?.entries || [])); complete = complete && Boolean(tree?.complete);
+  }
+  return { ...pkg, entries, complete, evidence: packageEvidence({ ...pkg, entries, complete }) }
+}
+
+function packageEvidence (pkg = {}) {
+  const entries = Array.isArray(pkg.entries) ? pkg.entries : [];
+  const videos = entries.filter(item => videoPattern.test(item?.name || ''));
+  const directories = entries.filter(item => item?.type === 'dir');
+  const titles = [...new Set([
+    ...(pkg.roots || []).map(item => cleanTitle(item?.name)),
+    ...videos.map(item => cleanTitle(item?.name)),
+  ].filter(Boolean))].slice(0, 80);
+  return {
+    complete: Boolean(pkg.complete), entry_count: entries.length, video_count: videos.length,
+    subtitle_count: entries.filter(item => /\.(ass|ssa|srt|sub|vtt)$/i.test(item?.name || '')).length,
+    nfo_count: entries.filter(item => /\.nfo$/i.test(item?.name || '')).length,
+    title_hints: titles, top_directories: [...new Set(directories.filter(item => Number(item.depth) === 1).map(item => cleanTitle(item.name)).filter(Boolean))].slice(0, 30),
+    boundary: pkg.boundary || 'top_level', boundary_reason: pkg.boundary_reason || '',
+    entries: entries.map(item => ({ name: stable(item?.name).slice(0, 180), type: item?.type === 'dir' ? 'dir' : 'file', depth: Number(item?.depth || 0) })).slice(0, 500),
+    ai_truncated: entries.length > 500,
+  }
+}
+
+function previewSourceFiles (pkg = {}) {
+  return (pkg.entries || []).filter(item => videoPattern.test(item?.name || '') && item?.path).map(item => ({ type: item.type || 'file', storage: item.storage || pkg.root?.storage || 'local', path: item.path, name: item.name, size: item.size, modify_time: item.modify_time }))
+}
+
+function repairAdmission (pkg = {}, identity = null, preview = null) {
+  if (!pkg.complete) return { allowed: false, reason: '文件证据没有完整读取，不能重建' }
+  if (pkg.boundary !== 'download_hash') return { allowed: false, reason: '下载包边界未由下载任务编号确认，不能自动重建' }
+  if (!identity?.media_source || !identity?.media_id) return { allowed: false, reason: '作品身份没有得到 MoviePilot 数据源编号确认，不能重建' }
+  const sourceCount = previewSourceFiles(pkg).length;
+  if (!previewComplete(preview, sourceCount)) return { allowed: false, reason: '官方逐文件预览不完整或含失败项，不能重建' }
+  const histories = latestHistoryRows(pkg.history || []).filter(row => row?.status === true && row?.id);
+  if (!histories.length) return { allowed: true, mode: 'create', reason: '这是没有旧成功目标的原生整理失败；将只从原始下载建立新硬链接', history_ids: [] }
+  return { allowed: true, mode: 'rebuild', reason: `将逐条重建 ${histories.length} 个已归因的旧整理结果`, history_ids: histories.map(row => row.id) }
+}
+
+/** MoviePilot 的 ManualTransferItem.type_name 接受 MediaType 的中文枚举值。 */
+function moviePilotTypeName (value) {
+  if (value === 'movie' || value === '电影') return '电影'
+  if (value === 'tv' || value === '电视剧') return '电视剧'
+  return undefined
+}
+
+/** 只生成 MoviePilot ManualTransferItem 已声明的字段；绝不发送旧版不存在的 src_fileitem。 */
+function manualPreviewRequest (pkg, identity, target = {}) {
+  const fileitems = previewSourceFiles(pkg);
+  return {
+    fileitems,
+    media_source: identity?.media_source || undefined,
+    media_id: identity?.media_id || undefined,
+    type_name: moviePilotTypeName(identity?.media_type),
+    season: identity?.season || undefined,
+    target_storage: target?.target_storage || undefined,
+    target_path: target?.target_path || undefined,
+    transfer_type: 'link',
+    preview: true,
+    reorganize: false,
+  }
+}
+
+/** 每个成功历史单独交给官方重建，令宿主只清理该历史可归因的旧目标。 */
+function manualRebuildRequests (historyIds = [], identity = {}, target = {}) {
+  return [...new Set(historyIds.filter(value => Number.isInteger(Number(value))).map(Number))].map(logid => ({
+    logid,
+    media_source: identity.media_source,
+    media_id: identity.media_id,
+    type_name: moviePilotTypeName(identity.media_type),
+    season: identity.season || undefined,
+    target_storage: target.target_storage || undefined,
+    target_path: target.target_path || undefined,
+    transfer_type: target.transfer_type || 'link',
+    scrape: target.scrape || false,
+    library_type_folder: target.library_type_folder,
+    library_category_folder: target.library_category_folder,
+    preview: false,
+    reorganize: false,
+  }))
+}
+
+const seasonOf = value => Number(String(value || '').match(/(?:^|[\\/ ._-])S(?:eason[ ._-]?)?(\d{1,2})(?=E\d|$|[\\/ ._-])/i)?.[1] || 0);
+const matchingRoot = (path, roots = []) => [...roots]
+  .filter(root => { const value = pathKey(path); const base = pathKey(root?.path); return value === base || value.startsWith(`${base}/`) })
+  .sort((left, right) => pathKey(right?.path).length - pathKey(left?.path).length)[0];
+const relativeParts = (path, root) => {
+  const value = pathKey(path); const base = pathKey(root?.path || root);
+  return value.startsWith(`${base}/`) ? value.slice(base.length + 1).split('/') : []
+};
+
+/**
+ * 下载任务只是证据边界，不等于一部作品。优先按包内第一层作品目录拆分；
+ * 没有独立子目录时再按季拆分。单文件电影和普通单季剧保持为一个作品单元。
+ */
+function createWorkUnits (pkg = {}) {
+  const videos = (pkg.entries || []).filter(item => videoPattern.test(item?.name || '') && item?.path);
+  if (!videos.length) return []
+  const topGroups = new Map();
+  for (const video of videos) {
+    const root = matchingRoot(video.path, pkg.roots || [pkg.root]) || pkg.root;
+    const parts = relativeParts(video.path, root);
+    const rootKey = pathKey(root?.path);
+    const key = (pkg.roots || []).length > 1 ? `root:${rootKey}` : parts.length > 1 ? `dir:${parts[0]}` : '';
+    if (!topGroups.has(key)) topGroups.set(key, []);
+    topGroups.get(key).push(video);
+  }
+  const namedTopGroups = [...topGroups].filter(([key]) => key);
+  let groups;
+  if (namedTopGroups.length > 1 && !topGroups.has('')) groups = namedTopGroups.map(([key, rows]) => ({ key, rows }));
+  else {
+    const seasons = new Map();
+    for (const video of videos) {
+      const season = seasonOf(video.path) || seasonOf(video.name);
+      const key = season ? `season:${season}` : 'all';
+      if (!seasons.has(key)) seasons.set(key, []);
+      seasons.get(key).push(video);
+    }
+    groups = seasons.size > 1 && !seasons.has('all') ? [...seasons].map(([key, rows]) => ({ key, rows })) : [{ key: 'all', rows: videos }];
+  }
+  return groups.map((group, index) => {
+    const paths = new Set(group.rows.map(item => pathKey(item.path)));
+    const history = latestHistoryRows((pkg.history || []).filter(row => paths.has(pathKey(sourcePath(row)))));
+    const seasons = [...new Set(group.rows.flatMap(item => [seasonOf(item.path), seasonOf(item.name)].filter(Boolean)))];
+    return {
+      ...pkg,
+      id: `${pkg.id}:work:${group.key || index}`,
+      package_id: pkg.id,
+      entries: group.rows,
+      history,
+      work_key: group.key,
+      work_label: cleanTitle(group.rows[0]?.name) || cleanTitle(pkg.root?.name) || `作品 ${index + 1}`,
+      season_hint: seasons.length === 1 ? seasons[0] : 0,
+      episode_hints: [...new Set(group.rows.flatMap(item => strictEpisodeHints(item.name)))].sort((a, b) => a - b),
+    }
+  })
+}
+
+const text = value => String(value || '').trim();
+const mediaKind = value => /tv|series|电视剧|剧集|动漫|动画|综艺|纪录片/i.test(text(value)) ? 'tv' : /movie|film|电影/i.test(text(value)) ? 'movie' : 'unknown';
+
+function identityFromRaw (raw = {}) {
+  const value = raw?.media_info || raw?.mediaInfo || raw?.media || raw || {};
+  const title = text(value.title || value.name || value.media_name).slice(0, 120);
+  return {
+    title,
+    original_title: text(value.original_title || value.originalName).slice(0, 120),
+    year: text(value.year),
+    media_type: mediaKind(value.type || value.media_type || value.mtype),
+    season: Number(value.season || value.season_number || 0) || 0,
+    media_source: text(value.media_source || value.source),
+    media_id: text(value.media_id || value.id),
+    confidence: title ? 0.8 : 0,
+    abstain: !title,
+  }
+}
+
+const identityKey = value => value?.media_source && value?.media_id ? `${value.media_source}:${value.media_id}` : '';
+
+const comparableNames = value => [value?.title, value?.original_title].map(cleanTitle).filter(Boolean);
+
+function sameWork (left, right) {
+  const leftNames = comparableNames(left); const rightNames = comparableNames(right);
+  const titleMatches = leftNames.some(a => rightNames.some(b => a === b || (Math.min(a.length, b.length) >= 5 && (a.includes(b) || b.includes(a)))));
+  const yearMatches = !left?.year || !right?.year || String(left.year) === String(right.year);
+  const typeMatches = !left?.media_type || !right?.media_type || left.media_type === 'unknown' || right.media_type === 'unknown' || left.media_type === right.media_type;
+  return Boolean(titleMatches && yearMatches && typeMatches)
+}
+
+function sameIdentity (left, right) {
+  const a = identityKey(left); const b = identityKey(right);
+  return Boolean(a && b && a === b)
+}
+
+function chooseGroundedCandidate (hint = {}, rawCandidates = []) {
+  const candidates = rawCandidates.map(identityFromRaw).filter(item => identityKey(item));
+  const wanted = cleanTitle(hint.title || hint.original_title);
+  const scored = candidates.map(candidate => {
+    const names = [candidate.title, candidate.original_title].map(cleanTitle).filter(Boolean);
+    const titleScore = wanted && names.some(name => name === wanted) ? 4 : wanted && names.some(name => name.includes(wanted) || wanted.includes(name)) ? 2 : 0;
+    const yearScore = !hint.year || !candidate.year ? 0 : String(hint.year) === String(candidate.year) ? 2 : -3;
+    const typeScore = !hint.media_type || hint.media_type === 'unknown' || candidate.media_type === 'unknown' ? 0 : hint.media_type === candidate.media_type ? 1 : -3;
+    return { candidate, score: titleScore + yearScore + typeScore }
+  }).filter(item => item.score >= 3).sort((a, b) => b.score - a.score);
+  const best = scored[0];
+  const unique = best && !scored.slice(1).some(item => item.score === best.score && !sameIdentity(item.candidate, best.candidate));
+  return { selected: unique ? best.candidate : null, candidates: scored.slice(0, 6).map(item => item.candidate) }
+}
+
+function reconcileIdentities (nativeIdentity, aiGrounded) {
+  const native = identityKey(nativeIdentity) ? nativeIdentity : null;
+  const ai = identityKey(aiGrounded?.selected) ? aiGrounded.selected : null;
+  const candidates = [...new Map([native, ...(aiGrounded?.candidates || [])].filter(Boolean).map(item => [identityKey(item), item])).values()];
+  if (native && ai && (sameIdentity(native, ai) || sameWork(native, ai))) return { identity: { ...native, confidence: 1, abstain: false }, candidates, reason: '原生识别与整包 AI 证据指向同一作品' }
+  if (!native && ai) return { identity: { ...ai, confidence: 0.9, abstain: false }, candidates, reason: 'AI 候选已由 MoviePilot 数据源唯一落地' }
+  return { identity: { abstain: true, confidence: 0, title: '', media_type: 'unknown' }, candidates, reason: native && !ai ? '原生识别缺少整包证据确认' : native && ai ? '原生识别与整包证据冲突' : '没有唯一作品身份' }
+}
+
+const {createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,normalizeStyle:_normalizeStyle,renderList:_renderList,Fragment:_Fragment,unref:_unref,normalizeClass:_normalizeClass} = await importShared('vue');
+
+
+const _hoisted_1 = { class: "governor-page" };
+const _hoisted_2 = { class: "hero" };
+const _hoisted_3 = { class: "actions" };
+const _hoisted_4 = ["disabled"];
+const _hoisted_5 = ["disabled"];
+const _hoisted_6 = { class: "summary" };
+const _hoisted_7 = {
+  key: 0,
+  class: "progress"
+};
+const _hoisted_8 = {
+  key: 1,
+  class: "notice"
+};
+const _hoisted_9 = { class: "panel" };
+const _hoisted_10 = {
+  key: 0,
+  class: "empty"
+};
+const _hoisted_11 = { class: "kind" };
+const _hoisted_12 = ["disabled", "onClick"];
+const _hoisted_13 = {
+  key: 2,
+  class: "panel secondary-panel"
+};
+const _hoisted_14 = ["disabled", "onClick"];
+const _hoisted_15 = {
+  key: 3,
+  class: "panel secondary-panel"
+};
+const _hoisted_16 = {
+  key: 4,
+  class: "backdrop"
+};
+const _hoisted_17 = { class: "modal" };
+const _hoisted_18 = { class: "candidate" };
+const _hoisted_19 = {
+  key: 0,
+  class: "candidate-list"
+};
+const _hoisted_20 = ["onClick"];
+const _hoisted_21 = {
+  key: 1,
+  class: "candidate"
+};
+const _hoisted_22 = {
+  key: 2,
+  class: "warning"
+};
+const _hoisted_23 = ["disabled"];
+const _hoisted_24 = {
+  key: 3,
+  class: "preview"
+};
+const _hoisted_25 = { class: "compare" };
+const _hoisted_26 = { class: "warning" };
+const _hoisted_27 = ["disabled"];
+
+const {computed,onMounted,ref} = await importShared('vue');
+
+const pageSize = 100, entryLimit = 1200;
+
+const _sfc_main = {
+  __name: 'AppPage',
+  props: { api: { type: Object, default: () => ({}) } },
+  setup(__props) {
+
+const props = __props;
+const state = ref({ ready: false, updated_at: '', download_units: 0, library_nodes: 0, findings: 0, dirty: 0 });
+const phase = ref('尚未建立地图'), notice = ref(''), running = ref(false), stopped = ref(false), aiAvailable = ref(null);
+const progress = ref({ done: 0, total: 0, current: '' }), findings = ref([]), units = ref([]), histories = ref([]), preview = ref(null), selected = ref(null);
+const liveMapReady = ref(false);
+const canUseApi = computed(() => typeof props.api?.get === 'function' && typeof props.api?.post === 'function');
+const percent = computed(() => progress.value.total ? Math.min(100, Math.round(progress.value.done * 100 / progress.value.total)) : 0);
+const elapsedLabel = computed(() => running.value ? '正在读取真实文件状态' : state.value.updated_at ? '已有媒体地图' : '首次建立地图会较久，之后只复核变动项');
+const cards = computed(() => findings.value.filter(item => item.kind !== 'unconfirmed' && item.kind !== 'uncovered'));
+const pendingCards = computed(() => findings.value.filter(item => item.kind === 'unconfirmed'));
+const uncoveredCards = computed(() => findings.value.filter(item => item.kind === 'uncovered'));
+const provenCount = computed(() => cards.value.length);
+const uncoveredCount = computed(() => findings.value.filter(item => item.kind === 'uncovered').length);
+const safe = value => String(value || '').replace(/[\\/]/g, '').replace(/\s+/g, ' ').trim().slice(0, 160);
+const displayPath = value => String(value || '').replace(/\\/g, '/') || '尚未建立';
+function currentTargetFor(source) {
+  const row = latestHistoryRows(selected.value?.unit?.history || []).find(item => pathKey(sourcePath(item)) === pathKey(source));
+  return displayPath(destinationPath(row))
+}
+function previewRows(value) {
+  return officialPreviewItems(value).map(item => ({ source: displayPath(item.source), current: currentTargetFor(item.source), expected: displayPath(item.target), episode: [item.season ? `S${String(item.season).padStart(2, '0')}` : '', item.episode ? `E${String(item.episode).padStart(2, '0')}` : ''].filter(Boolean).join('') || '电影' }))
+}
+const keyOf = item => `${item?.storage || 'local'}:${item?.path || item?.name || ''}`;
+function fail(error, fallback) { notice.value = error?.message || fallback; }
+function resetRun(label) { running.value = true; stopped.value = false; liveMapReady.value = false; notice.value = ''; phase.value = label; progress.value = { done: 0, total: 0, current: '' }; findings.value = []; units.value = []; histories.value = []; }
+function stop() { stopped.value = true; notice.value = '已停止；已完成部分会保留到本轮结束前。'; }
+async function get(path) { return unwrapMoviePilotResponse(await props.api.get(path, { feedback: 'silent' })) }
+async function post(path, body) { return unwrapMoviePilotResponse(await props.api.post(path, body, { feedback: 'silent' })) }
+async function status() {
+  if (!canUseApi.value) return
+  try {
+    const snapshot = await get('plugin/MediaGovernor/map_snapshot');
+    state.value = { ...state.value, ...(snapshot?.summary || snapshot || {}) };
+    findings.value = Array.isArray(snapshot?.findings) ? snapshot.findings : [];
+    if (state.value.ready) notice.value = `已载入上次结论：${provenCount.value} 个真实问题，${pendingCards.value.length} 个等待确认作品，${uncoveredCount.value} 个未完成覆盖。重新读取后才能打开实时证据和官方预览。`;
+  } catch (error) { fail(error, '无法读取已保存的媒体地图'); }
+}
+function listOf(raw) { return Array.isArray(raw) ? raw : raw?.items || raw?.list || raw?.data || [] }
+async function directories(kind) { return listOf(await get(`storage/directories?directory_type=${kind}`)) }
+async function list(item) { const value = await post('storage/list', item); if (!Array.isArray(value)) throw new Error('MoviePilot 没有返回目录列表'); return value }
+async function history(status) { const rows = []; for (let page = 1; !stopped.value; page += 1) { const data = await get(`history/transfer?status=${status}&page=${page}&count=${pageSize}`); const batch = listOf(data); rows.push(...batch); if (batch.length < pageSize) break } return normaliseHistoryRows(rows, status) }
+async function walk(root, recursive = true) {
+  const entries = []; const queue = root?.type === 'dir' ? [{ item: root, depth: 0 }] : []; let readFailures = 0;
+  if (root?.type !== 'dir') entries.push({ ...root, depth: 0 });
+  while (queue.length && !stopped.value) {
+    const current = queue.shift(); let children;
+    try { children = await list(current.item); } catch { readFailures += 1; continue }
+    for (const child of children) {
+      if (entries.length >= entryLimit) return { entries, complete: false }
+      const item = { ...child, depth: current.depth + 1 }; entries.push(item);
+      if (recursive && child?.type === 'dir') queue.push({ item: child, depth: current.depth + 1 });
+    }
+  }
+  return { entries, complete: !stopped.value && !readFailures }
+}
+function targetPaths(unit) {
+  return [...new Set([
+    ...latestHistoryRows(unit?.history || []).filter(row => row?.status === true).map(destinationPath),
+    ...officialPreviewItems(unit?.officialPreview).map(item => item.target),
+  ].filter(Boolean))]
+}
+function parentOf(path, storage = 'local') { const value = String(path || ''); const cut = Math.max(value.lastIndexOf('/'), value.lastIndexOf('\\')); return cut > 0 ? { type: 'dir', path: value.slice(0, cut), storage } : null }
+async function scanTargetParents(allUnits) {
+  const parentItems = new Map(); const expectedByUnit = new Map();
+  for (const unit of allUnits) {
+    const expected = targetPaths(unit); const parentKeys = [];
+    for (const row of latestHistoryRows(unit.history).filter(row => row?.status === true)) {
+      const target = destinationPath(row); const parent = parentOf(target, row?.dest_fileitem?.storage || row?.dest_storage);
+      if (!parent) continue
+      const key = keyOf(parent); parentItems.set(key, parent); parentKeys.push(key);
+    }
+    for (const item of officialPreviewItems(unit.officialPreview)) {
+      const parent = parentOf(item.target, unit.previewPayload?.target_storage || 'local');
+      if (!parent) continue
+      const key = keyOf(parent); parentItems.set(key, parent); parentKeys.push(key);
+    }
+    expectedByUnit.set(unit.id, { expected, parentKeys: [...new Set(parentKeys)] });
+  }
+  const readable = new Map(); let readFailures = 0;
+  const parents = [...parentItems.entries()]; progress.value.total += parents.length;
+  for (let index = 0; index < parents.length && !stopped.value; index += 1) {
+    const [key, parent] = parents[index];
+    try {
+      const items = (await list(parent)).filter(item => item?.path);
+      readable.set(key, new Map(items.map(item => [pathKey(item.path), item])));
+    }
+    catch { readable.set(key, null); readFailures += 1; }
+    progress.value.done += 1; phase.value = `核对当前整理目标：${index + 1}/${parents.length}`; progress.value.current = '只读取整理历史实际指向的目标目录，不扫描整座媒体库。';
+  }
+  const states = new Map();
+  for (const unit of allUnits) {
+    const plan = expectedByUnit.get(unit.id) || { expected: [], parentKeys: [] }; const present = new Map(); let complete = true;
+    for (const key of plan.parentKeys) {
+      const entries = readable.get(key);
+      if (entries == null) { complete = false; continue }
+      for (const [path, entry] of entries) present.set(path, entry);
+    }
+    states.set(unit.id, { expected: plan.expected, present, complete });
+  }
+  return { states, parentCount: parents.length, readFailures }
+}
+function modelEvidence(unit, summary) {
+  const evidence = packageEvidence(unit);
+  const directories = evidence.entries.filter(item => item.type === 'dir').slice(0, 8);
+  const files = evidence.entries.filter(item => item.type === 'file');
+  const indexes = [...new Set([...Array(Math.min(12, files.length)).keys(), ...Array.from({ length: Math.min(12, files.length) }, (_, index) => Math.max(0, files.length - 12 + index)), ...Array.from({ length: Math.min(12, files.length) }, (_, index) => Math.floor(index * Math.max(files.length - 1, 0) / Math.max(Math.min(12, files.length) - 1, 1)))])];
+  const entries = [...directories, ...indexes.map(index => files[index]).filter(Boolean)].slice(0, 44).map(item => ({ ...item, name: safe(item.name).slice(0, 110) }));
+  return { title_hints: evidence.title_hints.slice(0, 16), entries, video_count: evidence.video_count, episodes: summary.episodes, boundary: evidence.boundary, ai_truncated: evidence.entries.length > entries.length }
+}
+async function askAi(candidates) {
+  if (!candidates.length || aiAvailable.value === false) return new Map()
+  phase.value = `让智能助手复核 ${candidates.length} 个无法靠原生识别确认的单元`;
+  try {
+    const diagnoses = new Map();
+    const pending = candidates.map(item => ({ id: item.id, evidence: modelEvidence(item, item.summary) }));
+    while (pending.length && !stopped.value) {
+      const rows = []; let chars = 0;
+      while (pending.length && rows.length < 12) {
+        const next = pending[0]; const cost = JSON.stringify(next.evidence).length;
+        if (rows.length && chars + cost > 24000) break
+        pending.shift(); rows.push(next); chars += cost;
+      }
+      const result = await post('plugin/MediaGovernor/bundle_analyze_batch', { items: rows });
+      for (const [id, diagnosis] of Object.entries(result.diagnoses || {})) diagnoses.set(id, diagnosis);
+      for (const id of result.omitted || []) diagnoses.set(id, { abstain: true, confidence: 0, reasons: ['证据超过智能助手单批安全上限'] });
+    }
+    return diagnoses
+  } catch (error) { aiAvailable.value = false; notice.value = `${error?.message || '智能助手不可用'}；本轮只保留规则能证明的问题。`; return new Map() }
+}
+async function identifyUnits() {
+  const target = identityTargets(units.value);
+  if (!target.length) return
+  progress.value.total += target.length;
+  let cursor = 0;
+  const worker = async () => {
+    while (!stopped.value) {
+      const index = cursor; cursor += 1;
+      if (index >= target.length) return
+      const unit = target[index]; const samples = unit.entries.filter(item => videoPattern.test(item?.name || '') && item?.path).slice(0, 3);
+      try {
+        const candidates = await Promise.all(samples.map(async sample => identityFromRaw(await get(`media/recognize_file?path=${encodeURIComponent(sample.path)}`))));
+        const usable = candidates.filter(candidate => !candidate.abstain);
+        const identities = [...new Set(usable.map(identityKey).filter(Boolean))];
+        unit.nativeIdentity = usable.length && identities.length === 1 ? usable[0] : null;
+      } catch { unit.nativeIdentity = null; }
+      progress.value.done += 1; phase.value = `核验作品身份：${index + 1}/${target.length}`; progress.value.current = '每个有整理关系的下载单元都先走 MoviePilot 原生识别；不再等规则先报错。';
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, target.length) }, worker));
+}
+async function groundAiDiagnoses(aiDiagnoses) {
+  const target = units.value.filter(unit => aiDiagnoses.has(unit.id)); progress.value.total += target.length;
+  let cursor = 0;
+  const worker = async () => {
+    while (!stopped.value) {
+      const index = cursor; cursor += 1; if (index >= target.length) return
+      const unit = target[index]; const hint = aiDiagnoses.get(unit.id);
+      let grounded = { selected: null, candidates: [] };
+      if (hint && !hint.abstain && hint.title) {
+        try {
+          const query = [hint.title, hint.year].filter(Boolean).join(' ');
+          const rows = listOf(await get(`media/search?title=${encodeURIComponent(query)}&type=media&page=1&count=8`));
+          grounded = chooseGroundedCandidate(hint, rows);
+        } catch { grounded = { selected: null, candidates: [] }; }
+      }
+      const resolved = reconcileIdentities(unit.nativeIdentity, grounded);
+      unit.diagnosis = resolved.identity; unit.candidates = resolved.candidates; unit.identity_reason = resolved.reason; unit.aiDiagnosis = hint;
+      progress.value.done += 1; phase.value = `核对作品候选：${index + 1}/${target.length}`; progress.value.current = 'AI 只提出作品线索；正在回到 MoviePilot 数据源取得可执行作品编号。';
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, target.length) }, worker));
+}
+async function generateOfficialPreviews() {
+  const target = units.value.filter(unit => identityKey(unit.diagnosis)); progress.value.total += target.length;
+  let cursor = 0;
+  const worker = async () => {
+    while (!stopped.value) {
+      const index = cursor; cursor += 1; if (index >= target.length) return
+      const unit = target[index];
+      try {
+        const base = manualPreviewRequest(unit, unit.diagnosis);
+        const targetPath = await post('transfer/manual/target-path', base);
+        if (!targetPath?.target_path || !targetPath?.target_storage) throw new Error('MoviePilot 没有给出唯一媒体库目标')
+        unit.previewPayload = { ...base, ...targetPath, preview: true, reorganize: false };
+        unit.officialPreview = await post('transfer/manual', unit.previewPayload);
+        if (!previewComplete(unit.officialPreview, base.fileitems.length)) throw new Error('MoviePilot 逐文件预览不完整')
+      } catch (error) { unit.preview_error = error?.message || '官方预览生成失败'; unit.officialPreview = null; }
+      progress.value.done += 1; phase.value = `生成官方逐文件预览：${index + 1}/${target.length}`; progress.value.current = '只有完整官方预览才能定义正确目录、季集和文件名。';
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, target.length) }, worker));
+}
+async function scanDownloadUnits(toScan, total) {
+  const results = new Array(toScan.length); let cursor = 0;
+  const worker = async () => {
+    while (!stopped.value) {
+      const index = cursor; cursor += 1;
+      if (index >= toScan.length) return
+      const unit = toScan[index];
+      try {
+        const trees = await Promise.all((unit.roots || [unit.root]).map(root => walk(root)));
+        Object.assign(unit, appendTreeEvidence(unit, trees)); unit.summary = summarizeUnit(unit);
+      } catch { unit.entries = []; unit.complete = false; unit.summary = summarizeUnit(unit); }
+      results[index] = unit; progress.value.done += 1; phase.value = `读取下载单元：${progress.value.done}/${total}`; progress.value.current = '最多同时读取 4 个下载单元；读不到的目录会保留为尚未覆盖。';
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, toScan.length) }, worker));
+  units.value = results.filter(Boolean);
+}
+async function buildMap(full = false) {
+  if (!canUseApi.value) { notice.value = 'MoviePilot 页面 API 尚未注入，无法建立地图。'; return }
+  resetRun(full ? '建立完整媒体地图' : '复核当前变动');
+  try {
+    const [downloadConfigurations, libraryConfigurations, failed, successful] = await Promise.all([directories('download'), directories('library'), history(false), history(true)]);
+    histories.value = [...failed, ...successful];
+    const scope = configuredDownloadRoots(downloadConfigurations);
+    if (!scope.roots.length) throw new Error('没有可用下载目录：拒绝扫描空路径或容器根目录')
+    phase.value = '验证下载目录并读取顶层下载项目'; const discovered = [];
+    for (const root of scope.roots) { if (stopped.value) break; discovered.push(...createDownloadUnits(root, await list(root))); }
+    const top = [...new Map(discovered.map(unit => [keyOf(unit.root), unit])).values()];
+    const packages = createEvidencePackages(top.map(unit => unit.root), histories.value);
+    const libraryRoots = configuredLibraryRoots(libraryConfigurations);
+    const initial = !state.value.ready || full;
+    const plan = initial ? { unchanged: [] } : await post('plugin/MediaGovernor/map_plan', { units: packages.map(unit => ({ id: unit.id, fingerprint: rootFingerprint(unit.roots) })) });
+    const toScan = initial ? packages : packages.filter(unit => !new Set(plan.unchanged || []).has(unit.id));
+    progress.value.total = toScan.length; progress.value.current = initial ? `发现 ${top.length} 个顶层项目，归为 ${packages.length} 个下载包；历史只用来关联，不当成问题数。` : `发现 ${packages.length} 个下载包，其中 ${toScan.length} 个发生变动，需要深度复核。`;
+    await scanDownloadUnits(toScan, packages.length);
+    units.value = units.value.flatMap(createWorkUnits);
+    for (const unit of units.value) unit.summary = summarizeUnit(unit);
+    const libraryNodes = libraryRootSnapshot(libraryRoots);
+    await identifyUnits();
+    // 所有作品单元都让整包 AI 证据交叉核对；AI 结果必须回到 MoviePilot 数据源落地。
+    const candidates = aiFallbackTargets(units.value);
+    const diagnoses = await askAi(candidates);
+    await groundAiDiagnoses(diagnoses);
+    for (const unit of units.value.filter(item => !item.diagnosis)) {
+      const resolved = reconcileIdentities(unit.nativeIdentity, { selected: null, candidates: [] });
+      unit.diagnosis = resolved.identity; unit.candidates = resolved.candidates; unit.identity_reason = resolved.reason;
+    }
+    await generateOfficialPreviews();
+    const targetAudit = await scanTargetParents(units.value);
+    const refined = [];
+    if (scope.rejected.length) refined.push({ unit_id: 'scope:invalid', title: `${scope.rejected.length} 个下载目录配置`, kind: 'uncovered', reason: '下载目录为空或指向容器根目录，已拒绝扫描；请在 MoviePilot 目录设置中修正', strength: 'review' });
+    for (const unit of units.value) {
+      if (!unit.complete) { refined.push({ unit_id: unit.id, title: cleanTitle(unit.root?.name) || '未命名下载单元', kind: 'uncovered', reason: '当前下载单元未完整读取，暂不能下结论', strength: 'review' }); continue }
+      if (!unit.summary.video_count) continue
+      const targetState = targetAudit.states.get(unit.id) || { expected: targetPaths(unit), present: new Map(), complete: false };
+      if (!targetState.complete) { refined.push({ unit_id: unit.id, title: unit.work_label, kind: 'uncovered', reason: '当前目标目录没有完整读取，暂时不能判断', strength: 'review' }); continue }
+      const finding = evaluateOfficialPreview({
+        unit,
+        identity: unit.diagnosis,
+        preview: unit.officialPreview,
+        presentPaths: new Set(targetState.present.keys()),
+        libraryRootFor: path => libraryRootForPath(path, libraryRoots),
+      });
+      if (finding) refined.push({ ...finding, title: unit.work_label, boundary: unit.boundary, candidate_count: unit.candidates?.length || 0 });
+    }
+    const linkedHistoryIds = new Set(units.value.flatMap(unit => unit.history.map(row => String(row?.id || ''))));
+    const unlinkedUnits = units.value.filter(unit => unit.summary.video_count && !unit.history.length);
+    findings.value = dedupe(refined); phase.value = stopped.value ? '已停止（未保存不完整地图）' : '保存当前媒体地图';
+    if (!stopped.value) {
+      const linkedUnits = units.value.filter(unit => unit.history.length).length;
+      const unmatchedFailed = failed.filter(item => !linkedHistoryIds.has(String(item?.id || ''))).length;
+      const commit = await post('plugin/MediaGovernor/map_commit', { baseline: initial, partial: !initial, scope_verified: true, download_units: units.value.map(unit => ({ id: unit.id, root: unit.root, label: cleanTitle(unit.root?.name) || '未命名下载单元', fingerprint: unit.summary.fingerprint, header_fingerprint: rootFingerprint(unit.roots), video_count: unit.summary.video_count, subtitle_count: unit.summary.subtitle_count, nfo_count: unit.summary.nfo_count, episodes: unit.summary.episodes, names: unit.summary.names, history: unit.history.map(row => row.id), boundary: unit.boundary, coverage: unit.complete ? 'complete' : 'uncovered' })), library_nodes: libraryNodes, findings: findings.value, coverage: { configured_download_roots: scope.roots.length, rejected_download_roots: scope.rejected.length, download_units: packages.length, scanned_units: units.value.length, library_roots: libraryNodes.length, target_parent_dirs: targetAudit.parentCount, target_parent_read_failures: targetAudit.readFailures, failed_history: failed.length, successful_history: successful.length, linked_units: linkedUnits, unlinked_units: units.value.length - linkedUnits, unmatched_failed_history: unmatchedFailed, uncovered_units: uncoveredCount.value }, history_summary: histories.value.map(row => ({ id: row.id, status: row.status, mode: row.mode, media_source: row.media_source, media_id: row.media_id, target: destinationPath(row), download_hash: row.download_hash })) });
+      state.value = { ...state.value, ...commit };
+      liveMapReady.value = true;
+      phase.value = '地图已更新'; notice.value = `已读到失败历史 ${failed.length} 条、成功历史 ${successful.length} 条；本轮复核 ${units.value.length} 个下载单元。核对了 ${targetAudit.parentCount} 个当前整理目标目录（${targetAudit.readFailures} 个暂不可读）。已证明 ${provenCount.value} 个问题，另有 ${findings.value.filter(item => item.kind === 'unconfirmed').length} 个无法确认、${uncoveredCount.value} 个尚未覆盖。`;
+    }
+  } catch (error) { fail(error, '建立地图失败；没有改变任何媒体。'); phase.value = '建立地图未完成'; }
+  finally { running.value = false; }
+}
+function dedupe(rows) { const map = new Map(); for (const row of rows) { const key = `${row.unit_id}:${row.kind}:${row.reason}`; if (!map.has(key)) map.set(key, row); } return [...map.values()] }
+function titleFor(card) { const unit = units.value.find(item => item.id === card.unit_id); return card?.title || unit?.work_label || cleanTitle(unit?.root?.name) || '未命名下载单元' }
+async function recognize(card) {
+  const unit = units.value.find(item => item.id === card.unit_id);
+  if (!unit?.root?.path) { notice.value = '这是上次保存的结论。请先重新读取当前状态，再生成预览。'; return }
+  selected.value = { card, unit, candidate: identityKey(unit.diagnosis) ? unit.diagnosis : null, candidates: unit.candidates || [], error: '', preview_payload: unit.previewPayload || null, admission: null };
+  preview.value = unit.officialPreview || null;
+  if (preview.value && selected.value.candidate) selected.value.admission = repairAdmission(unit, selected.value.candidate, preview.value);
+  if (!selected.value.candidate && !selected.value.candidates.length) selected.value.error = '当前证据没有得到可用候选。请先检查智能助手和媒体数据源配置。';
+}
+function selectCandidate(candidate) { selected.value.candidate = candidate; selected.value.error = ''; selected.value.preview_payload = null; selected.value.admission = null; preview.value = null; }
+function previewPayload() {
+  return manualPreviewRequest(selected.value?.unit, selected.value?.candidate)
+}
+async function makePreview() {
+  try {
+    const base = previewPayload();
+    if (!base.fileitems.length || !base.media_source || !base.media_id) throw new Error('缺少经 MoviePilot 确认的作品身份或视频文件')
+    const target = await post('transfer/manual/target-path', base);
+    if (!target?.target_path || !target?.target_storage) throw new Error('MoviePilot 没有为这批文件给出唯一媒体库目标')
+    const payload = { ...base, ...target, preview: true, reorganize: false };
+    preview.value = await post('transfer/manual', payload);
+    selected.value.preview_payload = payload;
+    selected.value.admission = repairAdmission(selected.value.unit, selected.value.candidate, preview.value);
+    selected.value.unit.diagnosis = selected.value.candidate; selected.value.unit.previewPayload = payload; selected.value.unit.officialPreview = preview.value;
+  } catch (error) { selected.value.error = error?.message || '官方预览没有生成'; fail(error, '官方预览没有生成；没有删除或重建任何硬链接。'); }
+}
+async function repair() {
+  const admission = selected.value?.admission;
+  if (!admission?.allowed) { notice.value = admission?.reason || '当前预览不满足安全重建条件。'; return }
+  if (!window.confirm(`确认按本次官方预览重建吗？${admission.reason}。原始下载不会被删除。`)) return
+  try {
+    if (admission.mode === 'create') await post('transfer/manual', { ...selected.value.preview_payload, preview: false, reorganize: false });
+    else for (const payload of manualRebuildRequests(admission.history_ids, selected.value.candidate, selected.value.preview_payload)) await post('transfer/manual', payload);
+    notice.value = 'MoviePilot 已接收逐项重建。现在会重新读取当前状态；只有实际结果等于预览，问题才会关闭。';
+    preview.value = null; selected.value = null; await buildMap(true);
+  } catch (error) { fail(error, '官方没有完成全部重建；插件没有直接删除原始下载。请重新读取当前状态。'); }
+}
+async function probeAi() { try { const result = await post('plugin/MediaGovernor/ai_probe', {}); aiAvailable.value = Boolean(result.available); notice.value = aiAvailable.value ? '智能助手可用：只会复核规则无法确认的异常单元。' : '智能助手未返回可用状态。'; } catch (error) { aiAvailable.value = false; fail(error, '智能助手不可用，仍可建立地图和检查规则问题。'); } }
+onMounted(status);
+
+return (_ctx, _cache) => {
+  return (_openBlock(), _createElementBlock("main", _hoisted_1, [
+    _createElementVNode("section", _hoisted_2, [
+      _cache[2] || (_cache[2] = _createElementVNode("div", null, [
+        _createElementVNode("p", { class: "eyebrow" }, "MediaGovernor 4.1.0"),
+        _createElementVNode("h1", null, "找到问题，再安全修好"),
+        _createElementVNode("p", null, "完整文件证据与 AI 共同确认作品；只有 MoviePilot 官方逐文件预览与当前结果不一致，才算真实问题。")
+      ], -1)),
+      _createElementVNode("div", _hoisted_3, [
+        _createElementVNode("button", {
+          class: "secondary",
+          disabled: running.value,
+          onClick: probeAi
+        }, "检查智能助手", 8, _hoisted_4),
+        _createElementVNode("button", {
+          class: "primary",
+          disabled: running.value,
+          onClick: _cache[0] || (_cache[0] = $event => (buildMap(true)))
+        }, _toDisplayString(state.value.ready ? '重新检查全部' : '开始首次检查'), 9, _hoisted_5)
+      ])
+    ]),
+    _createElementVNode("section", _hoisted_6, [
+      _createElementVNode("span", null, [
+        _createElementVNode("b", null, _toDisplayString(provenCount.value), 1),
+        _cache[3] || (_cache[3] = _createTextVNode("真实问题", -1))
+      ]),
+      _createElementVNode("span", null, [
+        _createElementVNode("b", null, _toDisplayString(pendingCards.value.length), 1),
+        _cache[4] || (_cache[4] = _createTextVNode("等待确认作品", -1))
+      ]),
+      _createElementVNode("span", null, [
+        _createElementVNode("b", null, _toDisplayString(uncoveredCards.value.length), 1),
+        _cache[5] || (_cache[5] = _createTextVNode("未完成覆盖", -1))
+      ]),
+      _createElementVNode("span", null, [
+        _createElementVNode("b", null, _toDisplayString(units.value.length || state.value.download_units), 1),
+        _cache[6] || (_cache[6] = _createTextVNode("作品单元", -1))
+      ])
+    ]),
+    (running.value || progress.value.total)
+      ? (_openBlock(), _createElementBlock("section", _hoisted_7, [
+          _createElementVNode("div", null, [
+            _createElementVNode("b", null, _toDisplayString(phase.value), 1),
+            (running.value)
+              ? (_openBlock(), _createElementBlock("button", {
+                  key: 0,
+                  class: "link",
+                  onClick: stop
+                }, "停止"))
+              : _createCommentVNode("", true)
+          ]),
+          _createElementVNode("p", null, _toDisplayString(progress.value.current), 1),
+          _createElementVNode("i", null, [
+            _createElementVNode("em", {
+              style: _normalizeStyle({ width: `${percent.value}%` })
+            }, null, 4)
+          ]),
+          _createElementVNode("small", null, _toDisplayString(progress.value.done) + "/" + _toDisplayString(progress.value.total) + " · " + _toDisplayString(elapsedLabel.value), 1)
+        ]))
+      : _createCommentVNode("", true),
+    (notice.value)
+      ? (_openBlock(), _createElementBlock("p", _hoisted_8, _toDisplayString(notice.value), 1))
+      : _createCommentVNode("", true),
+    _createElementVNode("section", _hoisted_9, [
+      _cache[8] || (_cache[8] = _createElementVNode("header", null, [
+        _createElementVNode("div", null, [
+          _createElementVNode("h2", null, "已确认的真实问题"),
+          _createElementVNode("p", null, "这些项目已经有作品身份、完整官方预览以及当前文件差异。")
+        ])
+      ], -1)),
+      (!cards.value.length)
+        ? (_openBlock(), _createElementBlock("p", _hoisted_10, _toDisplayString(running.value ? '正在核对，还没有形成结论。' : state.value.ready ? '当前没有已经证明的真实问题。' : '首次使用请先开始检查。'), 1))
+        : _createCommentVNode("", true),
+      (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(cards.value, (card) => {
+        return (_openBlock(), _createElementBlock("article", {
+          key: `${card.unit_id}-${card.kind}`,
+          class: "card"
+        }, [
+          _createElementVNode("div", null, [
+            _createElementVNode("span", _hoisted_11, _toDisplayString(_unref(findingLabel)(card.kind)), 1),
+            _createElementVNode("h3", null, _toDisplayString(titleFor(card)), 1),
+            _createElementVNode("p", null, _toDisplayString(card.reason), 1),
+            _cache[7] || (_cache[7] = _createElementVNode("small", null, "点开可查看当前结果、官方应有结果和安全修复条件。", -1))
+          ]),
+          _createElementVNode("button", {
+            class: "primary",
+            disabled: !liveMapReady.value,
+            onClick: $event => (recognize(card))
+          }, _toDisplayString(liveMapReady.value ? '查看对比与修复' : '重新检查后查看'), 9, _hoisted_12)
+        ]))
+      }), 128))
+    ]),
+    (pendingCards.value.length)
+      ? (_openBlock(), _createElementBlock("section", _hoisted_13, [
+          _cache[10] || (_cache[10] = _createElementVNode("header", null, [
+            _createElementVNode("div", null, [
+              _createElementVNode("h2", null, "等待确认作品"),
+              _createElementVNode("p", null, "这些不是已判定的问题。可以查看整包候选，选对作品后生成官方预览。")
+            ])
+          ], -1)),
+          (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(pendingCards.value, (card) => {
+            return (_openBlock(), _createElementBlock("article", {
+              key: `${card.unit_id}-${card.kind}`,
+              class: "card"
+            }, [
+              _createElementVNode("div", null, [
+                _cache[9] || (_cache[9] = _createElementVNode("span", { class: "kind" }, "等待确认", -1)),
+                _createElementVNode("h3", null, _toDisplayString(titleFor(card)), 1),
+                _createElementVNode("p", null, _toDisplayString(card.reason), 1)
+              ]),
+              _createElementVNode("button", {
+                class: "secondary",
+                disabled: !liveMapReady.value,
+                onClick: $event => (recognize(card))
+              }, _toDisplayString(liveMapReady.value ? '选择作品并预览' : '重新检查后选择'), 9, _hoisted_14)
+            ]))
+          }), 128))
+        ]))
+      : _createCommentVNode("", true),
+    (uncoveredCards.value.length)
+      ? (_openBlock(), _createElementBlock("section", _hoisted_15, [
+          _cache[12] || (_cache[12] = _createElementVNode("header", null, [
+            _createElementVNode("div", null, [
+              _createElementVNode("h2", null, "没有检查完整"),
+              _createElementVNode("p", null, "这些项目不会被当成正常或问题；原因解决后需要重新检查。")
+            ])
+          ], -1)),
+          (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(uncoveredCards.value, (card) => {
+            return (_openBlock(), _createElementBlock("article", {
+              key: `${card.unit_id}-${card.kind}`,
+              class: "card"
+            }, [
+              _createElementVNode("div", null, [
+                _cache[11] || (_cache[11] = _createElementVNode("span", { class: "kind" }, "未完成", -1)),
+                _createElementVNode("h3", null, _toDisplayString(titleFor(card)), 1),
+                _createElementVNode("p", null, _toDisplayString(card.reason), 1)
+              ])
+            ]))
+          }), 128))
+        ]))
+      : _createCommentVNode("", true),
+    (selected.value)
+      ? (_openBlock(), _createElementBlock("div", _hoisted_16, [
+          _createElementVNode("section", _hoisted_17, [
+            _createElementVNode("button", {
+              class: "close",
+              onClick: _cache[1] || (_cache[1] = $event => {selected.value = null; preview.value = null;})
+            }, "×"),
+            _cache[16] || (_cache[16] = _createElementVNode("p", { class: "eyebrow" }, "作品证据与官方预览", -1)),
+            _createElementVNode("h2", null, _toDisplayString(titleFor(selected.value.card)), 1),
+            _createElementVNode("p", null, _toDisplayString(selected.value.card.reason), 1),
+            _createElementVNode("div", _hoisted_18, [
+              _createElementVNode("b", null, "文件证据：" + _toDisplayString(selected.value.unit.complete ? '完整读取' : '未完整读取'), 1),
+              _createElementVNode("span", null, _toDisplayString(selected.value.unit.summary?.video_count || 0) + " 个视频文件 · " + _toDisplayString(selected.value.unit.boundary_reason), 1)
+            ]),
+            (selected.value.candidates.length)
+              ? (_openBlock(), _createElementBlock("div", _hoisted_19, [
+                  (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(selected.value.candidates, (candidate) => {
+                    return (_openBlock(), _createElementBlock("button", {
+                      key: _unref(identityKey)(candidate),
+                      class: _normalizeClass(['candidate-choice', { active: _unref(identityKey)(candidate) === _unref(identityKey)(selected.value.candidate) }]),
+                      onClick: $event => (selectCandidate(candidate))
+                    }, [
+                      _createElementVNode("b", null, _toDisplayString(candidate.title || candidate.original_title), 1),
+                      _createElementVNode("span", null, _toDisplayString(candidate.year || '年份未知') + " · " + _toDisplayString(candidate.media_type) + " · " + _toDisplayString(candidate.media_source) + " / " + _toDisplayString(candidate.media_id), 1)
+                    ], 10, _hoisted_20))
+                  }), 128))
+                ]))
+              : (selected.value.candidate)
+                ? (_openBlock(), _createElementBlock("div", _hoisted_21, [
+                    _createElementVNode("b", null, _toDisplayString(selected.value.candidate.title || selected.value.candidate.original_title), 1),
+                    _createElementVNode("span", null, _toDisplayString(selected.value.candidate.year) + " · " + _toDisplayString(selected.value.candidate.media_type) + " · " + _toDisplayString(selected.value.candidate.media_source) + " / " + _toDisplayString(selected.value.candidate.media_id), 1)
+                  ]))
+                : _createCommentVNode("", true),
+            (selected.value.error)
+              ? (_openBlock(), _createElementBlock("p", _hoisted_22, _toDisplayString(selected.value.error), 1))
+              : _createCommentVNode("", true),
+            _createElementVNode("button", {
+              class: "primary",
+              disabled: !selected.value.candidate || Boolean(selected.value.error),
+              onClick: makePreview
+            }, _toDisplayString(preview.value ? '重新生成官方逐文件预览' : '生成官方逐文件预览'), 9, _hoisted_23),
+            (preview.value)
+              ? (_openBlock(), _createElementBlock("div", _hoisted_24, [
+                  _cache[14] || (_cache[14] = _createElementVNode("h3", null, "整理前后对比", -1)),
+                  _cache[15] || (_cache[15] = _createElementVNode("p", null, "每一行都是同一个原文件：中间是现在的硬链接，右侧是 MoviePilot 官方预览的新位置。", -1)),
+                  _createElementVNode("div", _hoisted_25, [
+                    _cache[13] || (_cache[13] = _createElementVNode("div", { class: "compare-head" }, [
+                      _createElementVNode("b", null, "原文件"),
+                      _createElementVNode("b", null, "当前硬链接"),
+                      _createElementVNode("b", null, "修复后")
+                    ], -1)),
+                    (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(previewRows(preview.value), (row) => {
+                      return (_openBlock(), _createElementBlock("div", {
+                        key: `${row.source}-${row.expected}`,
+                        class: "compare-row"
+                      }, [
+                        _createElementVNode("span", null, _toDisplayString(row.source), 1),
+                        _createElementVNode("span", null, _toDisplayString(row.current), 1),
+                        _createElementVNode("span", null, [
+                          _createTextVNode(_toDisplayString(row.expected), 1),
+                          _createElementVNode("small", null, _toDisplayString(row.episode), 1)
+                        ])
+                      ]))
+                    }), 128))
+                  ]),
+                  _createElementVNode("p", _hoisted_26, _toDisplayString(selected.value.admission?.reason), 1),
+                  _createElementVNode("button", {
+                    class: "danger",
+                    disabled: !selected.value.admission?.allowed,
+                    onClick: repair
+                  }, "确认清理旧硬链接并重建", 8, _hoisted_27)
+                ]))
+              : _createCommentVNode("", true)
+          ])
+        ]))
+      : _createCommentVNode("", true)
+  ]))
+}
+}
+
+};
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-ba0a7b93"]]);
+
+export { AppPage as default };

@@ -52,13 +52,13 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "以当前下载区与媒体库为准，找出真实整理问题并只经官方预览重建。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "4.0.0"
+    plugin_version = "4.1.0"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
     plugin_order = 99
     auth_level = 1
-    _map_schema = "4.0"
+    _map_schema = "4.1"
     _max_units, _max_nodes, _max_batch_units, _max_batch_chars = 2500, 30000, 12, 28000
     _max_cached_diagnoses, _request_timeout_seconds = 300, 45
 
@@ -80,7 +80,7 @@ class MediaGovernor(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> tuple[str, str]:
-        return "vue", "dist/v4.0.0/assets"
+        return "vue", "dist/v4.1.0/assets"
 
     def get_sidebar_nav(self) -> list[dict[str, Any]]:
         return []
@@ -101,7 +101,7 @@ class MediaGovernor(_PluginBase):
             {"path": "/map_commit", "endpoint": self.api_map_commit, "methods": ["POST"], "auth": "bear", "summary": "保存一次当前文件地图", "response_model": MapResponse},
             {"path": "/map_dirty", "endpoint": self.api_map_dirty, "methods": ["GET", "POST"], "auth": "bear", "summary": "读取或标记待对账项", "response_model": MapResponse},
             {"path": "/ai_probe", "endpoint": self.api_ai_probe, "methods": ["POST"], "auth": "bear", "summary": "只验证智能助手可用性", "response_model": MapResponse},
-            {"path": "/bundle_analyze_batch", "endpoint": self.api_bundle_analyze_batch, "methods": ["POST"], "auth": "bear", "summary": "只分析规则无法确认的下载单元", "response_model": BatchAnalysisResponse},
+            {"path": "/bundle_analyze_batch", "endpoint": self.api_bundle_analyze_batch, "methods": ["POST"], "auth": "bear", "summary": "批量分析完整作品结构并允许弃权", "response_model": BatchAnalysisResponse},
         ]
 
     def get_service(self) -> list[dict[str, Any]]:
@@ -238,7 +238,7 @@ class MediaGovernor(_PluginBase):
         if len(raw_units) > self._max_units or len(raw_library) > self._max_nodes: return None, "本轮地图超过安全上限，请分根目录建立地图"
         units = self._bounded_rows(raw_units, self._max_units, {"id", "root", "fingerprint", "header_fingerprint", "video_count", "subtitle_count", "nfo_count", "episodes", "names", "history", "identity", "status", "label", "coverage", "boundary"})
         library = self._bounded_rows(raw_library, self._max_nodes, {"id", "root", "fingerprint", "video_count", "episodes", "category", "names"})
-        findings = self._bounded_rows(raw_findings, self._max_units, {"id", "unit_id", "kind", "reason", "status", "history_id", "current", "expected", "title", "strength"})
+        findings = self._bounded_rows(raw_findings, self._max_units, {"id", "unit_id", "kind", "reason", "status", "history_id", "current", "expected", "title", "strength", "candidate_count", "boundary"})
         for row in units + library: row["id"] = self._private_id(row.get("id") or row.get("root"))
         for row in units:
             row["label"] = self._safe_text(row.get("label"), 120)
@@ -297,9 +297,9 @@ class MediaGovernor(_PluginBase):
             if not isinstance(row, dict): continue
             name = cls._safe_text(row.get("name"), 180)
             if name: entries.append({"name": name, "type": "dir" if row.get("type") == "dir" else "file", "depth": max(0, min(int(row.get("depth") or 0), 20))})
-            if len(entries) >= 500: break
+            if len(entries) >= 80: break
         hints = [cls._safe_text(value, 120) for value in source.get("title_hints") or []]
-        return {"title_hints": list(dict.fromkeys(value for value in hints if value))[:24], "entries": entries, "video_count": min(max(int(source.get("video_count") or 0), 0), 500), "episodes": [int(value) for value in source.get("episodes") or [] if str(value).isdigit()][:200]}
+        return {"title_hints": list(dict.fromkeys(value for value in hints if value))[:16], "entries": entries, "video_count": min(max(int(source.get("video_count") or 0), 0), 500), "episodes": [int(value) for value in source.get("episodes") or [] if str(value).isdigit()][:200]}
 
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any]:
@@ -351,7 +351,7 @@ class MediaGovernor(_PluginBase):
         if not self._enabled: return BatchAnalysisResponse(success=False, message="媒体治理插件未启用")
         try: rows = (await request.json() or {}).get("items") or []
         except Exception: rows = []
-        batches, result, cached, chars = [], {}, 0, 0
+        batches, result, cached, chars, omitted = [], {}, 0, 0, []
         for row in rows[:self._max_batch_units]:
             if not isinstance(row, dict): continue
             key, evidence = self._safe_text(row.get("id"), 80), self._normalise_evidence(row.get("evidence"))
@@ -359,7 +359,9 @@ class MediaGovernor(_PluginBase):
             fingerprint = hashlib.sha256(json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
             if fingerprint in self._diagnosis_cache: result[key] = self._diagnosis(self._diagnosis_cache[fingerprint]); cached += 1; continue
             cost = len(json.dumps(evidence, ensure_ascii=False))
-            if chars + cost > self._max_batch_chars: break
+            if chars + cost > self._max_batch_chars:
+                omitted.append(key)
+                continue
             chars += cost; batches.append((key, evidence))
         try: diagnoses = await self._model(batches) if batches else {}
         except asyncio.TimeoutError: return BatchAnalysisResponse(success=False, message="智能助手超时；没有改变任何媒体")
@@ -370,4 +372,4 @@ class MediaGovernor(_PluginBase):
         self._diagnosis_cache = dict(list(self._diagnosis_cache.items())[-self._max_cached_diagnoses:])
         try: self.save_data("diagnosis_cache", self._diagnosis_cache)
         except Exception: pass
-        return BatchAnalysisResponse(success=True, data={"diagnoses": {key: value.model_dump(mode="json") for key, value in result.items()}, "cached": cached, "analyzed": len(batches)})
+        return BatchAnalysisResponse(success=True, data={"diagnoses": {key: value.model_dump(mode="json") for key, value in result.items()}, "cached": cached, "analyzed": len(batches), "omitted": omitted})

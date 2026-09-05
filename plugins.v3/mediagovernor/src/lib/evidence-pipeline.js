@@ -1,4 +1,5 @@
 import { cleanTitle, isWithinPath, latestHistoryRows, pathKey, sourcePath, videoPattern } from './governance.js'
+import { previewComplete } from './preview-audit.js'
 
 const stable = value => String(value || '').trim()
 const idFor = value => String(value || '').replace(/[^a-zA-Z0-9:_-]/g, '_').slice(0, 160)
@@ -71,8 +72,8 @@ export function repairAdmission (pkg = {}, identity = null, preview = null) {
   if (!pkg.complete) return { allowed: false, reason: '文件证据没有完整读取，不能重建' }
   if (pkg.boundary !== 'download_hash') return { allowed: false, reason: '下载包边界未由下载任务编号确认，不能自动重建' }
   if (!identity?.media_source || !identity?.media_id) return { allowed: false, reason: '作品身份没有得到 MoviePilot 数据源编号确认，不能重建' }
-  const summary = preview?.summary || preview?.data?.summary || {}
-  if (!Number(summary.total) || Number(summary.failed || 0)) return { allowed: false, reason: '官方逐文件预览不完整或含失败项，不能重建' }
+  const sourceCount = previewSourceFiles(pkg).length
+  if (!previewComplete(preview, sourceCount)) return { allowed: false, reason: '官方逐文件预览不完整或含失败项，不能重建' }
   const histories = latestHistoryRows(pkg.history || []).filter(row => row?.status === true && row?.id)
   if (!histories.length) return { allowed: true, mode: 'create', reason: '这是没有旧成功目标的原生整理失败；将只从原始下载建立新硬链接', history_ids: [] }
   return { allowed: true, mode: 'rebuild', reason: `将逐条重建 ${histories.length} 个已归因的旧整理结果`, history_ids: histories.map(row => row.id) }

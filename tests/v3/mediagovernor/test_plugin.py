@@ -1,4 +1,4 @@
-"""MediaGovernor 3.0 合同测试：不访问 NAS、模型以外的网络或真实媒体。"""
+"""MediaGovernor 4.1 合同测试：不访问 NAS、模型以外的网络或真实媒体。"""
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +13,6 @@ ROOT = Path(__file__).resolve().parents[3]
 PLUGIN = ROOT / "plugins.v3/mediagovernor/__init__.py"
 PAGE = ROOT / "plugins.v3/mediagovernor/src/components/AppPage.vue"
 RULES = ROOT / "plugins.v3/mediagovernor/src/lib/governance.js"
-AUDIT = ROOT / "plugins.v3/mediagovernor/src/lib/audit-evaluator.js"
 GOLDEN = ROOT / "tests/v3/mediagovernor/fixtures/golden/v1/cases.json"
 
 
@@ -56,9 +55,9 @@ class Request:
 def test_versions_assets_and_new_api_contract_are_synced():
     module = _load_plugin(); manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "4.0.0"
-    assert list(manifest["history"])[0] == "v4.0.0"
-    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v4.0.0/assets")
+    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "4.1.0"
+    assert list(manifest["history"])[0] == "v4.1.0"
+    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v4.1.0/assets")
     instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
     assert [row["path"] for row in instance.get_api()] == ["/map_status", "/map_snapshot", "/map_plan", "/map_commit", "/map_dirty", "/ai_probe", "/bundle_analyze_batch"]
     assert all(row["auth"] == "bear" for row in instance.get_api())
@@ -91,8 +90,11 @@ def test_batch_analysis_is_bounded_path_free_and_cached():
     body = {"items": [{"id": "one", "evidence": {"title_hints": ["示例剧"], "entries": [{"name": "Show.S01E01.mkv", "path": "/must/not/leave"}], "video_count": 1}}]}
     first = asyncio.run(instance.api_bundle_analyze_batch(Request(body))); second = asyncio.run(instance.api_bundle_analyze_batch(Request(body)))
     assert first.success and first.data["analyzed"] == 1
+    assert first.data["omitted"] == []
     assert second.success and second.data["cached"] == 1
     assert "path" not in json.dumps(instance._normalise_evidence(body["items"][0]["evidence"]))
+    oversized = {"entries": [{"name": f"Episode-{index:04d}.mkv", "type": "file", "depth": 2} for index in range(500)]}
+    assert len(instance._normalise_evidence(oversized)["entries"]) == 80
 
 
 def test_events_only_mark_dirty_and_never_read_media_or_call_model():
@@ -108,29 +110,29 @@ def test_frontend_builds_evidence_packages_and_uses_only_declared_official_previ
     page, rules = PAGE.read_text(encoding="utf-8"), RULES.read_text(encoding="utf-8")
     for endpoint in ("storage/directories?directory_type=${kind}", "storage/list", "history/transfer?status=${status}", "plugin/MediaGovernor/map_snapshot", "plugin/MediaGovernor/map_commit", "plugin/MediaGovernor/bundle_analyze_batch", "media/recognize_file", "transfer/manual"):
         assert endpoint in page
-    assert "历史只作关联" in page and "当前状态" in page
     assert "preview: true" in page and "preview: false" in page and "reorganize: false" in page
     assert "storage/delete" not in page and "fetch(" not in page
     for name in ("createDownloadUnits", "unitFingerprint", "diffMap", "classifyFinding"):
         assert f"function {name}" in rules or f"export function {name}" in rules
-    assert "evaluateUnitAudit" in page and AUDIT.is_file()
+    assert "evaluateOfficialPreview" in page
     assert "identityTargets(units.value)" in page
     assert "preliminary.some" not in page
-    assert "const coverageComplete = unit.complete && targetState.complete" in page
-    assert "missingTargets = coverageComplete ?" in page
+    assert "previewComplete(unit.officialPreview" in page
     assert "scanTargetParents(units.value)" in page
     assert "scanLibrary(" not in page
     assert "createEvidencePackages(top.map(unit => unit.root), histories.value)" in page
     assert "scanDownloadUnits(toScan, packages.length)" in page
     assert "Math.min(4, toScan.length)" in page
-    assert "MediaGovernor 4.0.0" in page
+    assert "MediaGovernor 4.1.0" in page
     assert "configuredDownloadRoots(downloadConfigurations)" in page
     assert "scope_verified: true" in page
-    assert "inspectTargetEvidence(units.value, targetAudit, libraryRoots)" in page
+    assert "libraryRootFor: path => libraryRootForPath(path, libraryRoots)" in page
     assert "createDownloadUnits(root, await list(root))" in page
     assert "createDownloadUnits(downloadConfigurations" not in page
     assert "src_fileitem" not in page
     assert "manualPreviewRequest" in page and "manualRebuildRequests" in page
+    assert "result.omitted" in page and "chars + cost > 24000" in page
+    assert "整理前后对比" in page
 
 
 def test_map_rejects_unverified_scope_and_discards_previous_schema():
@@ -155,14 +157,19 @@ def test_incremental_normal_commit_removes_only_that_units_stale_finding():
 
 def test_golden_fixtures_are_deidentified_and_cover_the_known_failure_contract():
     payload = json.loads(GOLDEN.read_text(encoding="utf-8"))
-    assert payload["schema"] == "mediagovernor-golden-fixture/v1"
+    assert payload["schema"] == "mediagovernor-golden-fixture/v2"
     assert len(payload["cases"]) >= 10
     def contains_real_path(value):
         if isinstance(value, dict):
-            return any(key.lower() in {"path", "src_fileitem", "dest_fileitem"} or contains_real_path(item) for key, item in value.items())
+            return any(
+                (key.lower() in {"src_fileitem", "dest_fileitem"})
+                or (key.lower() == "path" and (not isinstance(item, str) or not item.startswith("/fixture/")))
+                or (key.lower() != "path" and contains_real_path(item))
+                for key, item in value.items()
+            )
         if isinstance(value, list):
             return any(contains_real_path(item) for item in value)
-        return isinstance(value, str) and (value.startswith(("/", "\\")) or ":\\" in value)
+        return isinstance(value, str) and (value.startswith(("/", "\\")) or ":\\" in value) and not value.startswith("/fixture/")
     assert not contains_real_path(payload)
-    required = {"native-failure", "old-failure-recovered", "category-error", "season-error", "episode-error", "identity-error", "same-name-conflict", "partial-package", "manual-target-removed", "coverage-incomplete", "normal-media"}
+    required = {"normal-target-present", "native-failure", "wrong-category", "wrong-season", "wrong-episode", "wrong-identity", "incomplete-preview-abstains", "native-ai-conflict", "ai-unique-grounding", "anime-not-live-action", "multi-season-split", "movie-collection-split", "multi-root-download-split", "no-download-hash-auditable-not-executable", "one-work-one-finding"}
     assert required <= {item["id"] for item in payload["cases"]}
