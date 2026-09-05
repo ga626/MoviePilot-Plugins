@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { classifyFinding, createDownloadUnits, diffMap, fileFingerprint, strictEpisodeHints, summarizeUnit } from './governance.js'
+import { classifyFinding, createDownloadUnits, diffMap, fileFingerprint, libraryRootSnapshot, strictEpisodeHints, summarizeUnit } from './governance.js'
 
 test('下载区顶层目录和单文件各是一个真实下载单元，不按相似标题拼包', () => {
   const units = createDownloadUnits({ storage: 'local', path: '/downloads' }, [{ type: 'dir', path: '/downloads/A', name: 'A' }, { type: 'file', path: '/downloads/B.mkv', name: 'B.mkv' }, { type: 'file', name: 'note.txt' }])
@@ -10,6 +10,14 @@ test('下载区顶层目录和单文件各是一个真实下载单元，不按�
 test('文件指纹包含会随实际文件变动的名称、大小和时间', () => {
   assert.notEqual(fileFingerprint({ name: 'A.mkv', size: 1, modify_time: 'a' }), fileFingerprint({ name: 'A.mkv', size: 2, modify_time: 'a' }))
   assert.deepEqual(diffMap({ map_version: 1, download_units: [{ id: 'a', fingerprint: 'old' }] }, { download_units: [{ id: 'a', fingerprint: 'new' }, { id: 'b', fingerprint: 'x' }] }), { changed: ['a', 'b'], unchanged: 0, first: false })
+})
+
+test('地图只保存媒体库根摘要，不把海量子项塞进持久化状态', () => {
+  const roots = [{ storage: 'nas', path: '/library/movie', name: '电影', type: 'dir' }, { storage: 'nas', path: '/library/tv', name: '电视剧', type: 'dir' }]
+  const snapshot = libraryRootSnapshot(roots)
+  assert.equal(snapshot.length, 2)
+  assert.deepEqual(snapshot.map(item => item.category), ['电影', '电视剧'])
+  assert.equal(snapshot.some(item => item.id.includes('Episode')), false)
 })
 
 test('集号只接收明确集号，不把清晰度误读为集数', () => {

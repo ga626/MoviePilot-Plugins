@@ -56,9 +56,9 @@ class Request:
 def test_versions_assets_and_new_api_contract_are_synced():
     module = _load_plugin(); manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "3.0.2"
-    assert list(manifest["history"])[0] == "v3.0.2"
-    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v3.0.2/assets")
+    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "3.0.3"
+    assert list(manifest["history"])[0] == "v3.0.3"
+    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v3.0.3/assets")
     instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
     assert [row["path"] for row in instance.get_api()] == ["/map_status", "/map_snapshot", "/map_plan", "/map_commit", "/map_dirty", "/ai_probe", "/bundle_analyze_batch"]
     assert all(row["auth"] == "bear" for row in instance.get_api())
@@ -118,6 +118,11 @@ def test_frontend_starts_from_current_directories_not_failure_history_and_keeps_
     assert "preliminary.some" not in page
     assert "const coverageComplete = unit.complete && targetState.complete" in page
     assert "missingTargets = coverageComplete ?" in page
+    assert "scanTargetParents(units.value)" in page
+    assert "scanLibrary(" not in page
+    assert "scanDownloadUnits(toScan, top.length)" in page
+    assert "Math.min(4, toScan.length)" in page
+    assert "MediaGovernor 3.0.3" in page
 
 
 def test_golden_fixtures_are_deidentified_and_cover_the_known_failure_contract():

@@ -35,6 +35,18 @@ export function createDownloadUnits(root, children = []) {
   }))
 }
 
+/** 地图只持久化媒体库根摘要；具体存在性由整理历史指向的目标目录逐一核验。 */
+export function libraryRootSnapshot(roots = []) {
+  return roots.filter(root => root && typeof root === 'object').map(root => ({
+    id: `${root.storage || 'local'}:${root.path || root.name || ''}`,
+    root,
+    fingerprint: fileFingerprint(root),
+    video_count: 0,
+    episodes: [],
+    category: cleanTitle(root.name) || '媒体库根',
+  }))
+}
+
 export function summarizeUnit(unit = {}) {
   const episodeFiles = new Map(); let video_count = 0; let subtitle_count = 0; let nfo_count = 0
   for (const item of unit.entries || []) {
