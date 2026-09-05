@@ -56,9 +56,9 @@ class Request:
 def test_versions_assets_and_new_api_contract_are_synced():
     module = _load_plugin(); manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "3.1.0"
-    assert list(manifest["history"])[0] == "v3.1.0"
-    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v3.1.0/assets")
+    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "4.0.0"
+    assert list(manifest["history"])[0] == "v4.0.0"
+    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v4.0.0/assets")
     instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
     assert [row["path"] for row in instance.get_api()] == ["/map_status", "/map_snapshot", "/map_plan", "/map_commit", "/map_dirty", "/ai_probe", "/bundle_analyze_batch"]
     assert all(row["auth"] == "bear" for row in instance.get_api())
@@ -104,11 +104,11 @@ def test_events_only_mark_dirty_and_never_read_media_or_call_model():
     assert "storage/list" not in callback and "_model" not in callback
 
 
-def test_frontend_starts_from_current_directories_not_failure_history_and_keeps_official_preview_gate():
+def test_frontend_builds_evidence_packages_and_uses_only_declared_official_preview_fields():
     page, rules = PAGE.read_text(encoding="utf-8"), RULES.read_text(encoding="utf-8")
     for endpoint in ("storage/directories?directory_type=${kind}", "storage/list", "history/transfer?status=${status}", "plugin/MediaGovernor/map_snapshot", "plugin/MediaGovernor/map_commit", "plugin/MediaGovernor/bundle_analyze_batch", "media/recognize_file", "transfer/manual"):
         assert endpoint in page
-    assert "失败历史绝不直接" in page and "当前文件状态" in page
+    assert "历史只作关联" in page and "当前状态" in page
     assert "preview: true" in page and "preview: false" in page and "reorganize: false" in page
     assert "storage/delete" not in page and "fetch(" not in page
     for name in ("createDownloadUnits", "unitFingerprint", "diffMap", "classifyFinding"):
@@ -120,14 +120,17 @@ def test_frontend_starts_from_current_directories_not_failure_history_and_keeps_
     assert "missingTargets = coverageComplete ?" in page
     assert "scanTargetParents(units.value)" in page
     assert "scanLibrary(" not in page
-    assert "scanDownloadUnits(toScan, top.length)" in page
+    assert "createEvidencePackages(top.map(unit => unit.root), histories.value)" in page
+    assert "scanDownloadUnits(toScan, packages.length)" in page
     assert "Math.min(4, toScan.length)" in page
-    assert "MediaGovernor 3.1.0" in page
+    assert "MediaGovernor 4.0.0" in page
     assert "configuredDownloadRoots(downloadConfigurations)" in page
     assert "scope_verified: true" in page
     assert "inspectTargetEvidence(units.value, targetAudit, libraryRoots)" in page
     assert "createDownloadUnits(root, await list(root))" in page
     assert "createDownloadUnits(downloadConfigurations" not in page
+    assert "src_fileitem" not in page
+    assert "manualPreviewRequest" in page and "manualRebuildRequests" in page
 
 
 def test_map_rejects_unverified_scope_and_discards_previous_schema():

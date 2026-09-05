@@ -52,13 +52,13 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "以当前下载区与媒体库为准，找出真实整理问题并只经官方预览重建。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "3.1.0"
+    plugin_version = "4.0.0"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
     plugin_order = 99
     auth_level = 1
-    _map_schema = "3.3"
+    _map_schema = "4.0"
     _max_units, _max_nodes, _max_batch_units, _max_batch_chars = 2500, 30000, 12, 28000
     _max_cached_diagnoses, _request_timeout_seconds = 300, 45
 
@@ -80,7 +80,7 @@ class MediaGovernor(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> tuple[str, str]:
-        return "vue", "dist/v3.1.0/assets"
+        return "vue", "dist/v4.0.0/assets"
 
     def get_sidebar_nav(self) -> list[dict[str, Any]]:
         return []
@@ -184,6 +184,7 @@ class MediaGovernor(_PluginBase):
                 "video_count": int(row.get("video_count") or 0),
                 "status": self._safe_text(row.get("status"), 32),
                 "coverage": self._safe_text(row.get("coverage"), 32),
+                "boundary": self._safe_text(row.get("boundary"), 32),
             })
         findings: list[dict[str, Any]] = []
         for row in state.get("findings") or []:
@@ -235,13 +236,14 @@ class MediaGovernor(_PluginBase):
         raw_units, raw_library, raw_findings = body.get("download_units"), body.get("library_nodes"), body.get("findings")
         if not all(isinstance(value, list) for value in (raw_units, raw_library, raw_findings)): return None, "媒体地图缺少下载单元、媒体库或核对结果"
         if len(raw_units) > self._max_units or len(raw_library) > self._max_nodes: return None, "本轮地图超过安全上限，请分根目录建立地图"
-        units = self._bounded_rows(raw_units, self._max_units, {"id", "root", "fingerprint", "header_fingerprint", "video_count", "subtitle_count", "nfo_count", "episodes", "names", "history", "identity", "status", "label", "coverage"})
+        units = self._bounded_rows(raw_units, self._max_units, {"id", "root", "fingerprint", "header_fingerprint", "video_count", "subtitle_count", "nfo_count", "episodes", "names", "history", "identity", "status", "label", "coverage", "boundary"})
         library = self._bounded_rows(raw_library, self._max_nodes, {"id", "root", "fingerprint", "video_count", "episodes", "category", "names"})
         findings = self._bounded_rows(raw_findings, self._max_units, {"id", "unit_id", "kind", "reason", "status", "history_id", "current", "expected", "title", "strength"})
         for row in units + library: row["id"] = self._private_id(row.get("id") or row.get("root"))
         for row in units:
             row["label"] = self._safe_text(row.get("label"), 120)
             row["coverage"] = self._safe_text(row.get("coverage"), 32)
+            row["boundary"] = self._safe_text(row.get("boundary"), 32)
         for row in findings:
             row["id"] = self._private_id(row.get("id") or f"{row.get('unit_id')}:{row.get('kind')}")
             row["unit_id"] = self._private_id(row.get("unit_id")); row["title"] = self._safe_text(row.get("title"), 120); row["reason"] = self._safe_text(row.get("reason"), 220); row["kind"] = self._safe_text(row.get("kind"), 50)
@@ -255,7 +257,7 @@ class MediaGovernor(_PluginBase):
             units, findings, library = list(old_units.values()), old_findings + findings, self._runtime_map.get("library_nodes") or library
         coverage_in = body.get("coverage") if isinstance(body.get("coverage"), dict) else {}
         coverage = {self._safe_text(key, 40): int(value or 0) for key, value in coverage_in.items() if isinstance(value, (int, float, bool))}
-        return {"schema": self._map_schema, "map_version": int((self._runtime_map or {}).get("map_version") or 0) + 1, "updated_at": datetime.now(timezone.utc).isoformat(), "baseline": bool(body.get("baseline")), "scan_kind": "baseline" if body.get("baseline") else "incremental", "download_units": units, "library_nodes": library, "findings": findings, "coverage": coverage, "history_summary": self._bounded_rows(body.get("history_summary"), self._max_units, {"id", "mode", "status", "media_source", "media_id", "unit_id", "target"})}, ""
+        return {"schema": self._map_schema, "map_version": int((self._runtime_map or {}).get("map_version") or 0) + 1, "updated_at": datetime.now(timezone.utc).isoformat(), "baseline": bool(body.get("baseline")), "scan_kind": "baseline" if body.get("baseline") else "incremental", "download_units": units, "library_nodes": library, "findings": findings, "coverage": coverage, "history_summary": self._bounded_rows(body.get("history_summary"), self._max_units, {"id", "mode", "status", "media_source", "media_id", "unit_id", "target", "download_hash"})}, ""
 
     async def api_map_commit(self, request: Request) -> MapResponse:
         if not self._enabled: return MapResponse(success=False, message="媒体治理插件未启用")
