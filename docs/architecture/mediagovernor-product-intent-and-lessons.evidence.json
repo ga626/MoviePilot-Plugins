@@ -1,58 +1,66 @@
 {
-  "schema": "mediagovernor-archaeology-evidence/v1",
+  "schema": "mediagovernor-archaeology-evidence/v2",
   "artifact": {
     "report_path": "docs/architecture/mediagovernor-product-intent-and-lessons.md",
-    "created_at": "2026-09-05T00:00:00+08:00",
-    "purpose": "汇总已确认的产品意图、架构方向和开发错误，不实现功能。"
+    "updated_at": "2026-09-05T00:00:00+08:00",
+    "purpose": "重整产品意图、实际运行链路、可证实能力和失败复盘；不实现功能。"
   },
   "sources": [
     {
       "id": "S1",
       "type": "conversation",
-      "title": "当前对话与关联前序任务记录",
       "facts_used": [
-        "用户持续确认原生整理为第一道系统、插件为最终兜底。",
-        "用户要同时发现真正失败和表面成功但错误的整理。",
-        "用户要求只显示问题、先预览、确认后官方重建硬链接。",
-        "用户否定了以历史 47 条、假候选和反复安装试错为核心的路线。"
+        "用户确认原生整理加 MediaGovernor 为长期两道系统，已关闭独立 AI识别增强插件。",
+        "用户只要发现原生真失败和表面成功但错误，并在预览确认后由官方重建硬链接。",
+        "用户拒绝把安装当作基本功能的首次测试。"
       ],
       "strength": "strong"
     },
     {
       "id": "S2",
-      "type": "local_document",
+      "type": "local_plugin_code",
       "paths": [
-        "docs/architecture/media-governor-scope.md",
-        "docs/architecture/mediagovernor-v1.1-readonly-reassessment.md",
-        "docs/architecture/mediagovernor-v1.1-runtime-failure-reassessment.md",
-        "docs/architecture/mediagovernor-event-driven-fallback-design.md",
-        "docs/architecture/mediagovernor-media-map-final-design.md",
-        "docs/architecture/mediagovernor-product-reset-research-2026-09-05.md"
+        "plugins.v3/mediagovernor/src/components/AppPage.vue",
+        "plugins.v3/mediagovernor/src/lib/governance.js",
+        "plugins.v3/mediagovernor/src/lib/audit-evaluator.js",
+        "plugins.v3/mediagovernor/__init__.py"
       ],
       "facts_used": [
-        "范围、安全边界、媒体地图、事件与对账、AI 降级、预览和受控重建的收敛设计。",
-        "47 条、耗时、重复候选和零 finding 的运行复盘。"
+        "当前版本每次读取目录配置与成功/失败历史，以顶层文件夹或视频临时分包，递归读取受限目录摘要。",
+        "当前原生识别只抽取代表视频路径；AI只接收受限的文件名、类型、层级和统计，且只在原生弃权时运行。",
+        "当前规则/金标准验证的是构造输入的一致性，不是NAS真实媒体结论。"
       ],
       "strength": "strong"
     },
     {
       "id": "S3",
-      "type": "local_code",
+      "type": "local_moviepilot_v3_code",
       "paths": [
-        "plugins.v3/mediagovernor/src/components/AppPage.vue",
-        "plugins.v3/mediagovernor/src/lib/governance.js",
-        "plugins.v3/mediagovernor/src/lib/governance.test.mjs"
+        "../MoviePilot/app/api/endpoints/storage.py",
+        "../MoviePilot/app/api/endpoints/history.py",
+        "../MoviePilot/app/api/endpoints/media.py",
+        "../MoviePilot/app/chain/media/path.py",
+        "../MoviePilot/app/db/models/transferhistory.py",
+        "../MoviePilot/app/schemas/history.py"
       ],
       "facts_used": [
-        "当前 AI 仅处理 preliminary finding，问题分类和测试不能证明假成功已被完整发现。"
+        "目录接口提供当前配置和FileItem列表；历史包含源/目标、状态、媒体身份和download_hash。",
+        "recognize_file依据文件路径和文件名解析媒体信息，不读取视频内容。",
+        "历史是过去整理的记录，不构成当前文件状态证明。"
       ],
       "strength": "strong"
     },
     {
       "id": "S4",
-      "type": "git_history",
+      "type": "local_tests_and_git_history",
+      "paths": [
+        "plugins.v3/mediagovernor/src/lib/*.test.mjs",
+        "tests/v3/mediagovernor/fixtures/golden/v1/cases.json",
+        "plugins.v3/mediagovernor/scripts/run-golden.mjs"
+      ],
       "facts_used": [
-        "从 v0.1.0 到 v3.0.0 的连续 PR/Release 显示，范围、AI、审计、地图和修复多次在真实安装反馈后同时调整。"
+        "现有20项合同测试及14个虚构金标准案例均可通过，但样本未使用真实媒体或NAS调用。",
+        "连续PR/安装反馈证明构建、页面加载和局部测试不能替代端到端产品验收。"
       ],
       "strength": "strong"
     }
@@ -60,29 +68,29 @@
   "claims": [
     {
       "id": "C1",
-      "claim": "MediaGovernor 的最终定位是原生整理后的质量保障，而不是替代原生整理。",
-      "sources": ["S1", "S2"]
+      "claim": "产品唯一目标是原生整理后的两类质量问题：真失败与表面成功但错误；当前事实和官方预览优先于历史。",
+      "sources": ["S1", "S2", "S3"]
     },
     {
       "id": "C2",
-      "claim": "产品必须同时处理真正失败和表面成功但错误两类问题，判断以当前事实与官方预览为准。",
-      "sources": ["S1", "S2", "S3"]
+      "claim": "顶层目录不是可靠下载任务边界；download_hash可增强已有历史的归属，但无历史文件不能被伪造为已精确分包。",
+      "sources": ["S2", "S3"]
     },
     {
       "id": "C3",
-      "claim": "反复失败的共因是缺少金标准验收、把历史/顶层目录当真实对象、并让 AI 与规则在错误的位置决定结论。",
-      "sources": ["S1", "S2", "S3", "S4"]
+      "claim": "AI与路径识别只能提供候选；可执行结论必须经过完整证据、可用身份、官方逐文件预览和当前结果比对。",
+      "sources": ["S1", "S2", "S3"]
     },
     {
       "id": "C4",
-      "claim": "后续开发必须分层、先 fixture 后 NAS、先预览后执行；无法确认必须显式呈现。",
-      "sources": ["S1", "S2", "S3"]
+      "claim": "任何待安装候选都必须先由同一正式编排代码通过脱敏端到端判卷，再做最小真实宿主验收。",
+      "sources": ["S1", "S2", "S4"]
     }
   ],
   "boundaries": [
-    "本轮未读取真实媒体、下载目录、数据库、Cookie 或 NAS 日志。",
-    "报告不把过去的设计或发布记录当作当前版本已经实现用户目标的证明。",
-    "用户会话可见记录和本仓材料足以归纳产品意图；未对不可见的已删除/不可读取历史作推断。"
+    "本轮没有读取真实媒体、下载目录、数据库、Cookie、NAS日志或执行任何媒体写入。",
+    "本轮KnowledgeRadar原生工具未注入当前Codex对话，本机也没有可用命令入口；外部搜索未作为结论证据。",
+    "报告区分当前源码事实、目标架构和待验证合同，不把历史设计或安装记录当作当前功能可用证明。"
   ],
   "code_modified": false
 }

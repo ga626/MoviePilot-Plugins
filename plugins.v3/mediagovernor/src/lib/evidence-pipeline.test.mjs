@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { appendTreeEvidence, createEvidencePackages, packageEvidence, repairAdmission } from './evidence-pipeline.js'
+
+const roots = [
+  { type: 'file', storage: 'local', path: '/download/A.E01.mkv', name: 'A.E01.mkv' },
+  { type: 'file', storage: 'local', path: '/download/A.E02.mkv', name: 'A.E02.mkv' },
+  { type: 'dir', storage: 'local', path: '/download/Mixed', name: 'Mixed' },
+]
+
+test('同一下载任务编号合并散文件；无编号顶层目录保持临时边界', () => {
+  const packages = createEvidencePackages(roots, [
+    { id: 1, status: false, download_hash: 'task-a', src: '/download/A.E01.mkv' },
+    { id: 2, status: false, download_hash: 'task-a', src: '/download/A.E02.mkv' },
+  ])
+  const hashed = packages.find(item => item.boundary === 'download_hash')
+  const fallback = packages.find(item => item.boundary === 'top_level')
+  assert.equal(hashed.roots.length, 2)
+  assert.equal(fallback.root.name, 'Mixed')
+})
+
+test('证据未读全时不可自动重建；完整且身份、预览、历史齐备才放行', () => {
+  const pkg = appendTreeEvidence({ id: 'p', root: roots[0], roots: [roots[0]], boundary: 'download_hash', history: [{ id: 9, status: true, src: roots[0].path }] }, [{ complete: true, entries: [roots[0]] }])
+  assert.equal(packageEvidence(pkg).video_count, 1)
+  assert.equal(repairAdmission(pkg, { media_source: 'tmdb', media_id: '1' }, { summary: { total: 1, failed: 0 } }).allowed, true)
+  assert.equal(repairAdmission({ ...pkg, complete: false }, { media_source: 'tmdb', media_id: '1' }, { summary: { total: 1, failed: 0 } }).allowed, false)
+})
+
+test('真正失败没有旧成功目标时只建立新硬链接，不猜测删除对象', () => {
+  const pkg = appendTreeEvidence({ id: 'p', root: roots[0], roots: [roots[0]], boundary: 'download_hash', history: [{ id: 10, status: false, src: roots[0].path }] }, [{ complete: true, entries: [roots[0]] }])
+  const admission = repairAdmission(pkg, { media_source: 'tmdb', media_id: '1' }, { summary: { total: 1, failed: 0 } })
+  assert.equal(admission.allowed, true)
+  assert.equal(admission.mode, 'create')
+})

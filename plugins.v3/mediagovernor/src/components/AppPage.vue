@@ -4,6 +4,8 @@ import { cleanTitle, configuredDownloadRoots, configuredLibraryRoots, createDown
 import { evaluateUnitAudit } from '../lib/audit-evaluator.js'
 import { aiFallbackTargets, identityTargets } from '../lib/diagnostic-plan.js'
 import { normaliseHistoryRows, shortTitle, unwrapMoviePilotResponse } from '../lib/moviepilot-response.js'
+import { appendTreeEvidence, createEvidencePackages, packageEvidence, repairAdmission } from '../lib/evidence-pipeline.js'
+import { manualPreviewRequest, manualRebuildRequests } from '../lib/manual-transfer.js'
 
 const props = defineProps({ api: { type: Object, default: () => ({}) } })
 const state = ref({ ready: false, updated_at: '', download_units: 0, library_nodes: 0, findings: 0, dirty: 0 })
@@ -92,7 +94,10 @@ async function scanTargetParents(allUnits) {
   }
   return { states, parentCount: parents.length, readFailures }
 }
-function modelEvidence(unit, summary) { return { title_hints: summary.names, entries: unit.entries.slice(0, 500).map(item => ({ name: safe(item.name), type: item.type, depth: item.depth })), video_count: summary.video_count, episodes: summary.episodes } }
+function modelEvidence(unit, summary) {
+  const evidence = packageEvidence(unit)
+  return { title_hints: evidence.title_hints, entries: evidence.entries.map(item => ({ ...item, name: safe(item.name) })), video_count: evidence.video_count, episodes: summary.episodes, boundary: evidence.boundary, ai_truncated: evidence.ai_truncated }
+}
 async function askAi(candidates) {
   if (!candidates.length || aiAvailable.value === false) return new Map()
   phase.value = `让智能助手复核 ${candidates.length} 个无法靠原生识别确认的单元`
@@ -112,7 +117,7 @@ function diagnosisFromCandidate(raw) {
   const type = String(value.type || value.media_type || value.mtype || '').toLowerCase()
   const mediaType = /tv|series|电视剧|剧集|动漫|动画/.test(type) ? 'tv' : /movie|film|电影/.test(type) ? 'movie' : 'unknown'
   const season = Number(value.season || value.season_number || 0) || 0
-  return { title, original_title: shortTitle(value.original_title || value.originalName), year: String(value.year || ''), media_type: mediaType, season, confidence: title ? 0.8 : 0, abstain: !title }
+  return { title, original_title: shortTitle(value.original_title || value.originalName), year: String(value.year || ''), media_type: mediaType, season, media_source: value.media_source || value.source || '', media_id: String(value.media_id || value.id || ''), confidence: title ? 0.8 : 0, abstain: !title }
 }
 async function identifyUnits() {
   const target = identityTargets(units.value)
@@ -123,9 +128,13 @@ async function identifyUnits() {
     while (!stopped.value) {
       const index = cursor; cursor += 1
       if (index >= target.length) return
-      const unit = target[index]; const sample = unit.entries.find(item => videoPattern.test(item?.name || '')) || unit.root
-      try { unit.diagnosis = diagnosisFromCandidate(await get(`media/recognize_file?path=${encodeURIComponent(sample?.path || unit.root?.path || '')}`)) }
-      catch { unit.diagnosis = { abstain: true, confidence: 0, title: '', media_type: 'unknown' } }
+      const unit = target[index]; const samples = unit.entries.filter(item => videoPattern.test(item?.name || '') && item?.path).slice(0, 3)
+      try {
+        const candidates = await Promise.all(samples.map(async sample => diagnosisFromCandidate(await get(`media/recognize_file?path=${encodeURIComponent(sample.path)}`))))
+        const usable = candidates.filter(candidate => !candidate.abstain)
+        const identities = [...new Set(usable.map(candidate => `${candidate.media_source}:${candidate.media_id || cleanTitle(candidate.title)}`))]
+        unit.diagnosis = usable.length && identities.length === 1 ? usable[0] : { abstain: true, confidence: 0, title: '', media_type: 'unknown', conflict: usable.length > 1 }
+      } catch { unit.diagnosis = { abstain: true, confidence: 0, title: '', media_type: 'unknown' } }
       progress.value.done += 1; phase.value = `核验作品身份：${index + 1}/${target.length}`; progress.value.current = '每个有整理关系的下载单元都先走 MoviePilot 原生识别；不再等规则先报错。'
     }
   }
@@ -189,9 +198,9 @@ async function scanDownloadUnits(toScan, total) {
       if (index >= toScan.length) return
       const unit = toScan[index]
       try {
-        const tree = await walk(unit.root)
-        unit.entries = tree.entries; unit.complete = tree.complete; unit.summary = summarizeUnit(unit); unit.history = sourceRowsFor(unit, histories.value); unit.id = keyOf(unit.root)
-      } catch { unit.entries = []; unit.complete = false; unit.summary = summarizeUnit(unit); unit.history = []; unit.id = keyOf(unit.root) }
+        const trees = await Promise.all((unit.roots || [unit.root]).map(root => walk(root)))
+        Object.assign(unit, appendTreeEvidence(unit, trees)); unit.summary = summarizeUnit(unit)
+      } catch { unit.entries = []; unit.complete = false; unit.summary = summarizeUnit(unit) }
       results[index] = unit; progress.value.done += 1; phase.value = `读取下载单元：${progress.value.done}/${total}`; progress.value.current = '最多同时读取 4 个下载单元；读不到的目录会保留为尚未覆盖。'
     }
   }
@@ -206,15 +215,16 @@ async function buildMap(full = false) {
     histories.value = [...failed, ...successful]
     const scope = configuredDownloadRoots(downloadConfigurations)
     if (!scope.roots.length) throw new Error('没有可用下载目录：拒绝扫描空路径或容器根目录')
-    phase.value = '验证下载目录并读取顶层下载包'; const discovered = []
+    phase.value = '验证下载目录并读取顶层下载项目'; const discovered = []
     for (const root of scope.roots) { if (stopped.value) break; discovered.push(...createDownloadUnits(root, await list(root))) }
     const top = [...new Map(discovered.map(unit => [keyOf(unit.root), unit])).values()]
+    const packages = createEvidencePackages(top.map(unit => unit.root), histories.value)
     const libraryRoots = configuredLibraryRoots(libraryConfigurations)
     const initial = !state.value.ready || full
-    const plan = initial ? { unchanged: [] } : await post('plugin/MediaGovernor/map_plan', { units: top.map(unit => ({ id: keyOf(unit.root), fingerprint: rootFingerprint([unit.root]) })) })
-    const toScan = initial ? top : top.filter(unit => !new Set(plan.unchanged || []).has(keyOf(unit.root)))
-    progress.value.total = toScan.length; progress.value.current = initial ? `发现 ${top.length} 个当前下载单元；历史记录只用来关联，不当成问题数。` : `发现 ${top.length} 个下载单元，其中 ${toScan.length} 个发生变动，需要深度复核。`
-    await scanDownloadUnits(toScan, top.length)
+    const plan = initial ? { unchanged: [] } : await post('plugin/MediaGovernor/map_plan', { units: packages.map(unit => ({ id: unit.id, fingerprint: rootFingerprint(unit.roots) })) })
+    const toScan = initial ? packages : packages.filter(unit => !new Set(plan.unchanged || []).has(unit.id))
+    progress.value.total = toScan.length; progress.value.current = initial ? `发现 ${top.length} 个顶层项目，归为 ${packages.length} 个下载包；历史只用来关联，不当成问题数。` : `发现 ${packages.length} 个下载包，其中 ${toScan.length} 个发生变动，需要深度复核。`
+    await scanDownloadUnits(toScan, packages.length)
     const libraryNodes = libraryRootSnapshot(libraryRoots)
     const targetAudit = await scanTargetParents(units.value)
     await identifyUnits()
@@ -228,6 +238,7 @@ async function buildMap(full = false) {
     for (const unit of units.value) {
       if (!unit.complete) { refined.push({ unit_id: unit.id, title: cleanTitle(unit.root?.name) || '未命名下载单元', kind: 'uncovered', reason: '当前下载单元未完整读取，暂不能下结论', strength: 'review' }); continue }
       if (!unit.summary.video_count) continue
+      if (unit.boundary !== 'download_hash') refined.push({ unit_id: unit.id, title: cleanTitle(unit.root?.name) || '未命名下载单元', kind: 'unconfirmed', reason: unit.boundary_reason || '下载包边界没有得到下载任务编号确认，不能自动重建', strength: 'review' })
       const diagnosis = unit.diagnosis
       const targetState = targetAudit.states.get(unit.id) || { expected: targetPaths(unit.history), present: new Map(), complete: true }
       const coverageComplete = unit.complete && targetState.complete
@@ -244,7 +255,7 @@ async function buildMap(full = false) {
     if (!stopped.value) {
       const linkedUnits = units.value.filter(unit => unit.history.length).length
       const unmatchedFailed = failed.filter(item => !linkedHistoryIds.has(String(item?.id || ''))).length
-      const commit = await post('plugin/MediaGovernor/map_commit', { baseline: initial, partial: !initial, scope_verified: true, download_units: units.value.map(unit => ({ id: unit.id, root: unit.root, label: cleanTitle(unit.root?.name) || '未命名下载单元', fingerprint: unit.summary.fingerprint, header_fingerprint: rootFingerprint([unit.root]), video_count: unit.summary.video_count, subtitle_count: unit.summary.subtitle_count, nfo_count: unit.summary.nfo_count, episodes: unit.summary.episodes, names: unit.summary.names, history: unit.history.map(row => row.id), status: 'checked', coverage: unit.complete ? 'complete' : 'uncovered' })), library_nodes: libraryNodes, findings: findings.value, coverage: { configured_download_roots: scope.roots.length, rejected_download_roots: scope.rejected.length, download_units: top.length, scanned_units: units.value.length, library_roots: libraryNodes.length, target_parent_dirs: targetAudit.parentCount, target_parent_read_failures: targetAudit.readFailures, failed_history: failed.length, successful_history: successful.length, linked_units: linkedUnits, unlinked_units: units.value.length - linkedUnits, unmatched_failed_history: unmatchedFailed, uncovered_units: uncoveredCount.value }, history_summary: histories.value.map(row => ({ id: row.id, status: row.status, mode: row.mode, media_source: row.media_source, media_id: row.media_id, target: destinationPath(row) })) })
+      const commit = await post('plugin/MediaGovernor/map_commit', { baseline: initial, partial: !initial, scope_verified: true, download_units: units.value.map(unit => ({ id: unit.id, root: unit.root, label: cleanTitle(unit.root?.name) || '未命名下载单元', fingerprint: unit.summary.fingerprint, header_fingerprint: rootFingerprint(unit.roots), video_count: unit.summary.video_count, subtitle_count: unit.summary.subtitle_count, nfo_count: unit.summary.nfo_count, episodes: unit.summary.episodes, names: unit.summary.names, history: unit.history.map(row => row.id), boundary: unit.boundary, coverage: unit.complete ? 'complete' : 'uncovered' })), library_nodes: libraryNodes, findings: findings.value, coverage: { configured_download_roots: scope.roots.length, rejected_download_roots: scope.rejected.length, download_units: packages.length, scanned_units: units.value.length, library_roots: libraryNodes.length, target_parent_dirs: targetAudit.parentCount, target_parent_read_failures: targetAudit.readFailures, failed_history: failed.length, successful_history: successful.length, linked_units: linkedUnits, unlinked_units: units.value.length - linkedUnits, unmatched_failed_history: unmatchedFailed, uncovered_units: uncoveredCount.value }, history_summary: histories.value.map(row => ({ id: row.id, status: row.status, mode: row.mode, media_source: row.media_source, media_id: row.media_id, target: destinationPath(row), download_hash: row.download_hash })) })
       state.value = { ...state.value, ...commit }
       const snapshot = await get('plugin/MediaGovernor/map_snapshot')
       findings.value = Array.isArray(snapshot?.findings) ? snapshot.findings : findings.value
@@ -258,19 +269,35 @@ function dedupe(rows) { const map = new Map(); for (const row of rows) { const k
 function titleFor(card) { const unit = units.value.find(item => item.id === card.unit_id); return card?.title || cleanTitle(unit?.root?.name) || '未命名下载单元' }
 async function recognize(card) {
   const unit = units.value.find(item => item.id === card.unit_id)
-  if (!unit?.root?.path) { notice.value = '这条是已保存的地图结论。为确保预览使用当前文件状态，请先执行一次复核当前变动。'; return }
-  selected.value = { card, unit, candidate: null, error: '' }
-  try { selected.value.candidate = await get(`media/recognize_file?path=${encodeURIComponent(unit.root.path)}`) } catch { selected.value.error = 'MoviePilot 当前无法给出原生候选；可在官方整理页补充准确作品名后再预览。' }
+  if (!unit?.root?.path) { notice.value = '这是上次保存的结论。请先重新读取当前状态，再生成预览。'; return }
+  selected.value = { card, unit, candidate: unit.diagnosis || null, error: '', preview_payload: null, admission: null }
+  if (!selected.value.candidate || selected.value.candidate.abstain) selected.value.error = '当前证据没有得到唯一作品身份；不能生成或执行官方预览。'
 }
 function previewPayload() {
-  const row = selected.value?.unit?.history?.find(item => item?.id === selected.value?.card?.history_id) || selected.value?.unit?.history?.at(-1)
-  const candidate = selected.value?.candidate?.media_info || selected.value?.candidate?.mediaInfo || selected.value?.candidate || {}
-  return { logid: row?.id, media_source: candidate.media_source || candidate.source, media_id: candidate.media_id || candidate.id, type_name: candidate.type || candidate.mtype, src_fileitem: selected.value?.unit?.root, preview: true, reorganize: false }
+  return manualPreviewRequest(selected.value?.unit, selected.value?.candidate)
 }
-async function makePreview() { try { preview.value = await post('transfer/manual', previewPayload()) } catch (error) { fail(error, '官方预览没有生成；没有删除或重建任何硬链接。') } }
+async function makePreview() {
+  try {
+    const base = previewPayload()
+    if (!base.fileitems.length || !base.media_source || !base.media_id) throw new Error('缺少经 MoviePilot 确认的作品身份或视频文件')
+    const target = await post('transfer/manual/target-path', base)
+    if (!target?.target_path || !target?.target_storage) throw new Error('MoviePilot 没有为这批文件给出唯一媒体库目标')
+    const payload = { ...base, ...target, preview: true, reorganize: false }
+    preview.value = await post('transfer/manual', payload)
+    selected.value.preview_payload = payload
+    selected.value.admission = repairAdmission(selected.value.unit, selected.value.candidate, preview.value)
+  } catch (error) { fail(error, '官方预览没有生成；没有删除或重建任何硬链接。') }
+}
 async function repair() {
-  if (!window.confirm('确认按 MoviePilot 官方预览重建这个下载单元吗？这会由官方清理旧整理结果并重新建立硬链接。')) return
-  try { const payload = { ...previewPayload(), preview: false, reorganize: false }; await post('transfer/manual', payload); notice.value = '官方已接收重建任务。请重新复核此下载单元，确认预览与实际一致后问题才会关闭。'; preview.value = null; selected.value = null } catch (error) { fail(error, '官方没有执行重建；旧硬链接没有被本插件直接删除。') }
+  const admission = selected.value?.admission
+  if (!admission?.allowed) { notice.value = admission?.reason || '当前预览不满足安全重建条件。'; return }
+  if (!window.confirm(`确认按本次官方预览重建吗？${admission.reason}。原始下载不会被删除。`)) return
+  try {
+    if (admission.mode === 'create') await post('transfer/manual', { ...selected.value.preview_payload, preview: false, reorganize: false })
+    else for (const payload of manualRebuildRequests(admission.history_ids, selected.value.candidate)) await post('transfer/manual', payload)
+    notice.value = 'MoviePilot 已接收逐项重建。现在会重新读取当前状态；只有实际结果等于预览，问题才会关闭。'
+    preview.value = null; selected.value = null; await buildMap(true)
+  } catch (error) { fail(error, '官方没有完成全部重建；插件没有直接删除原始下载。请重新读取当前状态。') }
 }
 async function probeAi() { try { const result = await post('plugin/MediaGovernor/ai_probe', {}); aiAvailable.value = Boolean(result.available); notice.value = aiAvailable.value ? '智能助手可用：只会复核规则无法确认的异常单元。' : '智能助手未返回可用状态。' } catch (error) { aiAvailable.value = false; fail(error, '智能助手不可用，仍可建立地图和检查规则问题。') } }
 onMounted(status)
@@ -278,7 +305,7 @@ onMounted(status)
 
 <template>
   <main class="governor-page">
-    <section class="hero"><div><p class="eyebrow">MediaGovernor 3.1.0</p><h1>先验证范围，再找真实问题</h1><p>只读取 MoviePilot 配置的下载目录；失败历史绝不直接当问题，必须核对当前文件状态。成功记录也会核对实际目标文件和目录。</p></div><div class="actions"><button class="secondary" :disabled="running" @click="probeAi">测试智能助手</button><button class="primary" :disabled="running" @click="buildMap(!state.ready)">{{ state.ready ? '复核当前变动' : '建立完整地图' }}</button></div></section>
+    <section class="hero"><div><p class="eyebrow">MediaGovernor 4.0.0</p><h1>先建立证据，再找真实问题</h1><p>每次读取当前目录配置；下载任务编号优先分包，边界不确定就锁定自动重建。历史只作关联，不是问题数量。</p></div><div class="actions"><button class="secondary" :disabled="running" @click="probeAi">测试智能助手</button><button class="primary" :disabled="running" @click="buildMap(true)">{{ state.ready ? '重新读取当前状态' : '建立完整地图' }}</button></div></section>
     <section class="summary"><span><b>{{ state.download_units }}</b>下载单元</span><span><b>{{ state.library_nodes }}</b>媒体库根</span><span><b>{{ state.findings }}</b>上次结论</span><span><b>{{ state.dirty }}</b>待复核变动</span></section>
     <section v-if="running || progress.total" class="progress"><div><b>{{ phase }}</b><button v-if="running" class="link" @click="stop">停止</button></div><p>{{ progress.current }}</p><i><em :style="{ width: `${percent}%` }"></em></i><small>{{ progress.done }}/{{ progress.total }} · {{ elapsedLabel }}</small></section>
     <p v-if="notice" class="notice">{{ notice }}</p>
@@ -286,7 +313,7 @@ onMounted(status)
       <p v-if="!cards.length" class="empty">{{ running ? '正在核对，还没有形成结论。' : state.ready ? '本轮地图完整且没有异常结论。' : '首次使用请先建立完整地图。' }}</p>
       <article v-for="card in cards" :key="`${card.unit_id}-${card.kind}-${card.reason}`" class="card"><div><span class="kind">{{ findingLabel(card.kind) }}</span><h3>{{ titleFor(card) }}</h3><p>{{ card.reason }}</p><small>{{ card.kind === 'unconfirmed' || card.kind === 'uncovered' ? '它没有被算作正常，也不会自动修复。' : '这是当前状态核对结果，不是历史失败数量。' }}</small></div><button class="primary" @click="recognize(card)">{{ card.kind === 'unconfirmed' || card.kind === 'uncovered' ? '复核后查看预览' : '查看并预览修复' }}</button></article>
     </section>
-    <div v-if="selected" class="backdrop"><section class="modal"><button class="close" @click="selected = null; preview = null">×</button><p class="eyebrow">先确认，再预览</p><h2>{{ titleFor(selected.card) }}</h2><p>{{ selected.card.reason }}</p><div v-if="selected.candidate" class="candidate"><b>{{ selected.candidate?.media_info?.title || selected.candidate?.title || '原生候选' }}</b><span>{{ selected.candidate?.media_info?.year || selected.candidate?.year || '' }}</span></div><p v-if="selected.error" class="warning">{{ selected.error }}</p><button class="primary" @click="makePreview">生成 MoviePilot 官方逐文件预览</button><div v-if="preview" class="preview"><h3>官方预览已生成</h3><p>请核对官方列出的源文件与目标位置。确认无误后才会交给 MoviePilot 清理旧整理结果并重建硬链接。</p><details><summary>查看官方预览数据</summary><pre>{{ JSON.stringify(previewForDisplay(preview), null, 2) }}</pre></details><button class="danger" @click="repair">确认按此预览重建</button></div></section></div>
+    <div v-if="selected" class="backdrop"><section class="modal"><button class="close" @click="selected = null; preview = null">×</button><p class="eyebrow">先确认，再预览</p><h2>{{ titleFor(selected.card) }}</h2><p>{{ selected.card.reason }}</p><div class="candidate"><b>下载包边界：{{ selected.unit.boundary_reason }}</b><span>文件证据：{{ selected.unit.complete ? '完整读取' : '未完整读取' }} · {{ selected.unit.summary?.video_count || 0 }} 个视频文件</span></div><div v-if="selected.candidate && !selected.candidate.abstain" class="candidate"><b>{{ selected.candidate.title || selected.candidate.original_title }}</b><span>{{ selected.candidate.year }} · {{ selected.candidate.media_type }} · MoviePilot 身份 {{ selected.candidate.media_source }} / {{ selected.candidate.media_id }}</span></div><p v-if="selected.error" class="warning">{{ selected.error }}</p><button class="primary" :disabled="Boolean(selected.error)" @click="makePreview">生成 MoviePilot 官方逐文件预览</button><div v-if="preview" class="preview"><h3>官方预览已生成</h3><p>请核对官方列出的源文件与目标位置。确认无误后才会交给 MoviePilot 清理旧整理结果并重建硬链接。</p><details><summary>查看官方预览数据</summary><pre>{{ JSON.stringify(previewForDisplay(preview), null, 2) }}</pre></details><p class="warning">{{ selected.admission?.reason }}</p><button class="danger" :disabled="!selected.admission?.allowed" @click="repair">确认按此预览重建</button></div></section></div>
   </main>
 </template>
 
