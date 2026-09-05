@@ -25,3 +25,9 @@ test('未覆盖与身份不确定都不能被报告为正常', () => {
   assert.equal(result.disposition, 'uncovered')
   assert.notEqual(result.disposition, 'normal')
 })
+
+test('没有关联历史的下载单元必须留下无法确认结论，不能静默归零', () => {
+  const result = evaluateUnitAudit({ unit: { id: 'unlinked', root: { name: 'Unlinked' }, entries: [{ name: 'Unlinked.mkv' }] }, history: [], coverageComplete: true, identityRequired: true })
+  assert.equal(result.disposition, 'unconfirmed')
+  assert.equal(result.findings[0].kind, 'unconfirmed')
+})

@@ -52,13 +52,13 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "以当前下载区与媒体库为准，找出真实整理问题并只经官方预览重建。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "3.0.1"
+    plugin_version = "3.0.2"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
     plugin_order = 99
     auth_level = 1
-    _map_schema = "3.0"
+    _map_schema = "3.1"
     _max_units, _max_nodes, _max_batch_units, _max_batch_chars = 2500, 30000, 12, 28000
     _max_cached_diagnoses, _request_timeout_seconds = 300, 45
 
@@ -80,7 +80,7 @@ class MediaGovernor(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> tuple[str, str]:
-        return "vue", "dist/v3.0.1/assets"
+        return "vue", "dist/v3.0.2/assets"
 
     def get_sidebar_nav(self) -> list[dict[str, Any]]:
         return []
@@ -96,6 +96,7 @@ class MediaGovernor(_PluginBase):
     def get_api(self) -> list[dict[str, Any]]:
         return [
             {"path": "/map_status", "endpoint": self.api_map_status, "methods": ["GET"], "auth": "bear", "summary": "读取媒体地图脱敏状态", "response_model": MapResponse},
+            {"path": "/map_snapshot", "endpoint": self.api_map_snapshot, "methods": ["GET"], "auth": "bear", "summary": "读取可展示的媒体地图结论", "response_model": MapResponse},
             {"path": "/map_plan", "endpoint": self.api_map_plan, "methods": ["POST"], "auth": "bear", "summary": "判断哪些下载单元需要深度复核", "response_model": MapResponse},
             {"path": "/map_commit", "endpoint": self.api_map_commit, "methods": ["POST"], "auth": "bear", "summary": "保存一次当前文件地图", "response_model": MapResponse},
             {"path": "/map_dirty", "endpoint": self.api_map_dirty, "methods": ["GET", "POST"], "auth": "bear", "summary": "读取或标记待对账项", "response_model": MapResponse},
@@ -166,6 +167,44 @@ class MediaGovernor(_PluginBase):
     async def api_map_status(self) -> MapResponse:
         return MapResponse(success=True, data=self._map_summary())
 
+    def _public_snapshot(self) -> dict[str, Any]:
+        """结果页只需要可解释的名称和计数，绝不返回路径、FileItem 或历史原文。"""
+        state = self._runtime_map or {}
+        units: list[dict[str, Any]] = []
+        labels: dict[str, str] = {}
+        for row in state.get("download_units") or []:
+            if not isinstance(row, dict):
+                continue
+            unit_id = self._safe_text(row.get("id"), 64)
+            label = self._safe_text(row.get("label"), 120) or "未命名下载单元"
+            labels[unit_id] = label
+            units.append({
+                "id": unit_id,
+                "label": label,
+                "video_count": int(row.get("video_count") or 0),
+                "status": self._safe_text(row.get("status"), 32),
+                "coverage": self._safe_text(row.get("coverage"), 32),
+            })
+        findings: list[dict[str, Any]] = []
+        for row in state.get("findings") or []:
+            if not isinstance(row, dict):
+                continue
+            unit_id = self._safe_text(row.get("unit_id"), 64)
+            findings.append({
+                "id": self._safe_text(row.get("id"), 64),
+                "unit_id": unit_id,
+                "title": self._safe_text(row.get("title"), 120) or labels.get(unit_id, "未命名下载单元"),
+                "kind": self._safe_text(row.get("kind"), 50),
+                "reason": self._safe_text(row.get("reason"), 220),
+                "strength": self._safe_text(row.get("strength"), 20),
+            })
+        coverage = state.get("coverage") if isinstance(state.get("coverage"), dict) else {}
+        safe_coverage = {self._safe_text(key, 40): int(value or 0) for key, value in coverage.items() if isinstance(value, (int, float, bool))}
+        return {"summary": self._map_summary(), "coverage": safe_coverage, "units": units, "findings": findings}
+
+    async def api_map_snapshot(self) -> MapResponse:
+        return MapResponse(success=True, data=self._public_snapshot())
+
     async def api_map_plan(self, request: Request) -> MapResponse:
         """只回传调用方提供的短暂 ID；不泄露私有地图的路径或文件名。"""
         try:
@@ -195,20 +234,25 @@ class MediaGovernor(_PluginBase):
         raw_units, raw_library, raw_findings = body.get("download_units"), body.get("library_nodes"), body.get("findings")
         if not all(isinstance(value, list) for value in (raw_units, raw_library, raw_findings)): return None, "媒体地图缺少下载单元、媒体库或核对结果"
         if len(raw_units) > self._max_units or len(raw_library) > self._max_nodes: return None, "本轮地图超过安全上限，请分根目录建立地图"
-        units = self._bounded_rows(raw_units, self._max_units, {"id", "root", "fingerprint", "header_fingerprint", "video_count", "subtitle_count", "nfo_count", "episodes", "names", "history", "identity", "status"})
+        units = self._bounded_rows(raw_units, self._max_units, {"id", "root", "fingerprint", "header_fingerprint", "video_count", "subtitle_count", "nfo_count", "episodes", "names", "history", "identity", "status", "label", "coverage"})
         library = self._bounded_rows(raw_library, self._max_nodes, {"id", "root", "fingerprint", "video_count", "episodes", "category", "names"})
-        findings = self._bounded_rows(raw_findings, self._max_units, {"id", "unit_id", "kind", "reason", "status", "history_id", "current", "expected"})
+        findings = self._bounded_rows(raw_findings, self._max_units, {"id", "unit_id", "kind", "reason", "status", "history_id", "current", "expected", "title", "strength"})
         for row in units + library: row["id"] = self._private_id(row.get("id") or row.get("root"))
+        for row in units:
+            row["label"] = self._safe_text(row.get("label"), 120)
+            row["coverage"] = self._safe_text(row.get("coverage"), 32)
         for row in findings:
             row["id"] = self._private_id(row.get("id") or f"{row.get('unit_id')}:{row.get('kind')}")
-            row["unit_id"] = self._private_id(row.get("unit_id")); row["reason"] = self._safe_text(row.get("reason"), 220); row["kind"] = self._safe_text(row.get("kind"), 50)
+            row["unit_id"] = self._private_id(row.get("unit_id")); row["title"] = self._safe_text(row.get("title"), 120); row["reason"] = self._safe_text(row.get("reason"), 220); row["kind"] = self._safe_text(row.get("kind"), 50)
         partial = bool(body.get("partial")) and bool(self._runtime_map)
         if partial:
             old_units = {row.get("id"): row for row in self._runtime_map.get("download_units") or []}
             old_units.update({row.get("id"): row for row in units})
             old_findings = [row for row in self._runtime_map.get("findings") or [] if row.get("unit_id") not in {item.get("unit_id") for item in findings}]
             units, findings, library = list(old_units.values()), old_findings + findings, self._runtime_map.get("library_nodes") or library
-        return {"schema": self._map_schema, "map_version": int((self._runtime_map or {}).get("map_version") or 0) + 1, "updated_at": datetime.now(timezone.utc).isoformat(), "baseline": bool(body.get("baseline")), "scan_kind": "baseline" if body.get("baseline") else "incremental", "download_units": units, "library_nodes": library, "findings": findings, "history_summary": self._bounded_rows(body.get("history_summary"), self._max_units, {"id", "mode", "status", "media_source", "media_id", "unit_id", "target"})}, ""
+        coverage_in = body.get("coverage") if isinstance(body.get("coverage"), dict) else {}
+        coverage = {self._safe_text(key, 40): int(value or 0) for key, value in coverage_in.items() if isinstance(value, (int, float, bool))}
+        return {"schema": self._map_schema, "map_version": int((self._runtime_map or {}).get("map_version") or 0) + 1, "updated_at": datetime.now(timezone.utc).isoformat(), "baseline": bool(body.get("baseline")), "scan_kind": "baseline" if body.get("baseline") else "incremental", "download_units": units, "library_nodes": library, "findings": findings, "coverage": coverage, "history_summary": self._bounded_rows(body.get("history_summary"), self._max_units, {"id", "mode", "status", "media_source", "media_id", "unit_id", "target"})}, ""
 
     async def api_map_commit(self, request: Request) -> MapResponse:
         if not self._enabled: return MapResponse(success=False, message="媒体治理插件未启用")

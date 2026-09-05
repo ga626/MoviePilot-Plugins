@@ -56,22 +56,27 @@ class Request:
 def test_versions_assets_and_new_api_contract_are_synced():
     module = _load_plugin(); manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "3.0.1"
-    assert list(manifest["history"])[0] == "v3.0.1"
-    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v3.0.1/assets")
+    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "3.0.2"
+    assert list(manifest["history"])[0] == "v3.0.2"
+    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v3.0.2/assets")
     instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
-    assert [row["path"] for row in instance.get_api()] == ["/map_status", "/map_plan", "/map_commit", "/map_dirty", "/ai_probe", "/bundle_analyze_batch"]
+    assert [row["path"] for row in instance.get_api()] == ["/map_status", "/map_snapshot", "/map_plan", "/map_commit", "/map_dirty", "/ai_probe", "/bundle_analyze_batch"]
     assert all(row["auth"] == "bear" for row in instance.get_api())
 
 
 def test_map_persists_paths_only_privately_and_status_never_leaks_them():
     module = _load_plugin(); instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
-    result = asyncio.run(instance.api_map_commit(Request({"baseline": True, "download_units": [{"id": "/private/download/A", "root": {"path": "/private/download/A", "name": "A"}, "fingerprint": "one"}], "library_nodes": [{"id": "/private/library/A", "root": {"path": "/private/library/A", "name": "A"}}], "findings": [{"unit_id": "/private/download/A", "kind": "native_failure", "reason": "当前失败"}]})))
+    result = asyncio.run(instance.api_map_commit(Request({"baseline": True, "download_units": [{"id": "/private/download/A", "root": {"path": "/private/download/A", "name": "A"}, "label": "示例媒体", "fingerprint": "one"}], "library_nodes": [{"id": "/private/library/A", "root": {"path": "/private/library/A", "name": "A"}}], "coverage": {"failed_history": 47}, "findings": [{"unit_id": "/private/download/A", "kind": "native_failure", "reason": "当前失败"}]})))
     assert result.success and result.data["download_units"] == 1
     assert "/private" not in json.dumps(result.data, ensure_ascii=False)
     saved = instance._map_path().read_text(encoding="utf-8")
     assert "/private/download/A" in saved
     assert asyncio.run(instance.api_map_status()).data["findings"] == 1
+    snapshot = asyncio.run(instance.api_map_snapshot()).data
+    assert snapshot["summary"]["download_units"] == 1
+    assert snapshot["findings"][0]["title"] == "示例媒体"
+    assert snapshot["coverage"]["failed_history"] == 47
+    assert "/private" not in json.dumps(snapshot, ensure_ascii=False)
 
 
 def test_incremental_plan_only_echoes_the_callers_changed_or_unchanged_ids():
@@ -101,14 +106,18 @@ def test_events_only_mark_dirty_and_never_read_media_or_call_model():
 
 def test_frontend_starts_from_current_directories_not_failure_history_and_keeps_official_preview_gate():
     page, rules = PAGE.read_text(encoding="utf-8"), RULES.read_text(encoding="utf-8")
-    for endpoint in ("storage/directories?directory_type=${kind}", "storage/list", "history/transfer?status=${status}", "plugin/MediaGovernor/map_commit", "plugin/MediaGovernor/bundle_analyze_batch", "media/recognize_file", "transfer/manual"):
+    for endpoint in ("storage/directories?directory_type=${kind}", "storage/list", "history/transfer?status=${status}", "plugin/MediaGovernor/map_snapshot", "plugin/MediaGovernor/map_commit", "plugin/MediaGovernor/bundle_analyze_batch", "media/recognize_file", "transfer/manual"):
         assert endpoint in page
-    assert "失败历史只作线索" in page and "当前文件状态" in page
+    assert "失败历史绝不直接" in page and "当前文件状态" in page
     assert "preview: true" in page and "preview: false" in page and "reorganize: false" in page
     assert "storage/delete" not in page and "fetch(" not in page
     for name in ("createDownloadUnits", "unitFingerprint", "diffMap", "classifyFinding"):
         assert f"function {name}" in rules or f"export function {name}" in rules
     assert "evaluateUnitAudit" in page and AUDIT.is_file()
+    assert "identityTargets(units.value)" in page
+    assert "preliminary.some" not in page
+    assert "const coverageComplete = unit.complete && targetState.complete" in page
+    assert "missingTargets = coverageComplete ?" in page
 
 
 def test_golden_fixtures_are_deidentified_and_cover_the_known_failure_contract():
