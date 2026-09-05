@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { cleanTitle, classifyFinding, createDownloadUnits, findingLabel, historyIndex, rootFingerprint, summarizeUnit, videoPattern } from '../lib/governance.js'
+import { cleanTitle, createDownloadUnits, findingLabel, historyIndex, rootFingerprint, summarizeUnit, videoPattern } from '../lib/governance.js'
+import { evaluateUnitAudit } from '../lib/audit-evaluator.js'
 
 const props = defineProps({ api: { type: Object, default: () => ({}) } })
 const state = ref({ ready: false, updated_at: '', download_units: 0, library_nodes: 0, findings: 0, dirty: 0 })
@@ -11,7 +12,8 @@ const dataOf = value => value?.data ?? value
 const canUseApi = computed(() => typeof props.api?.get === 'function' && typeof props.api?.post === 'function')
 const percent = computed(() => progress.value.total ? Math.min(100, Math.round(progress.value.done * 100 / progress.value.total)) : 0)
 const elapsedLabel = computed(() => running.value ? '正在读取真实文件状态' : state.value.updated_at ? '已有媒体地图' : '首次建立地图会较久，之后只复核变动项')
-const cards = computed(() => findings.value.filter(item => item.kind !== 'unconfirmed'))
+const cards = computed(() => findings.value.filter(item => item.kind !== 'unconfirmed' && item.kind !== 'uncovered'))
+const uncoveredCount = computed(() => findings.value.filter(item => item.kind === 'uncovered').length)
 const safe = value => String(value || '').replace(/[\\/]/g, '').replace(/\s+/g, ' ').trim().slice(0, 160)
 function previewForDisplay(value) {
   if (Array.isArray(value)) return value.map(previewForDisplay)
@@ -51,10 +53,10 @@ function sourceRowsFor(unit, index) {
 }
 function targetPaths(rows) { return rows.map(row => row?.dest_fileitem?.path || row?.dest).filter(Boolean) }
 async function scanLibrary(roots) {
-  const nodes = []; const paths = new Set(); const queue = roots.map(root => ({ item: root, depth: 0 }))
+  const nodes = []; const paths = new Set(); const queue = roots.map(root => ({ item: root, depth: 0 })); let readFailures = 0
   while (queue.length && nodes.length < maxNodes && !stopped.value) {
     const current = queue.shift(); let children
-    try { children = await list(current.item) } catch { continue }
+    try { children = await list(current.item) } catch { readFailures += 1; continue }
     for (const child of children) {
       nodes.push({ id: keyOf(child), root: child, fingerprint: `${safe(child.name)}|${child.size || 0}|${child.modify_time || ''}`, video_count: videoPattern.test(child?.name || '') ? 1 : 0, category: safe(current.item?.name) })
       if (child?.path) paths.add(pathKey(child.path))
@@ -62,7 +64,7 @@ async function scanLibrary(roots) {
     }
     phase.value = `读取媒体库：${nodes.length} 项`; progress.value.current = '只读取当前文件清单，不会改动媒体'
   }
-  return { nodes, paths, complete: !queue.length && !stopped.value }
+  return { nodes, paths, complete: !queue.length && !stopped.value && !readFailures, readFailures }
 }
 function parentOf(path, storage = 'local') { const value = String(path || ''); const cut = Math.max(value.lastIndexOf('/'), value.lastIndexOf('\\')); return cut > 0 ? { type: 'dir', path: value.slice(0, cut), storage } : null }
 async function currentTargetPaths(rows) {
@@ -104,11 +106,15 @@ async function buildMap(full = false) {
     progress.value.done = Math.min(progress.value.total, toScan.length + (initial ? libraryRoots.length : 0))
     const preliminary = []
     for (const unit of units.value) {
-      if (!unit.complete || !unit.summary.video_count) continue
+      if (!unit.summary.video_count) continue
+      if (!unit.complete) {
+        preliminary.push(...evaluateUnitAudit({ unit, history: unit.history, coverageComplete: false }).findings)
+        continue
+      }
       const targetState = initial ? { expected: targetPaths(unit.history), present: library.paths } : await currentTargetPaths(unit.history)
       const missingTargets = targetState.expected.filter(path => !targetState.present.has(pathKey(path)))
-      if (missingTargets.length) preliminary.push({ kind: 'native_failure', reason: '原生整理目标当前不存在或已被手动改动', strength: 'strong', unit_id: unit.id, history_id: unit.history.at(-1)?.id || null })
-      preliminary.push(...classifyFinding({ unit, summary: unit.summary, history: unit.history, library: library.nodes }))
+      const audit = evaluateUnitAudit({ unit, history: unit.history, library: library.nodes, targetPresent: !missingTargets.length, coverageComplete: unit.complete && library.complete })
+      preliminary.push(...audit.findings)
     }
     // 只给“已有异常信号但作品身份不确定”的单元发送一次批量 AI 复核；不把整个库盲猜一遍。
     const candidates = units.value.filter(unit => preliminary.some(item => item.unit_id === unit.id) && unit.summary.video_count)
@@ -117,12 +123,12 @@ async function buildMap(full = false) {
     for (const item of preliminary) {
       const unit = units.value.find(value => value.id === item.unit_id); const diagnosis = diagnoses.get(unit?.id)
       refined.push(item)
-      if (unit && diagnosis && !diagnosis.abstain) refined.push(...classifyFinding({ unit, summary: unit.summary, history: unit.history, library: library.nodes, diagnosis }))
+      if (unit && diagnosis && !diagnosis.abstain) refined.push(...evaluateUnitAudit({ unit, history: unit.history, library: library.nodes, diagnosis }).findings)
     }
     findings.value = dedupe(refined); phase.value = stopped.value ? '已停止（未保存不完整地图）' : '保存当前媒体地图'
     if (!stopped.value) {
       const commit = await post('plugin/MediaGovernor/map_commit', { baseline: initial, partial: !initial, download_units: units.value.map(unit => ({ id: unit.id, root: unit.root, fingerprint: unit.summary.fingerprint, header_fingerprint: rootFingerprint([unit.root]), video_count: unit.summary.video_count, subtitle_count: unit.summary.subtitle_count, nfo_count: unit.summary.nfo_count, episodes: unit.summary.episodes, names: unit.summary.names, history: unit.history.map(row => row.id), status: 'checked' })), library_nodes: library.nodes, findings: findings.value, history_summary: histories.value.map(row => ({ id: row.id, status: row.status, mode: row.mode, media_source: row.media_source, media_id: row.media_id, target: row?.dest_fileitem?.path || row?.dest })) })
-      state.value = { ...state.value, ...commit }; phase.value = '地图已更新'; notice.value = `已按当前文件状态核对：${units.value.length} 个下载单元，发现 ${findings.value.length} 个真实待处理问题。`
+      state.value = { ...state.value, ...commit }; phase.value = '地图已更新'; notice.value = `已按当前文件状态核对：${units.value.length} 个下载单元，发现 ${cards.value.length} 个待处理问题；${uncoveredCount.value} 个项目尚未覆盖，不会被算作正常。`
     }
   } catch (error) { fail(error, '建立地图失败；没有改变任何媒体。'); phase.value = '建立地图未完成' }
   finally { running.value = false }
@@ -151,11 +157,12 @@ onMounted(status)
 <template>
   <main class="governor-page">
     <section class="hero"><div><p class="eyebrow">MediaGovernor 3.0</p><h1>先建立真实地图，再处理真实问题</h1><p>从当前下载区和媒体库读取状态；失败历史只作线索，绝不再当成问题数量。</p></div><div class="actions"><button class="secondary" :disabled="running" @click="probeAi">测试智能助手</button><button class="primary" :disabled="running" @click="buildMap(!state.ready)">{{ state.ready ? '复核当前变动' : '建立完整地图' }}</button></div></section>
-    <section class="summary"><span><b>{{ state.download_units }}</b>下载单元</span><span><b>{{ state.library_nodes }}</b>媒体库项目</span><span><b>{{ state.findings }}</b>上次问题</span><span><b>{{ state.dirty }}</b>待复核变动</span></section>
+    <section class="summary"><span><b>{{ state.download_units }}</b>下载单元</span><span><b>{{ state.library_nodes }}</b>媒体库项目</span><span><b>{{ state.findings }}</b>上次结论</span><span><b>{{ state.dirty }}</b>待复核变动</span></section>
     <section v-if="running || progress.total" class="progress"><div><b>{{ phase }}</b><button v-if="running" class="link" @click="stop">停止</button></div><p>{{ progress.current }}</p><i><em :style="{ width: `${percent}%` }"></em></i><small>{{ progress.done }}/{{ progress.total }} · {{ elapsedLabel }}</small></section>
     <p v-if="notice" class="notice">{{ notice }}</p>
     <section class="panel"><header><div><h2>需要处理的问题</h2><p>只有当前文件状态能证明有异常的单元才在这里出现。无法确认的不会假装成问题。</p></div><button class="secondary" :disabled="running" @click="buildMap(true)">完整复核</button></header>
-      <p v-if="!cards.length" class="empty">{{ running ? '正在核对，还没有形成结论。' : '当前没有已证明的问题。首次使用请先建立完整地图。' }}</p>
+      <p v-if="!cards.length" class="empty">{{ running ? '正在核对，还没有形成结论。' : uncoveredCount ? `目前没有已证明的问题；另有 ${uncoveredCount} 个项目尚未覆盖，不能算作正常。` : '当前没有已证明的问题。首次使用请先建立完整地图。' }}</p>
+      <p v-else-if="uncoveredCount" class="warning">另有 {{ uncoveredCount }} 个项目尚未覆盖；它们没有被计入“没有问题”。</p>
       <article v-for="card in cards" :key="`${card.unit_id}-${card.kind}-${card.reason}`" class="card"><div><span class="kind">{{ findingLabel(card.kind) }}</span><h3>{{ titleFor(card) }}</h3><p>{{ card.reason }}</p><small>这是当前状态核对结果，不是历史失败数量。</small></div><button class="primary" @click="recognize(card)">查看并预览修复</button></article>
     </section>
     <div v-if="selected" class="backdrop"><section class="modal"><button class="close" @click="selected = null; preview = null">×</button><p class="eyebrow">先确认，再预览</p><h2>{{ titleFor(selected.card) }}</h2><p>{{ selected.card.reason }}</p><div v-if="selected.candidate" class="candidate"><b>{{ selected.candidate?.media_info?.title || selected.candidate?.title || '原生候选' }}</b><span>{{ selected.candidate?.media_info?.year || selected.candidate?.year || '' }}</span></div><p v-if="selected.error" class="warning">{{ selected.error }}</p><button class="primary" @click="makePreview">生成 MoviePilot 官方逐文件预览</button><div v-if="preview" class="preview"><h3>官方预览已生成</h3><p>请核对官方列出的源文件与目标位置。确认无误后才会交给 MoviePilot 清理旧整理结果并重建硬链接。</p><details><summary>查看官方预览数据</summary><pre>{{ JSON.stringify(previewForDisplay(preview), null, 2) }}</pre></details><button class="danger" @click="repair">确认按此预览重建</button></div></section></div>

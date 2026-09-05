@@ -66,6 +66,35 @@ jobs:
         working-directory: MoviePilot-Plugins-Official
         run: ../MoviePilot/.venv/bin/python tests/run.py
 
+  mediagovernor-golden-gate:
+    name: MediaGovernor golden gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout plugin repository
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: '9'
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install frontend dependencies
+        working-directory: plugins.v3/mediagovernor
+        run: corepack enable && pnpm install --frozen-lockfile
+
+      - name: Run golden contract and build
+        working-directory: plugins.v3/mediagovernor
+        run: |
+          pnpm test:contracts
+          pnpm test:golden
+          pnpm build
+
   plugin-dependency-install-gate:
     name: V3 dependency install (${{ matrix.name }})
     strategy:

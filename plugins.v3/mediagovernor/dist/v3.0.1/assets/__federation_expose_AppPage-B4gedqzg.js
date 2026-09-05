@@ -88,6 +88,47 @@ function findingLabel(kind) {
   return ({ native_failure: '原生整理失败', category_error: '目录分类错误', hierarchy_error: '目录层级错误', episode_error: '剧集对应错误', identity_error: '作品识别错误', unconfirmed: '无法确认' })[kind] || '需要核对'
 }
 
+const uniqueFindings = rows => {
+  const seen = new Map();
+  for (const row of rows) {
+    const key = `${row.kind}:${row.reason}`;
+    if (!seen.has(key)) seen.set(key, row);
+  }
+  return [...seen.values()]
+};
+
+/**
+ * 将“当前下载单元 + 当前目标状态”转换为可判卷的结论。
+ * 生产页面和金标准测试共用这一层，避免测试另一套想象中的规则。
+ */
+function evaluateUnitAudit ({
+  unit,
+  history = [],
+  library = [],
+  diagnosis = null,
+  targetPresent = true,
+  coverageComplete = true,
+  identityRequired = false,
+} = {}) {
+  const summary = unit?.summary || summarizeUnit(unit);
+  const finding = (kind, reason, strength = 'strong') => ({ kind, reason, strength, unit_id: unit?.id || '', history_id: history.at(-1)?.id || null });
+  if (!summary.video_count) return { summary, findings: [], disposition: 'normal' }
+  if (!coverageComplete) {
+    return { summary, findings: [finding('uncovered', '当前目录或官方预览未完整读取，暂不能下结论', 'review')], disposition: 'uncovered' }
+  }
+  const successful = history.filter(row => row?.status !== false);
+  const findings = classifyFinding({ unit, summary, history, library, diagnosis });
+  if (successful.length && targetPresent === false) {
+    findings.unshift(finding('native_failure', '原生整理目标当前不存在或已被手动改动'));
+  }
+  const unique = uniqueFindings(findings);
+  if (unique.length) return { summary, findings: unique, disposition: 'problem' }
+  if (identityRequired && (!diagnosis || diagnosis.abstain || diagnosis.confidence < 0.5)) {
+    return { summary, findings: [finding('unconfirmed', '作品身份证据不足，不能把它算作正常')], disposition: 'unconfirmed' }
+  }
+  return { summary, findings: [], disposition: 'normal' }
+}
+
 const {createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,normalizeStyle:_normalizeStyle,renderList:_renderList,Fragment:_Fragment,unref:_unref} = await importShared('vue');
 
 
@@ -111,22 +152,26 @@ const _hoisted_11 = {
   key: 0,
   class: "empty"
 };
-const _hoisted_12 = { class: "kind" };
-const _hoisted_13 = ["onClick"];
-const _hoisted_14 = {
-  key: 2,
-  class: "backdrop"
-};
-const _hoisted_15 = { class: "modal" };
-const _hoisted_16 = {
-  key: 0,
-  class: "candidate"
-};
-const _hoisted_17 = {
+const _hoisted_12 = {
   key: 1,
   class: "warning"
 };
+const _hoisted_13 = { class: "kind" };
+const _hoisted_14 = ["onClick"];
+const _hoisted_15 = {
+  key: 2,
+  class: "backdrop"
+};
+const _hoisted_16 = { class: "modal" };
+const _hoisted_17 = {
+  key: 0,
+  class: "candidate"
+};
 const _hoisted_18 = {
+  key: 1,
+  class: "warning"
+};
+const _hoisted_19 = {
   key: 2,
   class: "preview"
 };
@@ -148,7 +193,8 @@ const dataOf = value => value?.data ?? value;
 const canUseApi = computed(() => typeof props.api?.get === 'function' && typeof props.api?.post === 'function');
 const percent = computed(() => progress.value.total ? Math.min(100, Math.round(progress.value.done * 100 / progress.value.total)) : 0);
 const elapsedLabel = computed(() => running.value ? '正在读取真实文件状态' : state.value.updated_at ? '已有媒体地图' : '首次建立地图会较久，之后只复核变动项');
-const cards = computed(() => findings.value.filter(item => item.kind !== 'unconfirmed'));
+const cards = computed(() => findings.value.filter(item => item.kind !== 'unconfirmed' && item.kind !== 'uncovered'));
+const uncoveredCount = computed(() => findings.value.filter(item => item.kind === 'uncovered').length);
 const safe = value => String(value || '').replace(/[\\/]/g, '').replace(/\s+/g, ' ').trim().slice(0, 160);
 function previewForDisplay(value) {
   if (Array.isArray(value)) return value.map(previewForDisplay)
@@ -188,10 +234,10 @@ function sourceRowsFor(unit, index) {
 }
 function targetPaths(rows) { return rows.map(row => row?.dest_fileitem?.path || row?.dest).filter(Boolean) }
 async function scanLibrary(roots) {
-  const nodes = []; const paths = new Set(); const queue = roots.map(root => ({ item: root, depth: 0 }));
+  const nodes = []; const paths = new Set(); const queue = roots.map(root => ({ item: root, depth: 0 })); let readFailures = 0;
   while (queue.length && nodes.length < maxNodes && !stopped.value) {
     const current = queue.shift(); let children;
-    try { children = await list(current.item); } catch { continue }
+    try { children = await list(current.item); } catch { readFailures += 1; continue }
     for (const child of children) {
       nodes.push({ id: keyOf(child), root: child, fingerprint: `${safe(child.name)}|${child.size || 0}|${child.modify_time || ''}`, video_count: videoPattern.test(child?.name || '') ? 1 : 0, category: safe(current.item?.name) });
       if (child?.path) paths.add(pathKey(child.path));
@@ -199,7 +245,7 @@ async function scanLibrary(roots) {
     }
     phase.value = `读取媒体库：${nodes.length} 项`; progress.value.current = '只读取当前文件清单，不会改动媒体';
   }
-  return { nodes, paths, complete: !queue.length && !stopped.value }
+  return { nodes, paths, complete: !queue.length && !stopped.value && !readFailures, readFailures }
 }
 function parentOf(path, storage = 'local') { const value = String(path || ''); const cut = Math.max(value.lastIndexOf('/'), value.lastIndexOf('\\')); return cut > 0 ? { type: 'dir', path: value.slice(0, cut), storage } : null }
 async function currentTargetPaths(rows) {
@@ -241,11 +287,15 @@ async function buildMap(full = false) {
     progress.value.done = Math.min(progress.value.total, toScan.length + (initial ? libraryRoots.length : 0));
     const preliminary = [];
     for (const unit of units.value) {
-      if (!unit.complete || !unit.summary.video_count) continue
+      if (!unit.summary.video_count) continue
+      if (!unit.complete) {
+        preliminary.push(...evaluateUnitAudit({ unit, history: unit.history, coverageComplete: false }).findings);
+        continue
+      }
       const targetState = initial ? { expected: targetPaths(unit.history), present: library.paths } : await currentTargetPaths(unit.history);
       const missingTargets = targetState.expected.filter(path => !targetState.present.has(pathKey(path)));
-      if (missingTargets.length) preliminary.push({ kind: 'native_failure', reason: '原生整理目标当前不存在或已被手动改动', strength: 'strong', unit_id: unit.id, history_id: unit.history.at(-1)?.id || null });
-      preliminary.push(...classifyFinding({ unit, summary: unit.summary, history: unit.history, library: library.nodes }));
+      const audit = evaluateUnitAudit({ unit, history: unit.history, library: library.nodes, targetPresent: !missingTargets.length, coverageComplete: unit.complete && library.complete });
+      preliminary.push(...audit.findings);
     }
     // 只给“已有异常信号但作品身份不确定”的单元发送一次批量 AI 复核；不把整个库盲猜一遍。
     const candidates = units.value.filter(unit => preliminary.some(item => item.unit_id === unit.id) && unit.summary.video_count);
@@ -254,12 +304,12 @@ async function buildMap(full = false) {
     for (const item of preliminary) {
       const unit = units.value.find(value => value.id === item.unit_id); const diagnosis = diagnoses.get(unit?.id);
       refined.push(item);
-      if (unit && diagnosis && !diagnosis.abstain) refined.push(...classifyFinding({ unit, summary: unit.summary, history: unit.history, library: library.nodes, diagnosis }));
+      if (unit && diagnosis && !diagnosis.abstain) refined.push(...evaluateUnitAudit({ unit, history: unit.history, library: library.nodes, diagnosis }).findings);
     }
     findings.value = dedupe(refined); phase.value = stopped.value ? '已停止（未保存不完整地图）' : '保存当前媒体地图';
     if (!stopped.value) {
       const commit = await post('plugin/MediaGovernor/map_commit', { baseline: initial, partial: !initial, download_units: units.value.map(unit => ({ id: unit.id, root: unit.root, fingerprint: unit.summary.fingerprint, header_fingerprint: rootFingerprint([unit.root]), video_count: unit.summary.video_count, subtitle_count: unit.summary.subtitle_count, nfo_count: unit.summary.nfo_count, episodes: unit.summary.episodes, names: unit.summary.names, history: unit.history.map(row => row.id), status: 'checked' })), library_nodes: library.nodes, findings: findings.value, history_summary: histories.value.map(row => ({ id: row.id, status: row.status, mode: row.mode, media_source: row.media_source, media_id: row.media_id, target: row?.dest_fileitem?.path || row?.dest })) });
-      state.value = { ...state.value, ...commit }; phase.value = '地图已更新'; notice.value = `已按当前文件状态核对：${units.value.length} 个下载单元，发现 ${findings.value.length} 个真实待处理问题。`;
+      state.value = { ...state.value, ...commit }; phase.value = '地图已更新'; notice.value = `已按当前文件状态核对：${units.value.length} 个下载单元，发现 ${cards.value.length} 个待处理问题；${uncoveredCount.value} 个项目尚未覆盖，不会被算作正常。`;
     }
   } catch (error) { fail(error, '建立地图失败；没有改变任何媒体。'); phase.value = '建立地图未完成'; }
   finally { running.value = false; }
@@ -316,7 +366,7 @@ return (_ctx, _cache) => {
       ]),
       _createElementVNode("span", null, [
         _createElementVNode("b", null, _toDisplayString(state.value.findings), 1),
-        _cache[6] || (_cache[6] = _createTextVNode("上次问题", -1))
+        _cache[6] || (_cache[6] = _createTextVNode("上次结论", -1))
       ]),
       _createElementVNode("span", null, [
         _createElementVNode("b", null, _toDisplayString(state.value.dirty), 1),
@@ -360,15 +410,17 @@ return (_ctx, _cache) => {
         }, "完整复核", 8, _hoisted_10)
       ]),
       (!cards.value.length)
-        ? (_openBlock(), _createElementBlock("p", _hoisted_11, _toDisplayString(running.value ? '正在核对，还没有形成结论。' : '当前没有已证明的问题。首次使用请先建立完整地图。'), 1))
-        : _createCommentVNode("", true),
+        ? (_openBlock(), _createElementBlock("p", _hoisted_11, _toDisplayString(running.value ? '正在核对，还没有形成结论。' : uncoveredCount.value ? `目前没有已证明的问题；另有 ${uncoveredCount.value} 个项目尚未覆盖，不能算作正常。` : '当前没有已证明的问题。首次使用请先建立完整地图。'), 1))
+        : (uncoveredCount.value)
+          ? (_openBlock(), _createElementBlock("p", _hoisted_12, "另有 " + _toDisplayString(uncoveredCount.value) + " 个项目尚未覆盖；它们没有被计入“没有问题”。", 1))
+          : _createCommentVNode("", true),
       (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(cards.value, (card) => {
         return (_openBlock(), _createElementBlock("article", {
           key: `${card.unit_id}-${card.kind}-${card.reason}`,
           class: "card"
         }, [
           _createElementVNode("div", null, [
-            _createElementVNode("span", _hoisted_12, _toDisplayString(_unref(findingLabel)(card.kind)), 1),
+            _createElementVNode("span", _hoisted_13, _toDisplayString(_unref(findingLabel)(card.kind)), 1),
             _createElementVNode("h3", null, _toDisplayString(titleFor(card)), 1),
             _createElementVNode("p", null, _toDisplayString(card.reason), 1),
             _cache[9] || (_cache[9] = _createElementVNode("small", null, "这是当前状态核对结果，不是历史失败数量。", -1))
@@ -376,13 +428,13 @@ return (_ctx, _cache) => {
           _createElementVNode("button", {
             class: "primary",
             onClick: $event => (recognize(card))
-          }, "查看并预览修复", 8, _hoisted_13)
+          }, "查看并预览修复", 8, _hoisted_14)
         ]))
       }), 128))
     ]),
     (selected.value)
-      ? (_openBlock(), _createElementBlock("div", _hoisted_14, [
-          _createElementVNode("section", _hoisted_15, [
+      ? (_openBlock(), _createElementBlock("div", _hoisted_15, [
+          _createElementVNode("section", _hoisted_16, [
             _createElementVNode("button", {
               class: "close",
               onClick: _cache[2] || (_cache[2] = $event => {selected.value = null; preview.value = null;})
@@ -391,20 +443,20 @@ return (_ctx, _cache) => {
             _createElementVNode("h2", null, _toDisplayString(titleFor(selected.value.card)), 1),
             _createElementVNode("p", null, _toDisplayString(selected.value.card.reason), 1),
             (selected.value.candidate)
-              ? (_openBlock(), _createElementBlock("div", _hoisted_16, [
+              ? (_openBlock(), _createElementBlock("div", _hoisted_17, [
                   _createElementVNode("b", null, _toDisplayString(selected.value.candidate?.media_info?.title || selected.value.candidate?.title || '原生候选'), 1),
                   _createElementVNode("span", null, _toDisplayString(selected.value.candidate?.media_info?.year || selected.value.candidate?.year || ''), 1)
                 ]))
               : _createCommentVNode("", true),
             (selected.value.error)
-              ? (_openBlock(), _createElementBlock("p", _hoisted_17, _toDisplayString(selected.value.error), 1))
+              ? (_openBlock(), _createElementBlock("p", _hoisted_18, _toDisplayString(selected.value.error), 1))
               : _createCommentVNode("", true),
             _createElementVNode("button", {
               class: "primary",
               onClick: makePreview
             }, "生成 MoviePilot 官方逐文件预览"),
             (preview.value)
-              ? (_openBlock(), _createElementBlock("div", _hoisted_18, [
+              ? (_openBlock(), _createElementBlock("div", _hoisted_19, [
                   _cache[11] || (_cache[11] = _createElementVNode("h3", null, "官方预览已生成", -1)),
                   _cache[12] || (_cache[12] = _createElementVNode("p", null, "请核对官方列出的源文件与目标位置。确认无误后才会交给 MoviePilot 清理旧整理结果并重建硬链接。", -1)),
                   _createElementVNode("details", null, [
@@ -425,6 +477,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-a2ca707c"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-069fe5e6"]]);
 
 export { AppPage as default };

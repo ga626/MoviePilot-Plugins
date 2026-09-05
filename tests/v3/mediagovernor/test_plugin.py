@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[3]
 PLUGIN = ROOT / "plugins.v3/mediagovernor/__init__.py"
 PAGE = ROOT / "plugins.v3/mediagovernor/src/components/AppPage.vue"
 RULES = ROOT / "plugins.v3/mediagovernor/src/lib/governance.js"
+AUDIT = ROOT / "plugins.v3/mediagovernor/src/lib/audit-evaluator.js"
+GOLDEN = ROOT / "tests/v3/mediagovernor/fixtures/golden/v1/cases.json"
 
 
 class _FakeLLM:
@@ -54,9 +56,9 @@ class Request:
 def test_versions_assets_and_new_api_contract_are_synced():
     module = _load_plugin(); manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "3.0.0"
-    assert list(manifest["history"])[0] == "v3.0.0"
-    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v3.0.0/assets")
+    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "3.0.1"
+    assert list(manifest["history"])[0] == "v3.0.1"
+    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v3.0.1/assets")
     instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
     assert [row["path"] for row in instance.get_api()] == ["/map_status", "/map_plan", "/map_commit", "/map_dirty", "/ai_probe", "/bundle_analyze_batch"]
     assert all(row["auth"] == "bear" for row in instance.get_api())
@@ -106,3 +108,19 @@ def test_frontend_starts_from_current_directories_not_failure_history_and_keeps_
     assert "storage/delete" not in page and "fetch(" not in page
     for name in ("createDownloadUnits", "unitFingerprint", "diffMap", "classifyFinding"):
         assert f"function {name}" in rules or f"export function {name}" in rules
+    assert "evaluateUnitAudit" in page and AUDIT.is_file()
+
+
+def test_golden_fixtures_are_deidentified_and_cover_the_known_failure_contract():
+    payload = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    assert payload["schema"] == "mediagovernor-golden-fixture/v1"
+    assert len(payload["cases"]) >= 10
+    def contains_real_path(value):
+        if isinstance(value, dict):
+            return any(key.lower() in {"path", "src_fileitem", "dest_fileitem"} or contains_real_path(item) for key, item in value.items())
+        if isinstance(value, list):
+            return any(contains_real_path(item) for item in value)
+        return isinstance(value, str) and (value.startswith(("/", "\\")) or ":\\" in value)
+    assert not contains_real_path(payload)
+    required = {"native-failure", "old-failure-recovered", "category-error", "season-error", "episode-error", "identity-error", "same-name-conflict", "partial-package", "manual-target-removed", "coverage-incomplete", "normal-media"}
+    assert required <= {item["id"] for item in payload["cases"]}
