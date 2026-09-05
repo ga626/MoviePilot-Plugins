@@ -49,9 +49,11 @@ export function packageEvidence (pkg = {}) {
   const entries = Array.isArray(pkg.entries) ? pkg.entries : []
   const videos = entries.filter(item => videoPattern.test(item?.name || ''))
   const directories = entries.filter(item => item?.type === 'dir')
+  const subtitles = entries.filter(item => /\.(ass|ssa|srt|sub|vtt)$/i.test(item?.name || ''))
   const titles = [...new Set([
     ...(pkg.roots || []).map(item => cleanTitle(item?.name)),
     ...videos.map(item => cleanTitle(item?.name)),
+    ...subtitles.map(item => cleanTitle(item?.name)),
   ].filter(Boolean))].slice(0, 80)
   return {
     complete: Boolean(pkg.complete), entry_count: entries.length, video_count: videos.length,
@@ -76,5 +78,8 @@ export function repairAdmission (pkg = {}, identity = null, preview = null) {
   if (!previewComplete(preview, sourceCount)) return { allowed: false, reason: '官方逐文件预览不完整或含失败项，不能重建' }
   const histories = latestHistoryRows(pkg.history || []).filter(row => row?.status === true && row?.id)
   if (!histories.length) return { allowed: true, mode: 'create', reason: '这是没有旧成功目标的原生整理失败；将只从原始下载建立新硬链接', history_ids: [] }
+  const successfulSources = new Set(histories.map(row => pathKey(sourcePath(row))))
+  const pendingFileitems = previewSourceFiles(pkg).filter(item => !successfulSources.has(pathKey(item.path)))
+  if (pendingFileitems.length) return { allowed: true, mode: 'mixed', reason: `将重建 ${histories.length} 个错误旧结果，并为 ${pendingFileitems.length} 个未成功源视频建立硬链接`, history_ids: histories.map(row => row.id), create_fileitems: pendingFileitems }
   return { allowed: true, mode: 'rebuild', reason: `将逐条重建 ${histories.length} 个已归因的旧整理结果`, history_ids: histories.map(row => row.id) }
 }

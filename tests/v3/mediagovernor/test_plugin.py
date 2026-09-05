@@ -1,4 +1,4 @@
-"""MediaGovernor 4.1 合同测试：不访问 NAS、模型以外的网络或真实媒体。"""
+"""MediaGovernor 4.2 合同测试：不访问 NAS、模型以外的网络或真实媒体。"""
 from __future__ import annotations
 
 import asyncio
@@ -55,11 +55,11 @@ class Request:
 def test_versions_assets_and_new_api_contract_are_synced():
     module = _load_plugin(); manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "4.1.0"
-    assert list(manifest["history"])[0] == "v4.1.0"
-    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v4.1.0/assets")
+    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "4.2.0"
+    assert list(manifest["history"])[0] == "v4.2.0"
+    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v4.2.0/assets")
     instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
-    assert [row["path"] for row in instance.get_api()] == ["/map_status", "/map_snapshot", "/map_plan", "/map_commit", "/map_dirty", "/ai_probe", "/bundle_analyze_batch"]
+    assert [row["path"] for row in instance.get_api()] == ["/map_status", "/map_snapshot", "/map_watch", "/map_plan", "/map_commit", "/map_unit", "/map_dirty", "/ai_probe", "/bundle_analyze_batch"]
     assert all(row["auth"] == "bear" for row in instance.get_api())
 
 
@@ -76,6 +76,15 @@ def test_map_persists_paths_only_privately_and_status_never_leaks_them():
     assert snapshot["findings"][0]["title"] == "示例媒体"
     assert snapshot["coverage"]["failed_history"] == 47
     assert "/private" not in json.dumps(snapshot, ensure_ascii=False)
+
+
+def test_saved_card_can_load_one_private_detail_without_rescanning_everything():
+    module = _load_plugin(); instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
+    detail = {"id": "unit-a", "root": {"path": "/private/download/A", "name": "A"}, "entries": [{"path": "/private/download/A/A.mkv", "name": "A.mkv"}], "history": []}
+    assert asyncio.run(instance.api_map_commit(Request({"baseline": True, "scope_verified": True, "download_units": [{"id": "unit-a", "package_id": "pkg-a", "label": "示例媒体", "detail": detail}], "library_nodes": [], "findings": [{"unit_id": "unit-a", "kind": "native_failure", "reason": "当前失败"}]}))).success
+    card = asyncio.run(instance.api_map_snapshot()).data["findings"][0]
+    loaded = asyncio.run(instance.api_map_unit(Request({"unit_id": card["unit_id"]})))
+    assert loaded.success and loaded.data["unit"]["entries"][0]["name"] == "A.mkv"
 
 
 def test_incremental_plan_only_echoes_the_callers_changed_or_unchanged_ids():
@@ -123,10 +132,10 @@ def test_frontend_builds_evidence_packages_and_uses_only_declared_official_previ
     assert "createEvidencePackages(top.map(unit => unit.root), histories.value)" in page
     assert "scanDownloadUnits(toScan, packages.length)" in page
     assert "Math.min(4, toScan.length)" in page
-    assert "MediaGovernor 4.1.0" in page
+    assert "MediaGovernor 4.2.0" in page
     assert "configuredDownloadRoots(downloadConfigurations)" in page
     assert "scope_verified: true" in page
-    assert "libraryRootFor: path => libraryRootForPath(path, libraryRoots)" in page
+    assert "evaluateCurrentState" in page
     assert "createDownloadUnits(root, await list(root))" in page
     assert "createDownloadUnits(downloadConfigurations" not in page
     assert "src_fileitem" not in page
@@ -171,5 +180,5 @@ def test_golden_fixtures_are_deidentified_and_cover_the_known_failure_contract()
             return any(contains_real_path(item) for item in value)
         return isinstance(value, str) and (value.startswith(("/", "\\")) or ":\\" in value) and not value.startswith("/fixture/")
     assert not contains_real_path(payload)
-    required = {"normal-target-present", "native-failure", "wrong-category", "wrong-season", "wrong-episode", "wrong-identity", "incomplete-preview-abstains", "native-ai-conflict", "ai-unique-grounding", "anime-not-live-action", "multi-season-split", "movie-collection-split", "multi-root-download-split", "no-download-hash-auditable-not-executable", "one-work-one-finding"}
+    required = {"normal-target-present", "native-failure", "wrong-category", "wrong-season", "wrong-episode", "wrong-identity", "incomplete-preview-abstains", "native-ai-conflict", "ai-unique-grounding", "anime-not-live-action", "multi-season-one-work", "movie-collection-split", "multi-root-download-split", "no-download-hash-auditable-not-executable", "one-work-one-finding"}
     assert required <= {item["id"] for item in payload["cases"]}

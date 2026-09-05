@@ -10,10 +10,12 @@ test('every video unit receives native identity verification, even without histo
   assert.deepEqual(identityTargets(units).map(item => item.id), ['apparently-successful-but-wrong', 'without-history'])
 })
 
-test('AI cross-checks all video units instead of only native failures', () => {
+test('AI 只兜底原生没有给出唯一身份的单元', () => {
   const units = [
-    { id: 'native-ok', complete: true, history: [{}], summary: { video_count: 1 }, diagnosis: { confidence: 0.8, abstain: false } },
-    { id: 'native-abstained', complete: true, history: [{}], summary: { video_count: 1 }, diagnosis: { confidence: 0, abstain: true } },
+    { id: 'native-ok', complete: true, history: [{}], summary: { video_count: 1 }, nativeIdentity: { media_id: '1' } },
+    { id: 'native-abstained', complete: true, history: [{}], summary: { video_count: 1 }, nativeIdentity: null },
+    { id: 'native-year-conflict', complete: true, history: [{}], summary: { video_count: 1, names: ['Story 1998'] }, nativeIdentity: { media_id: '2', year: '2021' } },
+    { id: 'subtitle-only', complete: true, attachment_only: true, history: [{}], summary: { video_count: 0, subtitle_count: 1 }, nativeIdentity: { media_id: '3' } },
   ]
-  assert.deepEqual(aiFallbackTargets(units).map(item => item.id), ['native-ok', 'native-abstained'])
+  assert.deepEqual(aiFallbackTargets(units).map(item => item.id), ['native-abstained', 'native-year-conflict', 'subtitle-only'])
 })

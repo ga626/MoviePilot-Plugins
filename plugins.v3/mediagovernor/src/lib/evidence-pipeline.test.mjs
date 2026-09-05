@@ -34,3 +34,12 @@ test('真正失败没有旧成功目标时只建立新硬链接，不猜测删�
   assert.equal(admission.allowed, true)
   assert.equal(admission.mode, 'create')
 })
+
+test('同一作品同时有假成功和真失败时生成混合修复计划', () => {
+  const pkg = { complete: true, boundary: 'download_hash', root: { storage: 'local' }, entries: [{ type: 'file', path: '/fixture/E01.mkv', name: 'E01.mkv' }, { type: 'file', path: '/fixture/E02.mkv', name: 'E02.mkv' }], history: [{ id: 7, status: true, src: '/fixture/E01.mkv' }, { id: 8, status: false, src: '/fixture/E02.mkv' }] }
+  const preview = { summary: { total: 2, success: 2, failed: 0 }, items: [{ target: '/fixture/library/E01.mkv', success: true }, { target: '/fixture/library/E02.mkv', success: true }] }
+  const result = repairAdmission(pkg, { media_source: 'tmdb', media_id: '1' }, preview)
+  assert.equal(result.mode, 'mixed')
+  assert.deepEqual(result.history_ids, [7])
+  assert.deepEqual(result.create_fileitems.map(item => item.path), ['/fixture/E02.mkv'])
+})

@@ -1,4 +1,4 @@
-import { cleanTitle, latestHistoryRows, pathKey, sourcePath, strictEpisodeHints, videoPattern } from './governance.js'
+import { cleanTitle, latestHistoryRows, pathKey, sourcePath, strictEpisodeHints, subtitlePattern, videoPattern } from './governance.js'
 
 const seasonOf = value => Number(String(value || '').match(/(?:^|[\\/ ._-])S(?:eason[ ._-]?)?(\d{1,2})(?=E\d|$|[\\/ ._-])/i)?.[1] || 0)
 const matchingRoot = (path, roots = []) => [...roots]
@@ -14,10 +14,14 @@ const relativeParts = (path, root) => {
  * 没有独立子目录时再按季拆分。单文件电影和普通单季剧保持为一个作品单元。
  */
 export function createWorkUnits (pkg = {}) {
-  const videos = (pkg.entries || []).filter(item => videoPattern.test(item?.name || '') && item?.path)
-  if (!videos.length) return []
+  const allEntries = pkg.entries || []
+  const videos = allEntries.filter(item => videoPattern.test(item?.name || '') && item?.path)
+  const historySources = new Set((pkg.history || []).map(row => pathKey(sourcePath(row))))
+  const orphanSubtitles = allEntries.filter(item => subtitlePattern.test(item?.name || '') && item?.path && historySources.has(pathKey(item.path)))
+  if (!videos.length && !orphanSubtitles.length) return []
+  const primaryFiles = videos.length ? videos : orphanSubtitles
   const topGroups = new Map()
-  for (const video of videos) {
+  for (const video of primaryFiles) {
     const root = matchingRoot(video.path, pkg.roots || [pkg.root]) || pkg.root
     const parts = relativeParts(video.path, root)
     const rootKey = pathKey(root?.path)
@@ -25,33 +29,37 @@ export function createWorkUnits (pkg = {}) {
     if (!topGroups.has(key)) topGroups.set(key, [])
     topGroups.get(key).push(video)
   }
-  const namedTopGroups = [...topGroups].filter(([key]) => key)
-  let groups
-  if (namedTopGroups.length > 1 && !topGroups.has('')) groups = namedTopGroups.map(([key, rows]) => ({ key, rows }))
-  else {
-    const seasons = new Map()
-    for (const video of videos) {
-      const season = seasonOf(video.path) || seasonOf(video.name)
-      const key = season ? `season:${season}` : 'all'
-      if (!seasons.has(key)) seasons.set(key, [])
-      seasons.get(key).push(video)
-    }
-    groups = seasons.size > 1 && !seasons.has('all') ? [...seasons].map(([key, rows]) => ({ key, rows })) : [{ key: 'all', rows: videos }]
-  }
+  const isStructural = key => /^dir:(season|specials?|extras?|bonus|disc|cd)[ ._-]*\d*$/i.test(key)
+  const namedTopGroups = [...topGroups].filter(([key]) => key && !isStructural(key))
+  // 季目录是同一作品的结构，不再拆成多张卡；只有多个明确作品子目录才拆分。
+  const groups = namedTopGroups.length > 1 && !topGroups.has('')
+    ? namedTopGroups.map(([key, rows]) => ({ key, rows }))
+    : [{ key: 'all', rows: primaryFiles }]
   return groups.map((group, index) => {
-    const paths = new Set(group.rows.map(item => pathKey(item.path)))
-    const history = latestHistoryRows((pkg.history || []).filter(row => paths.has(pathKey(sourcePath(row)))))
+    const groupRoots = group.key.startsWith('root:')
+      ? [group.key.slice(5)]
+      : group.key.startsWith('dir:')
+        ? (pkg.roots || [pkg.root]).map(root => `${pathKey(root?.path)}/${group.key.slice(4)}`)
+        : (pkg.roots || [pkg.root]).map(root => pathKey(root?.path))
+    const belongs = path => group.key === 'all' || groupRoots.some(root => pathKey(path) === root || pathKey(path).startsWith(`${root}/`))
+    const entries = (pkg.entries || []).filter(item => item?.path && belongs(item.path))
+    const paths = new Set(entries.map(item => pathKey(item.path)))
+    const history = latestHistoryRows((pkg.history || []).filter(row => paths.has(pathKey(sourcePath(row))) || belongs(sourcePath(row))))
     const seasons = [...new Set(group.rows.flatMap(item => [seasonOf(item.path), seasonOf(item.name)].filter(Boolean)))]
+    const label = group.key.startsWith('dir:') ? cleanTitle(group.key.slice(4)) : group.key.startsWith('root:')
+      ? cleanTitle((pkg.roots || []).find(root => pathKey(root?.path) === group.key.slice(5))?.name)
+      : cleanTitle(pkg.root?.name)
     return {
       ...pkg,
       id: `${pkg.id}:work:${group.key || index}`,
       package_id: pkg.id,
-      entries: group.rows,
+      entries,
       history,
       work_key: group.key,
-      work_label: cleanTitle(group.rows[0]?.name) || cleanTitle(pkg.root?.name) || `作品 ${index + 1}`,
+      work_label: label || cleanTitle(group.rows[0]?.name) || `作品 ${index + 1}`,
       season_hint: seasons.length === 1 ? seasons[0] : 0,
       episode_hints: [...new Set(group.rows.flatMap(item => strictEpisodeHints(item.name)))].sort((a, b) => a - b),
+      attachment_only: !videos.length,
     }
   })
 }
