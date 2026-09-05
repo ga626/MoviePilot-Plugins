@@ -28,13 +28,16 @@ export function evaluateUnitAudit ({
   if (!coverageComplete) {
     return { summary, findings: [finding('uncovered', '当前目录或官方预览未完整读取，暂不能下结论', 'review')], disposition: 'uncovered' }
   }
-  const successful = history.filter(row => row?.status !== false)
+  const successful = history.filter(row => row?.status === true)
   const findings = classifyFinding({ unit, summary, history, library, diagnosis })
   if (successful.length && targetPresent === false) {
     findings.unshift(finding('native_failure', '原生整理目标当前不存在或已被手动改动'))
   }
   const unique = uniqueFindings(findings)
   if (unique.length) return { summary, findings: unique, disposition: 'problem' }
+  if (identityRequired && !history.length) {
+    return { summary, findings: [finding('unconfirmed', '当前下载单元没有可关联的整理历史，不能判断是否已正确整理', 'review')], disposition: 'unconfirmed' }
+  }
   if (identityRequired && (!diagnosis || diagnosis.abstain || diagnosis.confidence < 0.5)) {
     return { summary, findings: [finding('unconfirmed', '作品身份证据不足，不能把它算作正常')], disposition: 'unconfirmed' }
   }

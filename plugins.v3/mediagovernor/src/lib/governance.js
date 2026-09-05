@@ -64,7 +64,7 @@ const mediaKind = value => /tv|series|电视剧|剧集|动漫|动画|综艺|纪�
 export function classifyFinding({ unit, summary, history = [], library = [], diagnosis = null }) {
   const finding = (kind, reason, strength = 'strong') => ({ kind, reason, strength, unit_id: unit.id, history_id: history.at(-1)?.id || null })
   if (!summary.video_count) return []
-  const successful = history.filter(row => row?.status !== false)
+  const successful = history.filter(row => row?.status === true)
   const failed = history.filter(row => row?.status === false)
   const targetMissing = successful.length && successful.every(row => !row?.dest_fileitem?.path && !row?.dest)
   if (failed.length && !successful.length) return [finding('native_failure', '原生整理失败后，当前下载单元仍在且没有成功整理记录')]
@@ -88,5 +88,5 @@ export function diffMap(previous = {}, next = {}) {
 }
 
 export function findingLabel(kind) {
-  return ({ native_failure: '原生整理失败', category_error: '目录分类错误', hierarchy_error: '目录层级错误', episode_error: '剧集对应错误', identity_error: '作品识别错误', unconfirmed: '无法确认' })[kind] || '需要核对'
+  return ({ native_failure: '原生整理失败', category_error: '目录分类错误', hierarchy_error: '目录层级错误', episode_error: '剧集对应错误', identity_error: '作品识别错误', unconfirmed: '无法确认', uncovered: '尚未覆盖' })[kind] || '需要核对'
 }
