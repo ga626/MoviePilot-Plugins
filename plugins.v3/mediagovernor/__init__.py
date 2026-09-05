@@ -52,13 +52,13 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "以当前下载区与媒体库为准，找出真实整理问题并只经官方预览重建。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "3.0.2"
+    plugin_version = "3.0.3"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
     plugin_order = 99
     auth_level = 1
-    _map_schema = "3.1"
+    _map_schema = "3.2"
     _max_units, _max_nodes, _max_batch_units, _max_batch_chars = 2500, 30000, 12, 28000
     _max_cached_diagnoses, _request_timeout_seconds = 300, 45
 
@@ -80,7 +80,7 @@ class MediaGovernor(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> tuple[str, str]:
-        return "vue", "dist/v3.0.2/assets"
+        return "vue", "dist/v3.0.3/assets"
 
     def get_sidebar_nav(self) -> list[dict[str, Any]]:
         return []
