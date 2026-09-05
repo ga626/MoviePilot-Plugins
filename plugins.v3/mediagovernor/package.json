@@ -1,12 +1,12 @@
 {
   "name": "moviepilot-media-governor-plugin",
   "private": true,
-  "version": "3.0.3",
+  "version": "3.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite build --watch",
     "build": "vite build",
-    "test:contracts": "node --test src/lib/governance.test.mjs src/lib/audit-evaluator.test.mjs src/lib/moviepilot-response.test.mjs src/lib/diagnostic-plan.test.mjs",
+    "test:contracts": "node --test src/lib/governance.test.mjs src/lib/audit-evaluator.test.mjs src/lib/current-media-contract.test.mjs src/lib/moviepilot-response.test.mjs src/lib/diagnostic-plan.test.mjs",
     "test:golden": "node scripts/run-golden.mjs --report ../../runtime/mediagovernor-golden-receipt.html"
   },
   "dependencies": {
