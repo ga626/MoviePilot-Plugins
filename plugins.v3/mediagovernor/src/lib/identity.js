@@ -6,6 +6,10 @@ const mediaKind = value => /tv|series|电视剧|剧集|动漫|动画|综艺|纪�
 export function identityFromRaw (raw = {}) {
   const value = raw?.media_info || raw?.mediaInfo || raw?.media || raw || {}
   const title = text(value.title || value.name || value.media_name).slice(0, 120)
+  const genreValues = value.genres || value.genre_names || value.genreNames || value.genre || []
+  const genres = (Array.isArray(genreValues) ? genreValues : [genreValues]).map(item => text(item?.name || item)).filter(Boolean).slice(0, 20)
+  const genreIds = (Array.isArray(value.genre_ids) ? value.genre_ids : []).map(Number).filter(Number.isFinite).slice(0, 20)
+  const category = text(value.category || value.media_category || value.type_name || value.type)
   return {
     title,
     original_title: text(value.original_title || value.originalName).slice(0, 120),
@@ -14,6 +18,9 @@ export function identityFromRaw (raw = {}) {
     season: Number(value.season || value.season_number || 0) || 0,
     media_source: text(value.media_source || value.source),
     media_id: text(value.media_id || value.id),
+    genres,
+    genre_ids: genreIds,
+    category,
     confidence: title ? 0.8 : 0,
     abstain: !title,
   }
@@ -51,11 +58,15 @@ export function chooseGroundedCandidate (hint = {}, rawCandidates = []) {
   return { selected: unique ? best.candidate : null, candidates: scored.slice(0, 6).map(item => item.candidate) }
 }
 
-export function reconcileIdentities (nativeIdentity, aiGrounded) {
+export function reconcileIdentities (nativeIdentity, aiGrounded, evidenceHint = null) {
   const native = identityKey(nativeIdentity) ? nativeIdentity : null
   const ai = identityKey(aiGrounded?.selected) ? aiGrounded.selected : null
   const candidates = [...new Map([native, ...(aiGrounded?.candidates || [])].filter(Boolean).map(item => [identityKey(item), item])).values()]
   if (native && ai && (sameIdentity(native, ai) || sameWork(native, ai))) return { identity: { ...native, confidence: 1, abstain: false }, candidates, reason: '原生识别与整包 AI 证据指向同一作品' }
+  if (native && ai && evidenceHint?.year && String(ai.year) === String(evidenceHint.year) && String(native.year || '') !== String(evidenceHint.year)) return { identity: { ...ai, confidence: 0.95, abstain: false }, candidates, reason: '文件结构有明确年份，AI 候选已由 MoviePilot 数据源落地' }
+  // MoviePilot 已经给出唯一数据源编号时，它本身就是可执行身份。
+  // AI 是原生弃权时的兜底，不应反过来否定原生唯一结果。
+  if (native && !ai) return { identity: { ...native, confidence: Math.max(Number(native.confidence) || 0, 0.85), abstain: false }, candidates, reason: 'MoviePilot 原生识别已给出唯一作品' }
   if (!native && ai) return { identity: { ...ai, confidence: 0.9, abstain: false }, candidates, reason: 'AI 候选已由 MoviePilot 数据源唯一落地' }
-  return { identity: { abstain: true, confidence: 0, title: '', media_type: 'unknown' }, candidates, reason: native && !ai ? '原生识别缺少整包证据确认' : native && ai ? '原生识别与整包证据冲突' : '没有唯一作品身份' }
+  return { identity: { abstain: true, confidence: 0, title: '', media_type: 'unknown' }, candidates, reason: native && ai ? '原生识别与整包证据冲突' : '没有唯一作品身份' }
 }

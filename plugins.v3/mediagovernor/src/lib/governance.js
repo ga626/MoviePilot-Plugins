@@ -155,11 +155,33 @@ export function historyIndex(rows = []) {
 
 const mediaKind = value => /tv|series|电视剧|剧集|动漫|动画|综艺|纪录片/i.test(text(value)) ? 'tv' : /movie|film|电影/i.test(text(value)) ? 'movie' : ''
 
-export function classifyFinding({ unit, summary, history = [], library = [], diagnosis = null }) {
+export const categoryOfIdentity = identity => {
+  const value = [identity?.category, ...(identity?.genres || [])].join(' ')
+  const genreIds = new Set((identity?.genre_ids || []).map(Number))
+  if (genreIds.has(16)) return 'animation'
+  if (genreIds.has(99) || genreIds.has(10764) || genreIds.has(10767)) return 'other'
+  if (/animation|动画|动漫|anime/i.test(value)) return 'animation'
+  if (/variety|综艺|reality|talk[ -]?show/i.test(value)) return 'other'
+  if (/documentary|纪录/i.test(value)) return 'other'
+  return identity?.media_type === 'movie' ? 'movie' : identity?.media_type === 'tv' ? 'tv' : ''
+}
+
+export const categoryOfRoot = root => {
+  const value = [root?.name, root?.media_category, root?.media_type].join(' ')
+  if (/动漫|动画|anime/i.test(value)) return 'animation'
+  if (/其他|综艺|纪录|other/i.test(value)) return 'other'
+  if (/movie|电影/i.test(value)) return 'movie'
+  if (/tv|电视|剧集/i.test(value)) return 'tv'
+  return ''
+}
+
+export function classifyFinding({ unit, summary, history = [], library = [], diagnosis = null, presentPaths = new Set() }) {
   const finding = (kind, reason, strength = 'strong') => ({ kind, reason, strength, unit_id: unit.id, history_id: latestHistory(history)?.id || null })
-  if (!summary.video_count) return []
-  const successful = history.filter(row => row?.status === true)
-  const failed = history.filter(row => row?.status === false)
+  if (!summary.video_count && !(unit?.attachment_only && summary.subtitle_count)) return []
+  const currentHistory = latestHistoryRows(history)
+  const successful = currentHistory.filter(row => row?.status === true)
+  const failed = currentHistory.filter(row => row?.status === false)
+  const presentSuccessful = successful.filter(row => !presentPaths.size || presentPaths.has(pathKey(destinationPath(row))))
   const targetMissing = successful.length && successful.every(row => !row?.dest_fileitem?.path && !row?.dest)
   if (failed.length && !successful.length) return [finding('native_failure', '原生整理失败后，当前下载单元仍在且没有成功整理记录')]
   if (targetMissing) return [finding('native_failure', '原生整理记录没有当前可核验的媒体库目标')]
@@ -167,11 +189,29 @@ export function classifyFinding({ unit, summary, history = [], library = [], dia
   if (!diagnosis || diagnosis.abstain || diagnosis.confidence < .5) return []
   const record = successful[0] || {}; const recordKind = mediaKind(record.type || record.media_type || record.category)
   const expectedKind = diagnosis.media_type
-  if (recordKind && expectedKind !== 'unknown' && recordKind !== expectedKind) return [finding('category_error', '媒体类型对不上：当前整理目录与已确认作品类型不同')]
-  const titles = [record.title, record.original_title, record.media_name].map(cleanTitle).filter(Boolean)
+  const missingSuffix = failed.length ? `；另有 ${failed.length} 个源文件当前仍未整理成功` : ''
+  const expectedCategory = categoryOfIdentity(diagnosis)
+  const currentRoots = successful.map(row => libraryRootForPath(destinationPath(row), library)).filter(Boolean)
+  const currentCategories = [...new Set(currentRoots.map(categoryOfRoot).filter(Boolean))]
+  if (expectedCategory && currentCategories.length && currentCategories.some(value => value !== expectedCategory)) return [finding('category_error', `目录分类错误：当前位置与已确认作品类型不同${missingSuffix}`)]
+  if (recordKind && expectedKind !== 'unknown' && recordKind !== expectedKind) return [finding('category_error', `媒体类型对不上：当前整理结果与已确认作品类型不同${missingSuffix}`)]
+  const recordMedia = record.media_info || record.mediainfo || record.media || {}
+  const recordSource = text(record.media_source || recordMedia.media_source || recordMedia.source)
+  const recordId = text(record.media_id || record.tmdb_id || record.douban_id || recordMedia.media_id || recordMedia.tmdb_id || recordMedia.douban_id || recordMedia.id)
+  if (recordSource && recordId && diagnosis.media_source && diagnosis.media_id && `${recordSource}:${recordId}` !== `${diagnosis.media_source}:${diagnosis.media_id}`) return [finding('identity_error', `作品识别错误：当前硬链接归到了另一部作品${missingSuffix}`)]
+  const recordYear = text(record.year || recordMedia.year || recordMedia.release_year)
+  if (recordYear && diagnosis.year && recordYear !== text(diagnosis.year)) return [finding('identity_error', `作品年份对不上：当前硬链接归到了同名的另一版${missingSuffix}`)]
+  const titles = [record.title, record.original_title, record.media_name, recordMedia.title, recordMedia.original_title, recordMedia.name].map(cleanTitle).filter(Boolean)
   const proposed = [diagnosis.title, diagnosis.original_title].map(cleanTitle).filter(Boolean)
-  if (titles.length && proposed.length && !titles.some(left => proposed.some(right => left === right || left.includes(right) || right.includes(left)))) return [finding('identity_error', '当前整理作品名与整包证据确认的作品不一致', 'review')]
+  if (titles.length && proposed.length && !titles.some(left => proposed.some(right => left === right || left.includes(right) || right.includes(left)))) return [finding('identity_error', `作品识别错误：当前硬链接归到了另一部作品${missingSuffix}`)]
   if (diagnosis.season && record.season && Number(record.season) !== Number(diagnosis.season)) return [finding('hierarchy_error', '季目录对不上：当前整理季与整包证据不一致', 'review')]
+  for (const row of successful) {
+    const sourceEpisodes = strictEpisodeHints(sourcePath(row)); const targetEpisodes = strictEpisodeHints(destinationPath(row))
+    if (sourceEpisodes.length && targetEpisodes.length && sourceEpisodes.join(',') !== targetEpisodes.join(',')) return [finding('episode_error', `剧集对应错误：源文件与当前硬链接的集号不一致${missingSuffix}`)]
+  }
+  if (expectedKind === 'tv' && summary.episodes.length && successful.length && successful.every(row => !/(?:^|[\\/])(?:season|s)[ ._-]?\d{1,2}(?:[\\/]|$)/i.test(destinationPath(row)))) return [finding('hierarchy_error', `目录层级错误：剧集被平铺，没有作品和季目录${missingSuffix}`)]
+  if (failed.length) return [finding('native_failure', `部分整理失败：当前仍有 ${failed.length} 个源文件没有建立成功硬链接`)]
+  if (successful.length && presentSuccessful.length < successful.length) return [finding('native_failure', `已有整理记录，但当前缺少 ${successful.length - presentSuccessful.length} 个硬链接目标`)]
   return []
 }
 

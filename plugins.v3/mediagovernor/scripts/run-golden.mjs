@@ -5,6 +5,7 @@ import { createWorkUnits } from '../src/lib/work-units.js'
 import { chooseGroundedCandidate, reconcileIdentities } from '../src/lib/identity.js'
 import { evaluateOfficialPreview } from '../src/lib/preview-audit.js'
 import { repairAdmission } from '../src/lib/evidence-pipeline.js'
+import { evaluateCurrentState, validatePreviewTarget } from '../src/lib/state-audit.js'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
 const fixturePath = resolve(root, 'tests/v3/mediagovernor/fixtures/golden/v1/cases.json')
@@ -38,6 +39,15 @@ function execute (item) {
     })
     return result ? { disposition: result.kind === 'unconfirmed' || result.kind === 'uncovered' ? result.kind : 'problem', kind: result.kind, finding_count: 1 } : { disposition: 'normal', kind: '', finding_count: 0 }
   }
+  if (item.operation === 'state_audit') {
+    const input = item.input
+    const result = evaluateCurrentState({ unit: input.unit, identity: input.identity, preview: input.preview, presentPaths: new Set((input.present || []).map(pathKey)), libraryRoots: input.library_roots || [] })
+    return result ? { disposition: result.kind === 'unconfirmed' || result.kind === 'uncovered' ? result.kind : 'problem', kind: result.kind, finding_count: 1 } : { disposition: 'normal', kind: '', finding_count: 0 }
+  }
+  if (item.operation === 'preview_policy') {
+    const result = validatePreviewTarget({ identity: item.input.identity, preview: item.input.preview, libraryRoots: item.input.library_roots || [] })
+    return { allowed: result.valid }
+  }
   throw new Error(`${item.id}: 未知金标准操作 ${item.operation}`)
 }
 
@@ -45,7 +55,7 @@ function matches (actual, expected) { return Object.entries(expected).every(([ke
 function html (result) {
   const escape = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
   const rows = result.cases.map(item => `<tr class="${item.pass ? 'pass' : 'fail'}"><td>${escape(item.id)}</td><td><code>${escape(JSON.stringify(item.expected))}</code></td><td><code>${escape(JSON.stringify(item.actual))}</code></td><td>${item.pass ? '通过' : '失败'}</td></tr>`).join('')
-  return `<!doctype html><meta charset="utf-8"><title>MediaGovernor 4.1 金标准验收回执</title><style>body{font:16px system-ui;margin:32px;color:#172033}table{border-collapse:collapse;width:100%}td,th{padding:10px;border-bottom:1px solid #d8dee9;text-align:left}.pass{background:#ecfdf3}.fail{background:#fff1f2}.summary{padding:16px;border-radius:12px;background:#eef2ff}code{white-space:pre-wrap}</style><h1>MediaGovernor 4.1 金标准验收回执</h1><p class="summary">样本 ${result.summary.total} · 通过 ${result.summary.passed} · 失败 ${result.summary.failed} · ${result.summary.status}</p><table><thead><tr><th>样本</th><th>预期</th><th>实际</th><th>结果</th></tr></thead><tbody>${rows}</tbody></table>`
+  return `<!doctype html><meta charset="utf-8"><title>MediaGovernor 4.2 金标准验收回执</title><style>body{font:16px system-ui;margin:32px;color:#172033}table{border-collapse:collapse;width:100%}td,th{padding:10px;border-bottom:1px solid #d8dee9;text-align:left}.pass{background:#ecfdf3}.fail{background:#fff1f2}.summary{padding:16px;border-radius:12px;background:#eef2ff}code{white-space:pre-wrap}</style><h1>MediaGovernor 4.2 金标准验收回执</h1><p class="summary">样本 ${result.summary.total} · 通过 ${result.summary.passed} · 失败 ${result.summary.failed} · ${result.summary.status}</p><table><thead><tr><th>样本</th><th>预期</th><th>实际</th><th>结果</th></tr></thead><tbody>${rows}</tbody></table>`
 }
 
 const fixture = JSON.parse(await readFile(fixturePath, 'utf8'))

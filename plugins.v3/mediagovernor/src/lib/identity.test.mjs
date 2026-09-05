@@ -23,3 +23,15 @@ test('不同数据源但标题年份类型一致时认定为同一作品', () =>
   assert.equal(result.identity.media_source, 'tmdb')
   assert.equal(result.identity.abstain, false)
 })
+
+test('MoviePilot 唯一原生身份不需要 AI 再盖章', () => {
+  const result = reconcileIdentities(anime, { selected: null, candidates: [] })
+  assert.equal(result.identity.media_id, '1')
+  assert.equal(result.identity.abstain, false)
+})
+
+test('文件有明确年份时，可选择已由 MoviePilot 数据源落地的年份匹配候选', () => {
+  const result = reconcileIdentities(live, { selected: anime, candidates: [anime] }, { year: '1998' })
+  assert.equal(result.identity.media_id, '1')
+  assert.equal(result.identity.abstain, false)
+})
