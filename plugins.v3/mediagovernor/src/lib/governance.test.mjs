@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { classifyFinding, createDownloadUnits, diffMap, fileFingerprint, libraryRootSnapshot, strictEpisodeHints, summarizeUnit } from './governance.js'
+import { classifyFinding, configuredDownloadRoots, createDownloadUnits, diffMap, fileFingerprint, historyRowsForUnit, latestHistory, latestHistoryRows, libraryRootForPath, libraryRootSnapshot, strictEpisodeHints, summarizeUnit } from './governance.js'
 
 test('下载区顶层目录和单文件各是一个真实下载单元，不按相似标题拼包', () => {
   const units = createDownloadUnits({ storage: 'local', path: '/downloads' }, [{ type: 'dir', path: '/downloads/A', name: 'A' }, { type: 'file', path: '/downloads/B.mkv', name: 'B.mkv' }, { type: 'file', name: 'note.txt' }])
@@ -36,4 +36,51 @@ test('分类、季和作品名错误需要已确认身份，不能由猜测生�
   const diagnosis = { title: '正确作品', original_title: '', media_type: 'tv', season: 2, confidence: .9, abstain: false }
   const results = classifyFinding({ unit, summary, history: [{ status: true, dest: '/library/A', title: '错误作品', type: '电影', season: 1 }], diagnosis })
   assert.equal(results.some(item => item.kind === 'category_error'), true)
+})
+
+test('下载范围只能来自 download_path，空路径和容器根目录必须硬拒绝且相同路径去重', () => {
+  const scope = configuredDownloadRoots([
+    { name: '下载', storage: 'local', download_path: '/downloads' },
+    { name: '重复下载', storage: 'local', download_path: '/downloads/' },
+    { name: '危险根', storage: 'local', download_path: '/' },
+    { name: '空目录', storage: 'local', download_path: '' },
+  ])
+  assert.deepEqual(scope.roots.map(item => item.path), ['/downloads'])
+  assert.equal(scope.rejected.length, 2)
+})
+
+test('下载范围不会因 Windows 分隔符或盘符根目录退化到容器根目录', () => {
+  const scope = configuredDownloadRoots([
+    { storage: 'local', download_path: 'D:\\downloads' },
+    { storage: 'local', download_path: 'D:' },
+  ])
+  assert.equal(scope.roots[0].path, 'D:\\downloads')
+  assert.equal(scope.rejected.length, 1)
+})
+
+test('历史只能单向归属当前下载包，父目录历史不得被猜测分配', () => {
+  const unit = { root: { path: '/downloads/Package-A' } }
+  const rows = [
+    { id: 1, src: '/downloads/Package-A/E01.mkv', status: true, date: '2026-01-01T00:00:00Z' },
+    { id: 2, src: '/downloads', status: false, date: '2026-02-01T00:00:00Z' },
+    { id: 3, src: '/downloads/Package-AB/E01.mkv', status: false, date: '2026-03-01T00:00:00Z' },
+    { id: 4, src: '/downloads/Package-A/E01.mkv', status: false, date: '2026-04-01T00:00:00Z' },
+  ]
+  const matched = historyRowsForUnit(unit, rows)
+  assert.deepEqual(matched.map(item => item.id), [4, 1])
+  assert.equal(latestHistory(matched).id, 4)
+})
+
+test('旧成功目标不会参与当前目标核验，当前状态只认同一源文件最新一条历史', () => {
+  const rows = [
+    { id: 1, src: '/downloads/Package-A/E01.mkv', dest: '/library/old/E01.mkv', status: true, date: '2026-01-01T00:00:00Z' },
+    { id: 2, src: '/downloads/Package-A/E01.mkv', dest: '/library/new/E01.mkv', status: true, date: '2026-02-01T00:00:00Z' },
+    { id: 3, src: '/downloads/Package-A/E02.mkv', status: false, date: '2026-02-02T00:00:00Z' },
+  ]
+  assert.deepEqual(latestHistoryRows(rows).map(item => item.id), [3, 2])
+})
+
+test('目标目录必须按最长匹配的媒体库配置归属，才能核验分类', () => {
+  const roots = [{ path: '/library', media_type: '' }, { path: '/library/tv', media_type: 'tv' }]
+  assert.equal(libraryRootForPath('/library/tv/Show/S01/E01.mkv', roots).media_type, 'tv')
 })

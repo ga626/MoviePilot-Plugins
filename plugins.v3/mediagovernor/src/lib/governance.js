@@ -28,6 +28,88 @@ export function unitFingerprint(unit = {}) {
 
 export function rootFingerprint(items = []) { return [...items].map(fileFingerprint).sort().join('\n') }
 
+export function pathKey(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '').toLowerCase()
+}
+
+export function isRootPath(value) {
+  const path = pathKey(value)
+  return !path || path === '/' || /^[a-z]:$/i.test(path)
+}
+
+export function isWithinPath(value, root) {
+  const path = pathKey(value); const base = pathKey(root)
+  return Boolean(path && base && (path === base || path.startsWith(`${base}/`)))
+}
+
+/** 把“目录配置”显式转换为 FileItem；配置对象本身绝不能送进 storage/list。 */
+export function configuredDownloadRoots(configurations = []) {
+  const roots = []; const rejected = []; const seen = new Set()
+  for (const configuration of configurations) {
+    const path = String(configuration?.download_path || '').trim()
+    const storage = String(configuration?.storage || 'local').trim() || 'local'
+    if (isRootPath(path)) { rejected.push({ name: text(configuration?.name) || '未命名目录配置', reason: '下载目录为空或指向容器根目录' }); continue }
+    const key = `${storage}:${pathKey(path)}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    roots.push({ type: 'dir', storage, path, name: text(configuration?.name) || path, configured: true, media_type: text(configuration?.media_type), media_category: text(configuration?.media_category) })
+  }
+  return { roots, rejected }
+}
+
+export function configuredLibraryRoots(configurations = []) {
+  const roots = []; const seen = new Set()
+  for (const configuration of configurations) {
+    const path = String(configuration?.library_path || '').trim()
+    const storage = String(configuration?.library_storage || 'local').trim() || 'local'
+    if (isRootPath(path)) continue
+    const key = `${storage}:${pathKey(path)}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    roots.push({ type: 'dir', storage, path, name: text(configuration?.name) || path, media_type: text(configuration?.media_type), media_category: text(configuration?.media_category) })
+  }
+  return roots
+}
+
+export function libraryRootForPath(path, roots = []) {
+  return [...roots].filter(root => isWithinPath(path, root?.path)).sort((left, right) => pathKey(right?.path).length - pathKey(left?.path).length)[0] || null
+}
+
+export function sourcePath(row = {}) {
+  const item = row.src_fileitem || row.source_fileitem || row.fileitem || {}
+  return String(item.path || row.src || row.source || '')
+}
+
+export function destinationPath(row = {}) {
+  const item = row.dest_fileitem || {}
+  return String(item.path || row.dest || '')
+}
+
+/** 仅允许“历史源文件位于下载单元内”的单向归属；父目录历史不能被猜测分配给多个包。 */
+export function historyRowsForUnit(unit, rows = []) {
+  const root = unit?.root?.path || ''
+  return rows.filter(row => isWithinPath(sourcePath(row), root)).sort(latestFirst)
+}
+
+export function latestFirst(left, right) {
+  const leftDate = Date.parse(left?.date || '') || 0; const rightDate = Date.parse(right?.date || '') || 0
+  if (leftDate !== rightDate) return rightDate - leftDate
+  const sequence = value => Number(String(value || '').match(/(\d+)$/)?.[1] || 0)
+  return sequence(right?.id) - sequence(left?.id)
+}
+
+export function latestHistory(rows = []) { return [...rows].sort(latestFirst)[0] || null }
+
+/** 同一源文件的旧整理记录只作审计依据，当前目标只认该源文件最近一次结果。 */
+export function latestHistoryRows(rows = []) {
+  const bySource = new Map()
+  for (const row of [...rows].sort(latestFirst)) {
+    const source = pathKey(sourcePath(row)) || `history:${row?.id || bySource.size}`
+    if (!bySource.has(source)) bySource.set(source, row)
+  }
+  return [...bySource.values()].sort(latestFirst)
+}
+
 export function createDownloadUnits(root, children = []) {
   // 顶层目录或顶层视频各是一个下载单元；不再用相似标题拼成虚构“包”。
   return children.filter(item => item?.type === 'dir' || videoPattern.test(item?.name || '')).map(item => ({
@@ -74,7 +156,7 @@ export function historyIndex(rows = []) {
 const mediaKind = value => /tv|series|电视剧|剧集|动漫|动画|综艺|纪录片/i.test(text(value)) ? 'tv' : /movie|film|电影/i.test(text(value)) ? 'movie' : ''
 
 export function classifyFinding({ unit, summary, history = [], library = [], diagnosis = null }) {
-  const finding = (kind, reason, strength = 'strong') => ({ kind, reason, strength, unit_id: unit.id, history_id: history.at(-1)?.id || null })
+  const finding = (kind, reason, strength = 'strong') => ({ kind, reason, strength, unit_id: unit.id, history_id: latestHistory(history)?.id || null })
   if (!summary.video_count) return []
   const successful = history.filter(row => row?.status === true)
   const failed = history.filter(row => row?.status === false)
@@ -83,7 +165,7 @@ export function classifyFinding({ unit, summary, history = [], library = [], dia
   if (targetMissing) return [finding('native_failure', '原生整理记录没有当前可核验的媒体库目标')]
   if (summary.duplicateEpisodes.length) return [finding('episode_error', `同一下载单元有重复集号：${summary.duplicateEpisodes.join('、')}`)]
   if (!diagnosis || diagnosis.abstain || diagnosis.confidence < .5) return []
-  const record = successful.at(-1) || {}; const recordKind = mediaKind(record.type || record.media_type || record.category)
+  const record = successful[0] || {}; const recordKind = mediaKind(record.type || record.media_type || record.category)
   const expectedKind = diagnosis.media_type
   if (recordKind && expectedKind !== 'unknown' && recordKind !== expectedKind) return [finding('category_error', '媒体类型对不上：当前整理目录与已确认作品类型不同')]
   const titles = [record.title, record.original_title, record.media_name].map(cleanTitle).filter(Boolean)

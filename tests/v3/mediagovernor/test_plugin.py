@@ -56,9 +56,9 @@ class Request:
 def test_versions_assets_and_new_api_contract_are_synced():
     module = _load_plugin(); manifest = json.loads((ROOT / "package.v3.json").read_text(encoding="utf-8"))["MediaGovernor"]
     package = json.loads((ROOT / "plugins.v3/mediagovernor/package.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "3.0.3"
-    assert list(manifest["history"])[0] == "v3.0.3"
-    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v3.0.3/assets")
+    assert manifest["version"] == package["version"] == module.MediaGovernor.plugin_version == "3.1.0"
+    assert list(manifest["history"])[0] == "v3.1.0"
+    assert module.MediaGovernor.get_render_mode() == ("vue", "dist/v3.1.0/assets")
     instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
     assert [row["path"] for row in instance.get_api()] == ["/map_status", "/map_snapshot", "/map_plan", "/map_commit", "/map_dirty", "/ai_probe", "/bundle_analyze_batch"]
     assert all(row["auth"] == "bear" for row in instance.get_api())
@@ -66,7 +66,7 @@ def test_versions_assets_and_new_api_contract_are_synced():
 
 def test_map_persists_paths_only_privately_and_status_never_leaks_them():
     module = _load_plugin(); instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
-    result = asyncio.run(instance.api_map_commit(Request({"baseline": True, "download_units": [{"id": "/private/download/A", "root": {"path": "/private/download/A", "name": "A"}, "label": "示例媒体", "fingerprint": "one"}], "library_nodes": [{"id": "/private/library/A", "root": {"path": "/private/library/A", "name": "A"}}], "coverage": {"failed_history": 47}, "findings": [{"unit_id": "/private/download/A", "kind": "native_failure", "reason": "当前失败"}]})))
+    result = asyncio.run(instance.api_map_commit(Request({"baseline": True, "scope_verified": True, "download_units": [{"id": "/private/download/A", "root": {"path": "/private/download/A", "name": "A"}, "label": "示例媒体", "fingerprint": "one"}], "library_nodes": [{"id": "/private/library/A", "root": {"path": "/private/library/A", "name": "A"}}], "coverage": {"failed_history": 47}, "findings": [{"unit_id": "/private/download/A", "kind": "native_failure", "reason": "当前失败"}]})))
     assert result.success and result.data["download_units"] == 1
     assert "/private" not in json.dumps(result.data, ensure_ascii=False)
     saved = instance._map_path().read_text(encoding="utf-8")
@@ -81,7 +81,7 @@ def test_map_persists_paths_only_privately_and_status_never_leaks_them():
 
 def test_incremental_plan_only_echoes_the_callers_changed_or_unchanged_ids():
     module = _load_plugin(); instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
-    asyncio.run(instance.api_map_commit(Request({"baseline": True, "download_units": [{"id": "raw-a", "root": {"path": "/private/A"}, "header_fingerprint": "same"}], "library_nodes": [], "findings": []})))
+    asyncio.run(instance.api_map_commit(Request({"baseline": True, "scope_verified": True, "download_units": [{"id": "raw-a", "root": {"path": "/private/A"}, "header_fingerprint": "same"}], "library_nodes": [], "findings": []})))
     plan = asyncio.run(instance.api_map_plan(Request({"units": [{"id": "raw-a", "fingerprint": "same"}, {"id": "raw-b", "fingerprint": "new"}]})))
     assert plan.data["unchanged"] == ["raw-a"]
 
@@ -122,7 +122,32 @@ def test_frontend_starts_from_current_directories_not_failure_history_and_keeps_
     assert "scanLibrary(" not in page
     assert "scanDownloadUnits(toScan, top.length)" in page
     assert "Math.min(4, toScan.length)" in page
-    assert "MediaGovernor 3.0.3" in page
+    assert "MediaGovernor 3.1.0" in page
+    assert "configuredDownloadRoots(downloadConfigurations)" in page
+    assert "scope_verified: true" in page
+    assert "inspectTargetEvidence(units.value, targetAudit, libraryRoots)" in page
+    assert "createDownloadUnits(root, await list(root))" in page
+    assert "createDownloadUnits(downloadConfigurations" not in page
+
+
+def test_map_rejects_unverified_scope_and_discards_previous_schema():
+    module = _load_plugin(); instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
+    rejected = asyncio.run(instance.api_map_commit(Request({"baseline": True, "download_units": [], "library_nodes": [], "findings": []})))
+    assert not rejected.success
+    assert "下载范围未通过验证" in rejected.message
+    instance._map_path().write_text(json.dumps({"schema": "3.2", "download_units": [{"id": "old"}]}), encoding="utf-8")
+    replacement = module.MediaGovernor(); replacement.init_plugin({"enabled": True})
+    assert replacement._runtime_map == {}
+
+
+def test_incremental_normal_commit_removes_only_that_units_stale_finding():
+    module = _load_plugin(); instance = module.MediaGovernor(); instance.init_plugin({"enabled": True})
+    baseline = {"baseline": True, "scope_verified": True, "download_units": [{"id": "unit-a", "root": {"path": "/private/A"}}, {"id": "unit-b", "root": {"path": "/private/B"}}], "library_nodes": [], "findings": [{"unit_id": "unit-a", "kind": "native_failure", "reason": "旧问题"}, {"unit_id": "unit-b", "kind": "native_failure", "reason": "保留问题"}]}
+    assert asyncio.run(instance.api_map_commit(Request(baseline))).success
+    restored = {"partial": True, "scope_verified": True, "download_units": [{"id": "unit-a", "root": {"path": "/private/A"}}], "library_nodes": [], "findings": []}
+    assert asyncio.run(instance.api_map_commit(Request(restored))).success
+    snapshot = asyncio.run(instance.api_map_snapshot()).data
+    assert [item["reason"] for item in snapshot["findings"]] == ["保留问题"]
 
 
 def test_golden_fixtures_are_deidentified_and_cover_the_known_failure_contract():

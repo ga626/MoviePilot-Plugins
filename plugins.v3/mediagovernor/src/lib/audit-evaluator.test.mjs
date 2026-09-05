@@ -31,3 +31,16 @@ test('没有关联历史的下载单元必须留下无法确认结论，不能�
   assert.equal(result.disposition, 'unconfirmed')
   assert.equal(result.findings[0].kind, 'unconfirmed')
 })
+
+test('最近失败不能被旧成功掩盖，且假成功要核验实际目标文件和目录', () => {
+  const unit = { id: 'case', root: { name: 'Show' }, entries: [{ name: 'Show.S01E01.mkv' }] }
+  const failure = evaluateUnitAudit({ unit, history: [{ id: 1, status: true }, { id: 2, status: false }], latest: { id: 2, status: false } })
+  assert.equal(failure.findings[0].kind, 'native_failure')
+  const falseSuccess = evaluateUnitAudit({
+    unit,
+    history: [{ id: 3, status: true, dest: '/library/tv/Show/S01/E01.mkv' }],
+    diagnosis: { title: 'Show', media_type: 'tv', season: 1, confidence: .9, abstain: false },
+    targetEvidence: { target: { category_ok: false, season_ok: false, identity_ok: false, episode_ok: false } },
+  })
+  assert.deepEqual(falseSuccess.findings.map(item => item.kind).sort(), ['category_error', 'episode_error', 'hierarchy_error', 'identity_error'])
+})

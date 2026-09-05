@@ -52,13 +52,13 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "以当前下载区与媒体库为准，找出真实整理问题并只经官方预览重建。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "3.0.3"
+    plugin_version = "3.1.0"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
     plugin_order = 99
     auth_level = 1
-    _map_schema = "3.2"
+    _map_schema = "3.3"
     _max_units, _max_nodes, _max_batch_units, _max_batch_chars = 2500, 30000, 12, 28000
     _max_cached_diagnoses, _request_timeout_seconds = 300, 45
 
@@ -80,7 +80,7 @@ class MediaGovernor(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> tuple[str, str]:
-        return "vue", "dist/v3.0.3/assets"
+        return "vue", "dist/v3.1.0/assets"
 
     def get_sidebar_nav(self) -> list[dict[str, Any]]:
         return []
@@ -231,6 +231,7 @@ class MediaGovernor(_PluginBase):
 
     def _normalise_commit(self, body: Any) -> tuple[dict[str, Any] | None, str]:
         if not isinstance(body, dict): return None, "媒体地图不是有效 JSON"
+        if body.get("scope_verified") is not True: return None, "下载范围未通过验证，拒绝保存媒体地图"
         raw_units, raw_library, raw_findings = body.get("download_units"), body.get("library_nodes"), body.get("findings")
         if not all(isinstance(value, list) for value in (raw_units, raw_library, raw_findings)): return None, "媒体地图缺少下载单元、媒体库或核对结果"
         if len(raw_units) > self._max_units or len(raw_library) > self._max_nodes: return None, "本轮地图超过安全上限，请分根目录建立地图"
@@ -248,7 +249,9 @@ class MediaGovernor(_PluginBase):
         if partial:
             old_units = {row.get("id"): row for row in self._runtime_map.get("download_units") or []}
             old_units.update({row.get("id"): row for row in units})
-            old_findings = [row for row in self._runtime_map.get("findings") or [] if row.get("unit_id") not in {item.get("unit_id") for item in findings}]
+            # 即使这次已恢复正常、没有新结论，也必须移除该下载单元的旧问题。
+            rescanned_unit_ids = {row.get("id") for row in units}
+            old_findings = [row for row in self._runtime_map.get("findings") or [] if row.get("unit_id") not in rescanned_unit_ids]
             units, findings, library = list(old_units.values()), old_findings + findings, self._runtime_map.get("library_nodes") or library
         coverage_in = body.get("coverage") if isinstance(body.get("coverage"), dict) else {}
         coverage = {self._safe_text(key, 40): int(value or 0) for key, value in coverage_in.items() if isinstance(value, (int, float, bool))}
