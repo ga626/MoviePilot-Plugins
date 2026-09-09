@@ -1,4 +1,18 @@
 {
+  "MediaGovernorValidator": {
+    "name": "媒体治理验证台",
+    "description": "一次安装完成下载边界、AI、数据库候选、官方预览与问题对账的全链只读验证。",
+    "labels": "媒体治理,只读验证,AI评估,整理审计",
+    "version": "0.1.0",
+    "icon": "Moviepilot_A.png",
+    "author": "MoviePilotMediaGovernor contributors",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v0.1.0": "新增独立只读验证台；一次运行完成 V0-V8、停止恢复、脱敏报告和上线前硬门验证。"
+    }
+  },
   "MediaGovernor": {
     "name": "媒体治理",
   "description": "逐作品核对当前文件与 MoviePilot 应有结果，找出整理失败和假成功并安全重建。",

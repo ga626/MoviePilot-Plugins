@@ -1,5 +1,16 @@
 # MediaGovernor 界面合同
 
+### UI decision: 独立只读验证台
+
+- 用户与目标：在一次安装中验证 V0-V8 全链，明确能否进入正式 MediaGovernor 重构，而不是直接修复媒体。
+- 信息层级：整体门槛、当前阶段、四类最终数量、九阶段回执；不展示内部对象堆叠成“问题数”。
+- 数据与权限：页面只调用 plan/run/status/export 四类 bearer API；AI 前展示脱敏字段和预计调用，验证插件没有媒体写入 API。
+- 状态合同：覆盖 idle、running、stopping、completed、completed_with_findings、cancelled、interrupted 和 failed；阶段区分 passed、failed、blocked、skipped。
+- 技术选择：沿用 Vue 3、联邦构建和 MoviePilot/Vuetify 语义变量；参考 21st Task Steps 的阶段模式但不安装 React/shadcn 组件，不新增依赖。
+- 响应式与无障碍：760px、480px 两级收敛，原生按钮禁用，状态使用 `aria-live`，确认层声明 dialog，遵守 `prefers-reduced-motion`。
+- 验收：四按钮语义、运行前确认、阶段进度、停止/继续、脱敏导出、深浅宿主主题、移动端与真实插件页面。
+- 回滚：删除独立 `MediaGovernorValidator` 条目即可，不影响正式 `MediaGovernor`。
+
 ### UI decision: v5 逐作品对账台
 
 - 用户与目标：用户只需要看到已经证明的整理失败与假成功，在歧义时确认一次作品身份，并在逐文件预览后安全重建。

@@ -18,6 +18,9 @@ lib64/
 !plugins.v3/mediagovernor/src/lib/
 !plugins.v3/mediagovernor/src/lib/*.js
 !plugins.v3/mediagovernor/src/lib/*.mjs
+!plugins.v3/mediagovernorvalidator/src/lib/
+!plugins.v3/mediagovernorvalidator/src/lib/*.js
+!plugins.v3/mediagovernorvalidator/src/lib/*.mjs
 parts/
 sdist/
 var/

@@ -1,0 +1,115 @@
+{
+  "schema": "knowledgeradar-research-evidence/v1",
+  "artifact": {
+    "report_path": "docs/architecture/mediagovernor-single-install-validation-plugin-design-2026-09-09.md",
+    "title": "MediaGovernor 单次安装验证插件：完整设计与实施边界",
+    "created_at": "2026-09-09T15:30:00+08:00",
+    "scope": "基于用户对新旧下载器断代的解释，将全部 source-first 验证收敛为一个独立只读插件和一次安装执行图"
+  },
+  "research_task": {
+    "task_id": "kr-research-4773c078cb6357ef",
+    "objective": "设计一个一次安装覆盖全部关键验证的 MediaGovernor 独立只读验证插件，并定义依赖、并行、验收、隐私、恢复和实施 PR 边界。"
+  },
+  "budget": {
+    "selected_profile": "deep",
+    "rationale": "任务需要整合现场证据、现有源码合同、既有设计和外部 LLM 评估工程资料，并形成可执行的发布前硬门。",
+    "remaining_repair_rounds": 2
+  },
+  "tool_calls": [
+    {"id":"T001","tool":"mcp__knowledgeradar__health_check/get_capabilities","purpose":"确认原生 KR 工具面、来源能力和深研质量合同。","status":"ok"},
+    {"id":"T002","tool":"mcp__knowledgeradar__kr_research","purpose":"建立本次深研任务、来源生态和收口合同。","status":"ok"},
+    {"id":"T003","tool":"PowerShell rg/Get-Content/git","purpose":"考古项目规则、source-first 最终报告、P0-A 现场回执、正式插件布局、清单和 MoviePilot 当前源码。","status":"ok"},
+    {"id":"T004","tool":"mcp__knowledgeradar__kr_web_search/extract_web_page","purpose":"发现并抽取 qBittorrent、OpenAI evals 和 Structured Outputs 官方资料。","status":"ok"},
+    {"id":"T005","tool":"mcp__knowledgeradar__review_research_progress","purpose":"在本地考古后检查未登记缺口。","status":"ok"}
+  ],
+  "evidence_items": [
+    {"id":"E001","type":"prior_report","source":"docs/architecture/mediagovernor-source-first-p0-a-live-validation-2026-09-09.md","summary":"当前 qBittorrent 的一个做种任务可完整展开十个文件；1795 条历史仅四条有 download_hash，下载页面接口漏掉该做种任务。","strength":"strong"},
+    {"id":"E002","type":"runtime_probe","source":"current_conversation_user_clarification","summary":"当前下载器是新下载器，旧任务和旧记录缺失是预期断代；以后新下载会保留在当前下载器。","strength":"strong"},
+    {"id":"E003","type":"upstream_code","source":"../MoviePilot/app/chain/base.py:857-878,1114-1123","summary":"MoviePilot DownloadChain 公开 list_torrents 与 torrent_files(tid, downloader)，可作为新下载强边界的插件内只读入口。","strength":"strong"},
+    {"id":"E004","type":"upstream_code","source":"../MoviePilot/app/schemas/transfer.py:14-55","summary":"DownloaderTorrent 提供下载器、hash、路径和状态，DownloaderFile 提供统一文件名、大小、优先级和进度投影。","strength":"strong"},
+    {"id":"E005","type":"upstream_code","source":"../MoviePilot/app/schemas/query.py:255-292","summary":"稳定 TransferHistorySnapshot 包含源、目标、身份、季集、download_hash、状态和 files，可用于关系证据但不足以恢复无 hash 的原始 torrent。","strength":"strong"},
+    {"id":"E006","type":"upstream_code","source":"../MoviePilot/app/sdk/queries.py:212-225","summary":"MoviePilot SDK 提供同步与异步分页整理历史查询。","strength":"strong"},
+    {"id":"E007","type":"local_code","source":"package.v3.json:2-12; AGENTS.md","summary":"当前 MediaGovernor 5.0.1 是正式产品；仓库允许新插件使用 plugins.v3/<id>、tests/v3/<id> 和 package.v3.json，但验证工具必须与正式修复隔离。","strength":"strong"},
+    {"id":"E008","type":"prior_report","source":"docs/architecture/mediagovernor-source-first-final-design-and-validation-plan-2026-09-09.md","summary":"既有最终设计已定义完整下载项、AI 项内拆分、数据库身份、preview 应有目标和 S/C/E 对账，并要求 P0-A 至 P3 验证。","strength":"strong"},
+    {"id":"E009","type":"web","source":"https://github.com/qbittorrent/qbittorrent/wiki/WebUI-API-(qBittorrent-5.0)","summary":"qBittorrent 官方 WebUI API 以 torrent hash 作为任务身份并提供只读 GET 与任务文件相关接口。","strength":"strong","receipt_id":"receipt-ef7936ef3fe950c9"},
+    {"id":"E010","type":"web","source":"https://developers.openai.com/api/docs/guides/evals","summary":"OpenAI 官方 evals 指南要求先描述任务和评价标准，再以测试输入运行和分析结果，支持验证先于产品集成。","strength":"strong","receipt_id":"receipt-333f186bf9c98469"},
+    {"id":"E011","type":"web","source":"https://developers.openai.com/api/docs/guides/structured-outputs","summary":"OpenAI 官方文档说明 Structured Outputs 可遵循 JSON Schema并显式检测拒答；这只保证结构，不保证媒体事实正确。","strength":"strong","receipt_id":"receipt-b44781bf2666a600"},
+    {"id":"E012","type":"academic","source":"https://arxiv.org/abs/2307.03172","summary":"Lost in the Middle 证明长上下文的信息位置会影响利用效果，反对一次把全库输入模型。","strength":"strong","inherited_from":"mediagovernor-source-first-final-design-and-validation-plan-2026-09-09.evidence.json"},
+    {"id":"E013","type":"web","source":"https://www.microsoft.com/en-us/research/publication/batchprompt-accomplish-more-with-less/","summary":"BatchPrompt 表明批量可减少调用和 token，但普通批量存在准确率与顺序风险，支持在同一候选内做 1/3/5 消融。","strength":"strong","inherited_from":"mediagovernor-source-first-final-design-and-validation-plan-2026-09-09.evidence.json"}
+  ],
+  "claims": [
+    {"id":"C001","importance":"critical","claim":"用户对下载器断代的解释使旧 hash 低覆盖不再阻断新下载主链；新下载必须走 torrent 强边界，旧库存必须诚实降级为顶层推定边界。","supporting_evidence_ids":["E001","E002","E003","E004","E005","E009"]},
+    {"id":"C002","importance":"critical","claim":"下一步应创建独立临时只读验证插件，一次安装包含全部验证变体，而不是继续修改正式 MediaGovernor 或每项实验发一版。","supporting_evidence_ids":["E007","E008","E010"]},
+    {"id":"C003","importance":"critical","claim":"验证必须遵循边界、文件守恒、AI 拆分、数据库身份、preview、S/C/E 和真值回放的依赖门；只有无依赖分支可受控并行。","supporting_evidence_ids":["E003","E004","E005","E006","E008","E010","E011"]},
+    {"id":"C004","importance":"high","claim":"AI 默认证据格式和批次不能预设，应在同一安装中对完整树、结构压缩树、1/3/5 批次及顺序变化统一实验。","supporting_evidence_ids":["E010","E011","E012","E013"]},
+    {"id":"C005","importance":"critical","claim":"验证插件不得拥有媒体写入能力；正式引擎不能读取隐藏答案，所有结果必须可追溯且脱敏。","supporting_evidence_ids":["E007","E008","E010"]}
+  ],
+  "known_issues": {
+    "schema":"knowledgeradar-known-issues/v1",
+    "generated_at":"2026-09-09T15:30:00+08:00",
+    "report_path":"docs/architecture/mediagovernor-single-install-validation-plugin-design-2026-09-09.md",
+    "issues":[
+      {"id":"KI001","description":"当前 NAS 插件运行时尚未真实调用 list_torrents/torrent_files。","discovered_at":"2026-09-09","status":"未解决","resolved_in_report":"已纳入 V0/V1A 硬门，但尚无运行结果。","next_action":"由验证插件 V0/V1A 做只读宿主探针。"},
+      {"id":"KI002","description":"旧库存顶层推定边界的适用形态尚未用隐藏答案 corpus 标定。","discovered_at":"2026-09-09","status":"未解决","resolved_in_report":"已限定只能标为推定或未知，不能自动修复。","next_action":"由 V1B/V7 对真实典型形态评分，未知不自动修复。"},
+      {"id":"KI003","description":"当前 AI 通道的严格 Schema、usage、最优格式、批次和 timeout 尚无统一实测。","discovered_at":"2026-09-09","status":"未解决","resolved_in_report":"已设计同一候选内的完整 V3 消融矩阵。","next_action":"由 V3 在一次安装内完成全部消融。"},
+      {"id":"KI004","description":"MoviePilot 候选字段和 preview 完整参数合同尚未现场证明。","discovered_at":"2026-09-09","status":"未解决","resolved_in_report":"已将候选与 preview 分别设为 V4/V5 硬门。","next_action":"由 V4/V5 专项验证真人动画、同名年份、类型和季集。"},
+      {"id":"KI005","description":"公开发布前是否存在受支持且绑定候选 SHA 的 NAS 安装路径尚未确认。","discovered_at":"2026-09-09","status":"未解决","resolved_in_report":"已列为发布硬停止条件，禁止用公开版本绕过候选验收。","next_action":"V0 查明；缺失时停止收口，不发布未做首次宿主验收的正式版本。"}
+    ]
+  },
+  "decision_register": {
+    "schema":"knowledgeradar-decision-register/v1",
+    "generated_at":"2026-09-09T15:30:00+08:00",
+    "report_path":"docs/architecture/mediagovernor-single-install-validation-plugin-design-2026-09-09.md",
+    "decisions":[
+      {"id":"D001","title":"使用独立只读验证插件","status":"pending_user_decision","recommended_action":"新建 MediaGovernorValidator，一次安装覆盖 V0-V8，正式 MediaGovernor 本轮不动。","options":[{"value":"approve"},{"value":"reject"},{"value":"defer"}],"decision_record_location":["第2节","第9节"],"next_review":"进入实现前"},
+      {"id":"D002","title":"新旧下载分轨","status":"approved","recommended_action":"新下载走 torrent 强边界，旧库存走当前顶层推定边界。","options":[{"value":"approve"},{"value":"reject"},{"value":"defer"}],"decision_record_location":["第1节","第3.2节"],"next_review":"V1 结果后"},
+      {"id":"D003","title":"一个候选内完成全部实验矩阵","status":"approved","recommended_action":"只因验证插件自身或宿主合同缺陷生成新 SHA，不因某个实验结果不佳发版。","options":[{"value":"approve"},{"value":"reject"},{"value":"defer"}],"decision_record_location":["第3节","第7节"],"next_review":"候选冻结前"}
+    ]
+  },
+  "questioner_checkpoints": [
+    {"stage":"after_local_archaeology","questions":["旧 hash 缺失究竟是设计失败还是历史断代？","为什么一定要新插件？","哪些阶段真有依赖？"],"decision":"split_new_and_legacy_boundaries_and_isolate_validator","reason":"用户确认旧数据来自旧下载器；当前正式插件和实验逻辑必须隔离，边界完整性是后续语义与对账的前置条件。"},
+    {"stage":"after_first_external_round","questions":["一次安装如何避免把所有工作同时乱跑？","Schema 是否等于事实正确？","批量能否直接定为默认？"],"decision":"staged_dag_with_hidden_answer_eval_and_measured_batching","reason":"官方 evals 支持先定义数据和评分；Structured Outputs 只保证格式；长上下文和批量研究要求真实消融。"},
+    {"stage":"before_final_report","questions":["所有旧未知项是否都被一个插件覆盖？","失败会不会被误报为整体通过？","下一版的合法触发条件是否明确？","公开前真实宿主验收是否有硬停止？"],"decision":"single_candidate_v0_to_v8_with_release_blocker","reason":"报告把所有未知项映射到 V0-V8、规定关键门状态传播，并将候选安装身份列为发布阻断。"}
+  ],
+  "roadmap": [
+    {"phase":"V0","task":"宿主能力预检","method":"逐项调用公开只读入口并做前后零写入核对","input":"当前宿主只读能力","output":"能力矩阵","acceptance":"每项有明确状态且写操作为零","dependency":"none"},
+    {"phase":"V1","task":"新下载强边界与旧库存推定边界","method":"并行枚举下载器任务和去重后的下载根，分别生成可信度回执","input":"下载器任务与唯一下载根","output":"完整边界及可信度","acceptance":"强边界完整，弱边界不冒充强","dependency":"V0"},
+    {"phase":"V2","task":"文件守恒证据编译","method":"为每个文件分配稳定ID并核对观察、表示、忽略和读取失败数量守恒","input":"完整边界","output":"版本化脱敏证据","acceptance":"observed=represented+ignored+read_failed","dependency":"V1"},
+    {"phase":"V3","task":"证据与批次消融","method":"在同一冻结corpus上交叉运行三种证据格式、1/3/5批次及顺序变化","input":"冻结 corpus","output":"准确率、token、耗时与顺序稳定性","acceptance":"阻断样本准确且文件覆盖100%","dependency":"V2"},
+    {"phase":"V4","task":"数据库候选核验","method":"保存前五候选并逐字段核对标题年份类型呈现方式和季集","input":"AI 身份假设","output":"前五候选和确认理由","acceptance":"正确候选入前五且高风险零错确认","dependency":"V3"},
+    {"phase":"V5","task":"preview 字段消融","method":"从最少字段到完整身份和fileitems逐组增加参数并核对零写入目标","input":"稳定身份和逐文件输入","output":"应有目标与完整参数合同","acceptance":"阻断样本目标全对且零写入","dependency":"V4"},
+    {"phase":"V6","task":"S/C/E 对账","method":"程序逐文件比较源、当前目标和应有目标并保留冲突与未知","input":"源、当前目标和应有目标","output":"正常、真失败、假成功、确认和读取失败","acceptance":"结论逐文件可解释","dependency":"V1,V5"},
+    {"phase":"V7","task":"隐藏答案真值回放","method":"先运行正式引擎再由隔离评价器读取答案评分","input":"冻结输入与隔离答案","output":"召回、误报和未知报告","acceptance":"已知问题全召回、正常零误报、未知不作正常","dependency":"V6"},
+    {"phase":"V8","task":"性能停止恢复增量","method":"注入刷新重载超时坏JSON和单项变化，核对checkpoint与限流","input":"通过语义门的完整引擎","output":"P50/P95、取消、恢复和增量回执","acceptance":"慢项隔离、checkpoint 可续、未变化不重跑","dependency":"V7"}
+  ],
+  "planning_diagram":{"maps_to_roadmap":true},
+  "claim_evidence_chains": [
+    {"claim_id":"C001","tool_call_ids":["T003","T004"],"evidence_ids":["E001","E002","E003","E004","E005","E009"],"sources":["P0-A现场回执","用户解释","MoviePilot源码","qBittorrent官方API"],"extracted_facts":["当前任务可给完整文件","旧历史hash低覆盖属于断代","宿主有按任务列文件入口"],"inference":"新旧数据必须分轨，旧库存不阻断未来强边界。","limitations":"插件上下文真实调用待V0/V1。","strength":"strong"},
+    {"claim_id":"C002","tool_call_ids":["T003","T004"],"evidence_ids":["E007","E008","E010"],"sources":["项目规则","既有最终设计","OpenAI evals官方指南"],"extracted_facts":["正式产品已有复杂历史","先定义测试数据和评分是可靠应用基础"],"inference":"应隔离成一次安装的验证工具，再把通过合同移植回正式产品。","limitations":"候选安装路径待V0确认。","strength":"strong"},
+    {"claim_id":"C004","tool_call_ids":["T004"],"evidence_ids":["E010","E011","E012","E013"],"sources":["OpenAI官方文档","Lost in the Middle","BatchPrompt"],"extracted_facts":["Schema只约束格式","长上下文有位置风险","批量有效率收益也有准确率和顺序风险"],"inference":"同一候选必须统一测试证据格式、1/3/5批次和顺序，不能预设默认值。","limitations":"论文任务不同于媒体识别，参数只能由本项目真值集决定。","strength":"strong"}
+  ],
+  "coverage": {
+    "required_surfaces":["current_code","upstream_code","prior_reports","runtime_probe","official_web","academic_research","user_clarification"],
+    "covered_surfaces":["current_code","upstream_code","prior_reports","runtime_probe","official_web","academic_research","user_clarification"],
+    "skipped_surfaces":[
+      {"surface":"live_nas_mutation","reason":"本轮只设计验证插件，不操作 NAS。","reopen_condition":"用户批准实现并获得绑定 SHA 的候选安装路径。"},
+      {"surface":"external_model_call","reason":"本轮定义实验矩阵，不发送真实文件名或产生模型费用。","reopen_condition":"用户安装冻结验证候选并主动点击运行。"},
+      {"surface":"social_platforms","reason":"官方 API、源码、现场回执和评估研究直接覆盖本报告主张。","reopen_condition":"需要研究非技术用户交互行为时。"}
+    ]
+  },
+  "process_quality": {
+    "schema":"knowledgeradar-process-quality/v1",
+    "task_type":"single_install_validation_plugin_design",
+    "capability_handshake":{"health_check":true,"get_capabilities":true,"access_path":"native_mcp"},
+    "local_archaeology":{"performed":true,"scope":["project AGENTS","package.v3.json","source-first final design","P0-A live receipt","MoviePilot downloader and history contracts"]},
+    "external_research":{"performed":true,"sources":["qBittorrent official WebUI API","OpenAI evals official guide","OpenAI Structured Outputs official guide","Lost in the Middle","BatchPrompt"]},
+    "preflight_skip_reason":"本报告是在用户补充旧下载器断代事实后，对已完成 source-first 报告和 P0-A 回执进行重新设计；研究开始前未生成独立 preflight，不能事后补写冒充前置证据，改以继承的已知问题、三阶段 questioner checkpoints 和最终质量门记录过程。",
+    "counterevidence":"Structured Outputs can guarantee schema adherence but not media identity correctness; BatchPrompt can save calls and tokens but may reduce accuracy and introduce order effects. Both prevent overclaiming the preferred AI format or batch size before real evals.",
+    "source_ecology_plan":{"considered":["github_repository_ecology","generic_web_ecology","academic_literature_ecology","wechat_public_article_ecology","bilibili_video_ecology","youtube_video_ecology","zhihu_discussion_ecology","xiaohongshu_experience_ecology"],"selected":["github_repository_ecology","generic_web_ecology","academic_literature_ecology"],"skipped":["wechat_public_article_ecology","bilibili_video_ecology","youtube_video_ecology","zhihu_discussion_ecology","xiaohongshu_experience_ecology"]},
+    "validation_ladder":{"selected_profile":"deep","selected":"readonly_design_and_quality_gate","commands":["native KR handshake","KR deep route","local source archaeology","official page extraction","research quality check","git diff --check"],"skipped_heavier_gates":["No product code changed, so build, plugin load, model calls, NAS write and release gates are not applicable this turn."]},
+    "presentation":[{"surface":"report_section","path":"docs/architecture/mediagovernor-single-install-validation-plugin-design-2026-09-09.md"}],
+    "code_modified":false,
+    "nas_modified":false,
+    "release_performed":false
+  }
+}
