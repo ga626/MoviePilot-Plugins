@@ -95,6 +95,14 @@ jobs:
           pnpm test:golden
           pnpm build
 
+      - name: Build MediaGovernorValidator federation bundle
+        working-directory: plugins.v3/mediagovernorvalidator
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm build
+          git diff --exit-code -- dist
+
   plugin-dependency-install-gate:
     name: V3 dependency install (${{ matrix.name }})
     strategy:

@@ -1,0 +1,5 @@
+packages:
+  - .
+allowBuilds:
+  # Vite 的平台二进制；只允许这一项依赖执行安装脚本。
+  esbuild: true
