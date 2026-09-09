@@ -1,1 +1,87 @@
-const m={},p=new Set(["Module","__esModule","default","_export_sfc"]);let b={"./Page":()=>(u(["__federation_expose_AppPage-DrGny14P.css"],!1,"./Page"),v("./__federation_expose_Page-LQtwRK3R.js").then(e=>Object.keys(e).every(t=>p.has(t))?()=>e.default:()=>e)),"./Config":()=>(u(["__federation_expose_Config-B-fOjGw-.css"],!1,"./Config"),v("./__federation_expose_Config-DKCYdTuU.js").then(e=>Object.keys(e).every(t=>p.has(t))?()=>e.default:()=>e)),"./AppPage":()=>(u(["__federation_expose_AppPage-DrGny14P.css"],!1,"./AppPage"),v("./__federation_expose_AppPage-CRudHTHM.js").then(e=>Object.keys(e).every(t=>p.has(t))?()=>e.default:()=>e))};const y={},u=(e,t,l)=>{const s=import.meta.url;if(typeof s>"u"){console.warn('The remote style takes effect only when the build.target option in the vite.config.ts file is higher than that of "es2020".');return}const i=s.substring(0,s.lastIndexOf("remoteEntry.js")),a='/';'v0.1.0/assets',e.forEach(_=>{let o="";const c=a||i;if(c){const r={trailing:n=>n.endsWith("/")?n.slice(0,-1):n,leading:n=>n.startsWith("/")?n.slice(1):n},E=n=>n.startsWith("http")||n.startsWith("//"),f=r.trailing(c),g=r.leading(_),h=r.trailing(i);E(c)?o=[f,g].filter(Boolean).join("/"):h.includes(f)?o=[h,g].filter(Boolean).join("/"):o=[h+f,g].filter(Boolean).join("/")}else o=_;if(t){const r="css__MediaGovernorValidator__"+l;window[r]=window[r]||[],window[r].push(o);return}if(o in y)return;y[o]=!0;const d=document.createElement("link");d.rel="stylesheet",d.href=o,document.head.appendChild(d)})};async function v(e){return m[e]??=import(e),m[e]}const P=e=>{if(!b[e])throw new Error("Can not find remote module "+e);return b[e]()},j=e=>{globalThis.__federation_shared__=globalThis.__federation_shared__||{},Object.entries(e).forEach(([t,l])=>{for(const[s,i]of Object.entries(l)){const a=i.scope||"default";globalThis.__federation_shared__[a]=globalThis.__federation_shared__[a]||{};const _=globalThis.__federation_shared__[a];(_[t]=_[t]||{})[s]=i}})};export{u as dynamicLoadingCss,P as get,j as init};
+const currentImports = {};
+      const exportSet = new Set(['Module', '__esModule', 'default', '_export_sfc']);
+      let moduleMap = {
+"./Page":()=>{
+      dynamicLoadingCss(["__federation_expose_AppPage-YfQ6bNTg.css"], false, './Page');
+      return __federation_import('./__federation_expose_Page-Clc3Uuwj.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+"./Config":()=>{
+      dynamicLoadingCss(["__federation_expose_Config-xy7dl4ZH.css"], false, './Config');
+      return __federation_import('./__federation_expose_Config-BrkErV-h.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+"./AppPage":()=>{
+      dynamicLoadingCss(["__federation_expose_AppPage-YfQ6bNTg.css"], false, './AppPage');
+      return __federation_import('./__federation_expose_AppPage-BihEU34L.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
+      const seen = {};
+      const dynamicLoadingCss = (cssFilePaths, dontAppendStylesToHead, exposeItemName) => {
+        const metaUrl = import.meta.url;
+        if (typeof metaUrl === 'undefined') {
+          console.warn('The remote style takes effect only when the build.target option in the vite.config.ts file is higher than that of "es2020".');
+          return;
+        }
+
+        const curUrl = metaUrl.substring(0, metaUrl.lastIndexOf('remoteEntry.js'));
+        const base = '/';
+        'v0.1.0/assets';
+
+        cssFilePaths.forEach(cssPath => {
+         let href = '';
+         const baseUrl = base || curUrl;
+         if (baseUrl) {
+           const trimmer = {
+             trailing: (path) => (path.endsWith('/') ? path.slice(0, -1) : path),
+             leading: (path) => (path.startsWith('/') ? path.slice(1) : path)
+           };
+           const isAbsoluteUrl = (url) => url.startsWith('http') || url.startsWith('//');
+
+           const cleanBaseUrl = trimmer.trailing(baseUrl);
+           const cleanCssPath = trimmer.leading(cssPath);
+           const cleanCurUrl = trimmer.trailing(curUrl);
+
+           if (isAbsoluteUrl(baseUrl)) {
+             href = [cleanBaseUrl, cleanCssPath].filter(Boolean).join('/');
+           } else {
+            if (cleanCurUrl.includes(cleanBaseUrl)) {
+              href = [cleanCurUrl, cleanCssPath].filter(Boolean).join('/');
+            } else {
+              href = [cleanCurUrl + cleanBaseUrl, cleanCssPath].filter(Boolean).join('/');
+            }
+           }
+         } else {
+           href = cssPath;
+         }
+
+          if (dontAppendStylesToHead) {
+            const key = 'css__MediaGovernorValidator__' + exposeItemName;
+            window[key] = window[key] || [];
+            window[key].push(href);
+            return;
+          }
+
+          if (href in seen) return;
+          seen[href] = true;
+
+          const element = document.createElement('link');
+          element.rel = 'stylesheet';
+          element.href = href;
+          document.head.appendChild(element);
+        });
+      };
+      async function __federation_import(name) {
+        currentImports[name] ??= import(name);
+        return currentImports[name]
+      }      const get =(module) => {
+        if(!moduleMap[module]) throw new Error('Can not find remote module ' + module)
+        return moduleMap[module]();
+      };
+      const init =(shareScope) => {
+        globalThis.__federation_shared__= globalThis.__federation_shared__|| {};
+        Object.entries(shareScope).forEach(([key, value]) => {
+          for (const [versionKey, versionValue] of Object.entries(value)) {
+            const scope = versionValue.scope || 'default';
+            globalThis.__federation_shared__[scope] = globalThis.__federation_shared__[scope] || {};
+            const shared= globalThis.__federation_shared__[scope];
+            (shared[key] = shared[key]||{})[versionKey] = versionValue;
+          }
+        });
+      };
+
+export { dynamicLoadingCss, get, init };
