@@ -52,8 +52,15 @@ def model_dict(value: Any) -> dict[str, Any]:
 
 
 def normal_path(value: Any) -> str:
+    """Normalize separators without changing path case.
+
+    MoviePilot can observe case-sensitive Linux paths and case-insensitive
+    mounts.  Folding every path to lowercase makes two distinct Linux paths
+    collide, so callers must keep the storage/provider semantics when they
+    decide whether a case-insensitive lookup is valid.
+    """
     text = str(value or "").replace("\\", "/").rstrip("/")
-    return text.casefold()
+    return text
 
 
 def under(path: Any, root: Any) -> bool:
@@ -72,11 +79,37 @@ def json_text(value: Any, *, sort_keys: bool = False) -> str:
 
 
 def fingerprint(entries: Iterable[dict[str, Any]]) -> str:
-    rows = sorted(
-        f"{normal_path(row.get('path'))}|{row.get('type') or ''}|{int(row.get('size') or 0)}|{row.get('modify_time') or 0}"
-        for row in entries
-    )
+    rows = []
+    for row in entries:
+        item = {
+            "path": normal_path(row.get("path")),
+            "storage": str(row.get("storage") or "local"),
+            "type": str(row.get("type") or ""),
+            "size": int(row.get("size") or 0),
+            "modify_time": row.get("modify_time") or 0,
+        }
+        if item["type"] == "dir":
+            # Directory DTOs carry the naming/category rules that determine
+            # the official preview.  Include stable config fields so a rule
+            # change invalidates the preview cache.
+            item["config"] = {
+                str(key): value
+                for key, value in row.items()
+                if key not in {"path", "storage", "type", "size", "modify_time"}
+                and value is not None
+            }
+        rows.append(json_text(item, sort_keys=True))
     return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+
+
+def preview_cache_usable(payload: dict[str, Any], basis: str) -> bool:
+    """Only reuse a successful preview with the exact current basis."""
+    if not isinstance(payload, dict) or payload.get("_basis") != basis:
+        return False
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    if int(summary.get("failed") or 0) > 0:
+        return False
+    return bool(payload.get("items")) and int(summary.get("total") or 0) > 0
 
 
 def item_name(item: dict[str, Any]) -> str:
@@ -304,7 +337,7 @@ def partition_entries(top: dict[str, Any], entries: list[dict[str, Any]], histor
         season_children = any(re.fullmatch(r"(?:season|s)[ ._-]?\d{1,2}", key, re.IGNORECASE) for key in splittable)
         if len(splittable) >= 2 and not season_children:
             for child in splittable:
-                groups[f"folder:{child}"] = children[child]
+                groups[f"folder:{child.casefold()}"] = children[child]
             leftovers = [row for key, values in children.items() if key not in splittable for row in values]
             if leftovers:
                 groups["unmatched"] = leftovers
@@ -940,7 +973,7 @@ class GovernorService:
             basis = stable_id(obj["fingerprint"], identity_key(identity), config_fp)
             cached = self.ledger.one("SELECT payload_json FROM observations WHERE object_id=? AND kind='preview'", (obj["id"],))
             cached_payload = json.loads(cached["payload_json"]) if cached else {}
-            if cached_payload.get("_basis") == basis and not force_preview:
+            if preview_cache_usable(cached_payload, basis) and not force_preview:
                 preview = cached_payload
             else:
                 try:

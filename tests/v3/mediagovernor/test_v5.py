@@ -393,6 +393,35 @@ def test_incremental_reuses_unchanged_candidate_without_ai(tmp_path):
     assert service.detail("one")["candidates"] == [candidate]
 
 
+def test_directory_rule_change_invalidates_configuration_fingerprint():
+    before = {"path": "/fixture/library/movie", "storage": "local", "type": "dir", "rename_format": "A"}
+    after = {**before, "rename_format": "B"}
+    assert G.fingerprint([before]) != G.fingerprint([after])
+
+
+def test_failed_preview_is_not_reused_as_a_successful_cache(tmp_path):
+    adapter = FakeAdapter()
+    service = G.GovernorService(tmp_path, adapter)
+    source = {"path": "/fixture/download/Film.mkv", "storage": "local", "type": "file", "name": "Film.mkv", "size": 10}
+    obj = {"id": "one", "label": "Film", "fingerprint": G.fingerprint([source]), "root": source, "entries": [source], "preview_sources": [source], "complete": True}
+    identity = {"title": "Film", "media_type": "movie", "media_source": "themoviedb", "media_id": "1"}
+    inv = G.Inventory([obj], [{"path": "/fixture/library/movie", "storage": "local", "type": "dir", "rename_format": "A"}], [], [])
+    service.ledger.upsert_object(obj)
+    service.ledger.save_identity("one", "confirmed", obj["fingerprint"], identity, [identity], "user_confirmed")
+    adapter.preview_value = {"summary": {"total": 0, "success": 0, "failed": 1}, "items": [], "message": "temporary"}
+    job = service.ledger.begin_job("incremental")
+    service._process(job, obj, inv)
+    assert adapter.preview_calls == 1
+    adapter.preview_value = {"summary": {"total": 1, "success": 1, "failed": 0}, "items": [{"source": source["path"], "target": "/fixture/library/movie/Film/Film.mkv", "target_storage": "local", "success": True}]}
+    service._process(job, obj, inv)
+    assert adapter.preview_calls == 2
+
+
+def test_case_sensitive_paths_do_not_collide_in_normalization():
+    assert G.normal_path("/fixture/library/A.mkv") != G.normal_path("/fixture/library/a.mkv")
+    assert G.fingerprint([{"path": "/fixture/library/A.mkv", "type": "file"}]) != G.fingerprint([{"path": "/fixture/library/a.mkv", "type": "file"}])
+
+
 def test_full_refresh_preserves_user_confirmed_identity(tmp_path):
     class Adapter(FakeAdapter):
         def recognize(self, path): raise AssertionError("用户确认身份不得被完整重建覆盖")
