@@ -27,7 +27,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "逐作品核对当前文件与 MoviePilot 应有结果，找出整理失败和假成功。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "5.0.1"
+    plugin_version = "5.1.0"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -42,10 +42,12 @@ class MediaGovernor(_PluginBase):
             # MoviePilot 的同步存储/识别调用无法强杀。旧 worker 未退出时复用同一服务，
             # 避免热重载后两个 worker 同时读写媒体状态。
             self._service = old_service
+            self._service.ai_enabled = bool((config or {}).get("ai_enabled", False))
+            self._service.read_only = (config or {}).get("read_only") is not False
             if self._enabled:
                 self._register_transfer_events()
             return
-        self._service = GovernorService(self.get_data_path())
+        self._service = GovernorService(self.get_data_path(), ai_enabled=bool((config or {}).get("ai_enabled", False)), read_only=(config or {}).get("read_only") is not False)
         self._registered_events = False
         if self._enabled:
             self._register_transfer_events()
@@ -59,13 +61,13 @@ class MediaGovernor(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> tuple[str, str]:
-        return "vue", "dist/v5.0.1/assets"
+        return "vue", "dist/v5.1.0/assets"
 
     def get_sidebar_nav(self) -> list[dict[str, Any]]:
         return []
 
     def get_form(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        return [], {"enabled": False}
+        return [], {"enabled": False, "ai_enabled": False, "read_only": True}
 
     def get_page(self) -> list[dict[str, Any]]:
         return []
@@ -80,6 +82,7 @@ class MediaGovernor(_PluginBase):
             {"path": "/findings", "endpoint": self.api_findings, "methods": ["GET"], "auth": "bear", "summary": "读取问题、待确认项和读取错误", "response_model": GovernorResponse},
             {"path": "/objects/{object_id}", "endpoint": self.api_object, "methods": ["GET"], "auth": "bear", "summary": "读取单项私有证据", "response_model": GovernorResponse},
             {"path": "/identity/confirm", "endpoint": self.api_identity_confirm, "methods": ["POST"], "auth": "bear", "summary": "保存一次用户确认的作品身份", "response_model": GovernorResponse},
+            {"path": "/identity/search", "endpoint": self.api_identity_search, "methods": ["POST"], "auth": "bear", "summary": "按用户输入回查作品数据库候选，不使用 AI", "response_model": GovernorResponse},
             {"path": "/repair/{object_id}", "endpoint": self.api_repair, "methods": ["POST"], "auth": "bear", "summary": "重新预览或执行单项官方重建", "response_model": GovernorResponse},
         ]
 
@@ -89,7 +92,9 @@ class MediaGovernor(_PluginBase):
             mode = str((body or {}).get("mode") or "incremental")
             if mode not in {"incremental", "full", "cancel"}:
                 raise ValueError("不支持的检查模式")
-            return GovernorResponse(success=True, data=self._service.start(mode))
+            if not self._enabled and mode != "cancel":
+                raise ValueError("插件已停用，不能启动检查")
+            return GovernorResponse(success=True, data=await asyncio.to_thread(self._service.start, mode))
         except Exception as error:  # noqa: BLE001 - API 边界必须把宿主异常转成可读响应
             return GovernorResponse(success=False, message=str(error))
 
@@ -107,20 +112,39 @@ class MediaGovernor(_PluginBase):
 
     async def api_identity_confirm(self, request: Request) -> GovernorResponse:
         try:
+            if not self._enabled:
+                raise ValueError("插件已停用，不能提交身份确认")
             body = await request.json() or {}
-            result = self._service.confirm_identity(str(body.get("object_id") or ""), str(body.get("candidate_key") or ""))
+            refs = body.get("file_refs")
+            if refs is not None and (not isinstance(refs, list) or not all(isinstance(value, str) for value in refs)):
+                raise ValueError("文件选择格式错误")
+            result = await asyncio.to_thread(self._service.confirm_identity, str(body.get("object_id") or ""), str(body.get("candidate_key") or ""), refs)
             return GovernorResponse(success=True, data=result)
         except Exception as error:  # noqa: BLE001 - API 边界必须把宿主异常转成可读响应
             return GovernorResponse(success=False, message=str(error))
 
+    async def api_identity_search(self, request: Request) -> GovernorResponse:
+        try:
+            if not self._enabled:
+                raise ValueError("插件已停用，不能发起数据库搜索")
+            body = await request.json() or {}
+            data = await asyncio.to_thread(self._service.search_candidates, str(body.get("object_id") or ""), str(body.get("query") or ""))
+            return GovernorResponse(success=True, data=data)
+        except Exception as error:  # noqa: BLE001 - 用户搜索错误不改变已确认身份
+            return GovernorResponse(success=False, message=str(error))
+
     async def api_repair(self, object_id: str, request: Request) -> GovernorResponse:
         try:
+            if not self._enabled:
+                raise ValueError("插件已停用，不能预览或执行修复")
             body = await request.json() or {}
             action = str(body.get("action") or "preview")
             if action == "preview":
                 data = await asyncio.to_thread(self._service.repair_preview, object_id)
             elif action == "execute":
-                data = await asyncio.to_thread(self._service.repair_execute, object_id, str(body.get("token") or ""))
+                if self._service.read_only:
+                    raise ValueError("当前为只读模式，只能检查和预览，不能执行媒体修复")
+                data = await asyncio.to_thread(self._service.repair_execute, object_id, str(body.get("token") or ""), body.get("cleanup_approved") is True)
             else:
                 raise ValueError("不支持的修复操作")
             return GovernorResponse(success=True, data=data)

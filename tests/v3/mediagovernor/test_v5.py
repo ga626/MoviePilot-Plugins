@@ -4,12 +4,16 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import types
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 PLUGIN_DIR = ROOT / "plugins.v3/mediagovernor"
@@ -73,6 +77,11 @@ class FakeAdapter:
         self.preview_calls += 1
         return json.loads(json.dumps(self.preview_value))
 
+    def relationship(self, source, target):
+        # 旧 golden 专门回放路径判断，文件关联在 fixture 中视为已知；
+        # 真实同对象、复制和读取失败由后面的独立临时文件用例验证。
+        return {"status": "verified", "method": "fixture_relation"}
+
     def rebuild(self, entry, identity):
         self.rebuild_calls.append(entry)
         self.present[G.normal_path(entry["expected"])] = {"path": entry["expected"], "type": "file"}
@@ -95,10 +104,10 @@ def test_versions_api_and_frontend_contract_are_v5():
     package = json.loads((PLUGIN_DIR / "package.json").read_text(encoding="utf-8"))
     source = PLUGIN.read_text(encoding="utf-8")
     page = PAGE.read_text(encoding="utf-8")
-    assert manifest["version"] == package["version"] == "5.0.1"
-    assert next(iter(manifest["history"])) == "v5.0.1"
-    assert 'plugin_version = "5.0.1"' in source
-    assert 'return "vue", "dist/v5.0.1/assets"' in source
+    assert manifest["version"] == package["version"] == "5.1.0"
+    assert next(iter(manifest["history"])) == "v5.1.0"
+    assert 'plugin_version = "5.1.0"' in source
+    assert 'return "vue", "dist/v5.1.0/assets"' in source
     for endpoint in ("/audit/start", "/audit/status", "/findings", "/objects/{object_id}", "/identity/confirm", "/repair/{object_id}"):
         assert endpoint in source
     for forbidden in ("storage/list", "transfer/manual", "bundle_analyze_batch", "experiment_run", "map_commit"):
@@ -110,8 +119,8 @@ def test_versions_api_and_frontend_contract_are_v5():
     assert "正在停止…" in page and "检查已停止" in page
     module = load_plugin_with_host_boundary()
     plugin = module.MediaGovernor(); plugin.init_plugin({"enabled": False})
-    assert plugin.get_render_mode() == ("vue", "dist/v5.0.1/assets")
-    assert [row["path"] for row in plugin.get_api()] == ["/audit/start", "/audit/status", "/findings", "/objects/{object_id}", "/identity/confirm", "/repair/{object_id}"]
+    assert plugin.get_render_mode() == ("vue", "dist/v5.1.0/assets")
+    assert [row["path"] for row in plugin.get_api()] == ["/audit/start", "/audit/status", "/findings", "/objects/{object_id}", "/identity/confirm", "/identity/search", "/repair/{object_id}"]
     assert all(row["auth"] == "bear" for row in plugin.get_api())
 
 
@@ -146,7 +155,7 @@ def test_real_moviepilot_v3_runtime_constructs_initializes_and_stops_plugin():
         assert callable(list_transfer_history)
         plugin = mediagovernor.MediaGovernor()
         plugin.init_plugin({"enabled": False})
-        assert plugin.get_state() is False and plugin.get_render_mode() == ("vue", "dist/v5.0.1/assets")
+        assert plugin.get_state() is False and plugin.get_render_mode() == ("vue", "dist/v5.1.0/assets")
         plugin.stop_service()
     finally:
         configure_chain_runtime_context_provider(None)
@@ -218,11 +227,11 @@ def test_structural_fallback_splits_movie_collections_but_not_tv_seasons():
         {"path": "/fixture/download/Collection/Season 1/Show.S01E01.mkv", "name": "Show.S01E01.mkv", "type": "file"},
         {"path": "/fixture/download/Collection/Season 2/Show.S02E01.mkv", "name": "Show.S02E01.mkv", "type": "file"},
     ]
-    assert {row["group_key"] for row in G.partition_entries(top, movies, [])} == {"folder:film a", "folder:film b"}
+    assert {row["group_key"] for row in G.partition_entries(top, movies, [])} == {"folder:Film A", "folder:Film B"}
     assert [row["group_key"] for row in G.partition_entries(top, seasons, [])] == ["unmatched"]
 
 
-def test_identity_only_auto_confirms_when_native_and_history_agree(tmp_path):
+def test_native_history_agreement_is_a_candidate_not_independent_confirmation(tmp_path):
     class Adapter(FakeAdapter):
         def recognize(self, path): return {"title": "Film", "media_type": "movie", "media_source": "themoviedb", "media_id": "7"}
         def ai_queries(self, evidence): return []
@@ -231,7 +240,10 @@ def test_identity_only_auto_confirms_when_native_and_history_agree(tmp_path):
     obj = {"id": "one", "fingerprint": "fp", "root": {"path": "/fixture/download/Film"}, "entries": [{"path": "/fixture/download/Film.mkv"}]}
     agree = [{"src": "/fixture/download/Film.mkv", "media_source": "themoviedb", "media_id": "7", "type": "电影"}]
     conflict = [{**agree[0], "media_id": "8"}]
-    assert service._resolve_identity(obj, agree)[0] == "confirmed"
+    state, identity, candidates, provenance = service._resolve_identity(obj, agree)
+    assert state == "candidate" and identity == {}
+    assert [row["media_id"] for row in candidates] == ["7"]
+    assert provenance == "native_and_history_agree"
     state, identity, candidates, _ = service._resolve_identity({**obj, "id": "two"}, conflict)
     assert state == "candidate" and identity == {} and {row["media_id"] for row in candidates} == {"7", "8"}
 
@@ -276,15 +288,27 @@ def test_golden_audit_cases_replay_through_v5_classifier(tmp_path):
                 row.setdefault("target_storage", "local")
             adapter = service.adapter
             adapter.present = {G.normal_path(path): {"path": path, "type": "file"} for path in data.get("present") or []}
+            adapter.present.update({G.normal_path(row["path"]): row for row in obj["entries"]})
             inv = G.Inventory([], data.get("library_roots") or inventory().library_roots, [], [])
             findings = service._findings(obj, data["unit"].get("history") or [], "confirmed", data["identity"], preview, inv)
             expected = case["expected"]
             if expected.get("disposition") == "normal":
-                assert findings == [], case["id"]
+                # 正常对象的反证样本含故意错误的 preview：可以拒绝预览，不能报媒体故障。
+                intended = G.expected_category(data["identity"])
+                conflicting_preview = intended not in {"unknown", "other"} and any(G.root_category(row["target"], inv.library_roots) not in {"other", intended} for row in preview["items"])
+                if conflicting_preview:
+                    assert {row["kind"] for row in findings} == {"preview_error"}, case["id"]
+                else:
+                    assert findings == [], case["id"]
             elif expected.get("kind") in {"native_failure", "category_error", "identity_error", "episode_error", "hierarchy_error"}:
                 kinds = {row["kind"] for row in findings}
                 issue_kinds = {kind for row in findings for kind in (row.get("evidence") or {}).get("issue_kinds", [])}
-                assert expected["kind"] in kinds | issue_kinds, case["id"]
+                if expected["kind"] == "native_failure":
+                    assert expected["kind"] in kinds | issue_kinds, case["id"]
+                else:
+                    # 旧基线仅凭目录/季集/名称偏差标记错放，没有独立语义证据。
+                    # 保留检测召回，但不能把这个旧标签当成已经证明的身份错误。
+                    assert "path_deviation" in kinds and "false_success" not in kinds, case["id"]
             checked += 1
     assert checked >= 10
 
@@ -315,7 +339,7 @@ def test_ambiguous_identity_queries_are_batched_by_four(tmp_path):
             batches.append(len(items)); return {key: [] for key, _ in items}
         def search(self, query): return []
     batches = []
-    service = G.GovernorService(tmp_path, Adapter())
+    service = G.GovernorService(tmp_path, Adapter(), ai_enabled=True)
     objects = [{"id": str(index), "label": str(index), "fingerprint": str(index), "root": {"path": f"/fixture/{index}"}, "entries": [{"path": f"/fixture/{index}.mkv"}], "complete": True} for index in range(9)]
     service._discover = lambda job_id: G.Inventory(objects, [], [], [])
     job = service.ledger.begin_job("full")
@@ -335,7 +359,7 @@ def test_first_batch_is_saved_before_second_ai_batch_starts(tmp_path):
             return {key: [] for key, _ in items}
         def search(self, query): return []
     batches = []
-    service = G.GovernorService(tmp_path, Adapter())
+    service = G.GovernorService(tmp_path, Adapter(), ai_enabled=True)
     objects = [{"id": str(index), "label": str(index), "fingerprint": str(index), "root": {"path": f"/fixture/{index}"}, "entries": [{"path": f"/fixture/{index}.mkv"}], "complete": True} for index in range(9)]
     service._discover = lambda job_id: G.Inventory(objects, [], [], [])
     job = service.ledger.begin_job("full")
@@ -353,7 +377,7 @@ def test_blocked_ai_can_be_cancelled_and_cancel_is_not_failure(tmp_path):
             entered.set(); release.wait(5)
             return {key: [] for key, _ in items}
         def search(self, query): return []
-    service = G.GovernorService(tmp_path, Adapter())
+    service = G.GovernorService(tmp_path, Adapter(), ai_enabled=True)
     obj = {"id": "one", "label": "one", "fingerprint": "fp", "root": {"path": "/fixture/one"}, "entries": [{"path": "/fixture/one.mkv"}], "complete": True}
     service._discover = lambda job_id: G.Inventory([obj], [], [], [])
     service.start("full")
@@ -420,6 +444,21 @@ def test_failed_preview_is_not_reused_as_a_successful_cache(tmp_path):
 def test_case_sensitive_paths_do_not_collide_in_normalization():
     assert G.normal_path("/fixture/library/A.mkv") != G.normal_path("/fixture/library/a.mkv")
     assert G.fingerprint([{"path": "/fixture/library/A.mkv", "type": "file"}]) != G.fingerprint([{"path": "/fixture/library/a.mkv", "type": "file"}])
+
+
+def test_enumeration_order_does_not_invalidate_file_or_configuration_cache():
+    entries = [{"path": "/fixture/A.mkv", "type": "file", "size": 10}, {"path": "/fixture/B.mkv", "type": "file", "size": 20}]
+    roots = [{"path": "/fixture/movie", "type": "dir", "rename_format": "A"}, {"path": "/fixture/tv", "type": "dir", "rename_format": "B"}]
+    assert G.fingerprint(entries) == G.fingerprint(reversed(entries))
+    assert G.fingerprint(roots) == G.fingerprint(reversed(roots))
+
+
+def test_case_distinct_collection_folders_keep_every_file():
+    top = {"path": "/fixture/mixed", "type": "dir"}
+    entries = [{"path": f"/fixture/mixed/{name}/Film.mkv", "type": "file"} for name in ("A", "a")]
+    groups = G.partition_entries(top, entries, [])
+    assert len(groups) == 2
+    assert {entry["path"] for group in groups for entry in group["entries"]} == {entry["path"] for entry in entries}
 
 
 def test_full_refresh_preserves_user_confirmed_identity(tmp_path):
@@ -491,13 +530,13 @@ def test_preview_is_cached_but_target_existence_is_rechecked(tmp_path):
     inv = G.Inventory([obj], [{"path": "/fixture/library/movie", "name": "电影"}], [], [])
     service._process("job", obj, inv); service._process("job", obj, inv)
     assert adapter.preview_calls == 1
-    assert service.findings()["problems"][0]["kind"] == "native_failure"
+    assert service.findings()["confirmations"][0]["kind"] == "relation_confirmation"
     service._process("job", obj, inv, force_preview=True)
     assert adapter.preview_calls == 2
 
 
 def test_repair_token_expires_if_source_target_or_official_preview_changes(tmp_path):
-    adapter = FakeAdapter(); service = G.GovernorService(tmp_path, adapter)
+    adapter = FakeAdapter(); service = G.GovernorService(tmp_path, adapter, read_only=False)
     source = {"path": "/fixture/download/Film.mkv", "storage": "local", "type": "file", "name": "Film.mkv", "size": 10}
     obj = {"id": "one", "label": "Film", "fingerprint": G.fingerprint([source]), "root": source, "entries": [source], "complete": True}
     identity = {"title": "Film", "media_type": "movie", "media_source": "themoviedb", "media_id": "1"}
@@ -520,7 +559,7 @@ def test_repair_token_expires_if_source_target_or_official_preview_changes(tmp_p
 
 
 def test_repair_executes_frozen_plan_once_and_then_rechecks(tmp_path):
-    adapter = FakeAdapter(); service = G.GovernorService(tmp_path, adapter)
+    adapter = FakeAdapter(); service = G.GovernorService(tmp_path, adapter, read_only=False)
     source = {"path": "/fixture/download/Film.mkv", "storage": "local", "type": "file", "name": "Film.mkv", "size": 10}
     obj = {"id": "one", "label": "Film", "fingerprint": G.fingerprint([source]), "root": source, "entries": [source], "complete": True}
     identity = {"title": "Film", "media_type": "movie", "media_source": "themoviedb", "media_id": "1"}
@@ -558,3 +597,407 @@ def test_fixtures_are_deidentified_and_cover_real_baseline_categories():
         ids |= {row["id"] for row in json.loads(raw)["cases"]}
     required = {"native-failure", "wrong-category", "wrong-season", "wrong-episode", "wrong-identity", "movie-collection-split", "baseline-one-piece-live-action-wrong-anime", "baseline-normal-boba-fett", "baseline-sample-is-ignored"}
     assert required <= ids
+
+
+class LocalFixtureAdapter(FakeAdapter):
+    """真实临时文件 + 正式公开逐对 adapter；识别和 preview 使用确定性桩。"""
+
+    def __init__(self):
+        super().__init__()
+        self.naming = {"MOVIE_RENAME_FORMAT": "A"}
+        self.recognize_calls = 0
+        self.ai_calls = 0
+
+    def get_item(self, storage, path):
+        item = Path(path)
+        if not item.exists():
+            return None
+        stat = item.stat()
+        return {"path": str(item), "storage": storage, "type": "file" if item.is_file() else "dir", "size": stat.st_size, "modify_time": stat.st_mtime_ns}
+
+    relationship = G.MoviePilotAdapter.relationship
+
+    def recognize(self, path):
+        self.recognize_calls += 1
+        return {"title": "Film", "media_type": "movie", "media_source": "themoviedb", "media_id": "7"}
+
+    def ai_queries_batch(self, items):
+        self.ai_calls += 1
+        return {}
+
+    def preview_configuration(self):
+        return self.naming
+
+
+def local_fixture(tmp_path):
+    source = tmp_path / "download" / "Film.mkv"
+    target = tmp_path / "library" / "movie" / "Film.mkv"
+    wrong = tmp_path / "library" / "tv" / "Wrong.mkv"
+    for path in (source, target, wrong):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    if not source.exists():
+        source.write_bytes(b"fixture")
+    adapter = LocalFixtureAdapter()
+    source_item = adapter.get_item("local", str(source))
+    obj = {"id": "local-film", "label": "Film", "root": source_item, "entries": [source_item], "complete": True, "fingerprint": G.fingerprint([source_item])}
+    adapter.preview_value = {"summary": {"total": 1, "success": 1, "failed": 0}, "items": [{"source": str(source), "target": str(target), "target_storage": "local", "success": True}]}
+    history = {"id": 1, "src": str(source), "status": False, "media_source": "themoviedb", "media_id": "7", "type": "电影"}
+    roots = [{"path": str(target.parent), "storage": "local", "type": "dir", "name": "电影"}, {"path": str(wrong.parent), "storage": "local", "type": "dir", "name": "电视剧"}]
+    return adapter, obj, G.Inventory([obj], roots, [history], []), source, target, wrong
+
+
+def run_local_fixture(service, inv, *, confirmed_identity=True):
+    # 这些物理/缓存用例预置人工答案，只验证身份确认之后的链路。
+    # 未确认输入到候选/人工选择的完整传递在 test_identity_confirmation.py 验证。
+    if confirmed_identity:
+        for obj in inv.objects:
+            if service._saved_identity(obj) is None:
+                answer = {"title": "Film", "media_type": "movie", "media_source": "themoviedb", "media_id": "7"}
+                service.ledger.save_identity(obj["id"], "confirmed", obj["fingerprint"], answer, [answer], "user_confirmed")
+    service._discover = lambda job_id: inv
+    job_id = service.ledger.begin_job("incremental")
+    service._run(job_id, "incremental", None)
+    job = service.ledger.current_job()
+    assert job["status"] == "completed", job["error"]
+    return service.findings()
+
+
+def test_linked_target_overrides_old_failure_and_unchanged_run_has_zero_ai(tmp_path):
+    adapter, obj, inv, source, target, _ = local_fixture(tmp_path)
+    target.hardlink_to(source)
+    service = G.GovernorService(tmp_path / "state", adapter)
+    for _ in range(2):
+        result = run_local_fixture(service, inv)
+        assert not result["problems"] and not result["confirmations"] and not result["errors"]
+    assert adapter.recognize_calls == 0 and adapter.preview_calls == 1
+    assert adapter.ai_calls == 0
+    assert service.detail(obj["id"])["relations"]["pairs"][0]["status"] == "verified"
+    assert result["coverage"]["exhaustive"] is False
+
+
+def test_confirmed_source_and_missing_expected_target_prove_recorded_failure(tmp_path):
+    adapter, _, inv, _, _, _ = local_fixture(tmp_path)
+    service = G.GovernorService(tmp_path / "state", adapter)
+    result = run_local_fixture(service, inv)
+    assert [row["kind"] for row in result["problems"]] == ["native_failure"]
+
+
+def test_copy_and_same_metadata_replacement_remain_unproven(tmp_path):
+    adapter, obj, inv, source, target, _ = local_fixture(tmp_path)
+    target.hardlink_to(source)
+    service = G.GovernorService(tmp_path / "state", adapter)
+    run_local_fixture(service, inv)
+    previous_stat = target.stat()
+    target.unlink()
+    target.write_bytes(source.read_bytes())
+    os.utime(target, ns=(previous_stat.st_atime_ns, previous_stat.st_mtime_ns))
+    result = run_local_fixture(service, inv)
+    assert not result["problems"]
+    assert [row["kind"] for row in result["confirmations"]] == ["relation_confirmation"]
+    assert service.detail(obj["id"])["relations"]["pairs"][0]["status"] == "unproven"
+    assert adapter.preview_calls == 1 and adapter.ai_calls == 0
+    with pytest.raises(ValueError, match="关系尚未证实"):
+        service.repair_preview(obj["id"])
+
+
+def test_old_extra_wrong_target_is_checked_and_retained_after_history_disappears(tmp_path):
+    adapter, obj, inv, source, target, wrong = local_fixture(tmp_path)
+    wrong = wrong.with_name("Other {tmdb-8}.mkv")
+    target.hardlink_to(source)
+    wrong.hardlink_to(source)
+    old = {**inv.histories[0], "status": True, "dest": str(wrong)}
+    correct = {**old, "id": 2, "dest": str(target)}
+    inv.histories = [old, correct]
+    service = G.GovernorService(tmp_path / "state", adapter)
+    for histories in ([old, correct], [correct]):
+        inv.histories = histories
+        result = run_local_fixture(service, inv)
+        assert [row["kind"] for row in result["problems"]] == ["false_success"]
+    pairs = service.detail(obj["id"])["relations"]["pairs"]
+    assert any(pair["target"]["path"] == str(wrong) and pair["status"] == "verified" for pair in pairs)
+
+
+def test_global_naming_rule_change_refreshes_preview_and_preserves_identity(tmp_path):
+    adapter, obj, inv, source, target, _ = local_fixture(tmp_path)
+    target.hardlink_to(source)
+    service = G.GovernorService(tmp_path / "state", adapter)
+    run_local_fixture(service, inv)
+    identity = service.detail(obj["id"])["identity"]
+    adapter.naming = {"MOVIE_RENAME_FORMAT": "B"}
+    run_local_fixture(service, inv)
+    assert adapter.preview_calls == 2 and adapter.recognize_calls == adapter.ai_calls == 0
+    assert service.detail(obj["id"])["identity"] == identity
+
+
+def test_rule_change_keeps_old_valid_link_in_confirmation_on_later_runs(tmp_path):
+    adapter, _, inv, source, target, _ = local_fixture(tmp_path)
+    target.hardlink_to(source)
+    inv.histories[0].update(status=True, dest=str(target))
+    service = G.GovernorService(tmp_path / "state", adapter)
+    run_local_fixture(service, inv)
+    adapter.naming = {"MOVIE_RENAME_FORMAT": "B"}
+    adapter.preview_value["items"][0]["target"] = str(target.with_name("Renamed.mkv"))
+    for _ in range(2):
+        result = run_local_fixture(service, inv)
+        assert not result["problems"]
+        assert [row["kind"] for row in result["confirmations"]] == ["rule_change"]
+
+
+def test_exact_source_set_preserves_user_confirmation_when_object_key_changes(tmp_path):
+    adapter, obj, inv, source, target, _ = local_fixture(tmp_path)
+    target.hardlink_to(source)
+    service = G.GovernorService(tmp_path / "state", adapter)
+    run_local_fixture(service, inv)
+    identity = service.detail(obj["id"])["identity"]
+    service.ledger.save_identity(obj["id"], "confirmed", obj["fingerprint"], identity, [identity], "user_confirmed")
+    obj["id"] = "case-preserving-object-key"
+    run_local_fixture(service, inv)
+    detail = service.detail(obj["id"])
+    assert detail["identity"] == identity and detail["provenance"] == "user_confirmed"
+    assert adapter.recognize_calls == adapter.ai_calls == 0
+
+
+def test_incomplete_read_preserves_previous_human_confirmation(tmp_path):
+    adapter, obj, inv, source, target, _ = local_fixture(tmp_path)
+    target.hardlink_to(source)
+    service = G.GovernorService(tmp_path / "state", adapter)
+    run_local_fixture(service, inv)
+    identity = service.detail(obj["id"])["identity"]
+    service.ledger.save_identity(obj["id"], "confirmed", obj["fingerprint"], identity, [identity], "user_confirmed")
+    obj["complete"] = False
+    result = run_local_fixture(service, inv)
+    assert not result["problems"] and result["errors"][0]["kind"] == "read_error"
+    assert service.detail(obj["id"])["identity"] == identity
+    assert service.detail(obj["id"])["identity_state"] == "confirmed"
+
+
+def test_candidate_cache_age_is_not_extended_by_repeated_observation(tmp_path):
+    adapter, obj, inv, _, _, _ = local_fixture(tmp_path)
+    adapter.recognize = lambda path: {}
+    inv.histories = []
+    adapter.search = lambda _: []
+    service = G.GovernorService(tmp_path / "state", adapter, ai_enabled=True)
+    run_local_fixture(service, inv, confirmed_identity=False)
+    saved = service.ledger.one("SELECT * FROM identities WHERE object_id=?", (obj["id"],))
+    run_local_fixture(service, inv, confirmed_identity=False)
+    assert service.ledger.one("SELECT * FROM identities WHERE object_id=?", (obj["id"],))["updated_at"] == saved["updated_at"]
+    assert adapter.ai_calls == 1
+    service.ledger.execute("UPDATE identities SET updated_at='2000-01-01T00:00:00+00:00'")
+    run_local_fixture(service, inv, confirmed_identity=False)
+    assert adapter.ai_calls == 2
+
+
+@pytest.mark.parametrize("failure", ["missing_file", "failed_summary"])
+def test_partial_or_failed_preview_cannot_become_a_healthy_cached_result(tmp_path, failure):
+    adapter, obj, inv, source, target, _ = local_fixture(tmp_path)
+    target.hardlink_to(source)
+    if failure == "missing_file":
+        extra = source.with_name("Film.srt")
+        extra.write_text("fixture", encoding="utf-8")
+        obj["entries"].append(adapter.get_item("local", str(extra)))
+        obj["fingerprint"] = G.fingerprint(obj["entries"])
+    else:
+        adapter.preview_value["summary"]["failed"] = 1
+    service = G.GovernorService(tmp_path / "state", adapter)
+    for _ in range(2):
+        result = run_local_fixture(service, inv)
+        assert not result["problems"]
+        assert [row["kind"] for row in result["errors"]] == ["preview_error"]
+    assert adapter.preview_calls == 2
+
+
+def test_candidate_limit_keeps_pending_and_rotates_work_without_dropping_it(tmp_path, monkeypatch):
+    adapter, obj, inv, source, target, wrong = local_fixture(tmp_path)
+    target.hardlink_to(source)
+    wrong.hardlink_to(source)
+    inv.histories[0].update(status=True, dest=str(wrong))
+    monkeypatch.setattr(G, "MAX_RELATION_PAIRS", 1)
+    service = G.GovernorService(tmp_path / "state", adapter)
+    observed = set()
+    for _ in range(2):
+        result = run_local_fixture(service, inv)
+        receipt = service.detail(obj["id"])["relations"]
+        assert len(receipt["pairs"]) == 2 and receipt["coverage"]["pending_pairs"] == 1
+        assert any(row["kind"] == "relation_confirmation" for row in result["confirmations"])
+        observed.update(pair["id"] for pair in receipt["pairs"] if pair["status"] != "pending")
+    assert len(observed) == 2
+
+
+def test_unit_commit_rolls_back_identity_preview_and_findings_together(tmp_path, monkeypatch):
+    adapter, obj, inv, source, target, _ = local_fixture(tmp_path)
+    target.hardlink_to(source)
+    service = G.GovernorService(tmp_path / "state", adapter)
+    run_local_fixture(service, inv)
+    before = service.detail(obj["id"])
+    adapter.naming = {"MOVIE_RENAME_FORMAT": "changed"}
+    def fail_commit(*args):
+        raise RuntimeError("injected commit failure")
+    monkeypatch.setattr(service.ledger, "replace_findings", fail_commit)
+    with pytest.raises(RuntimeError, match="injected commit failure"):
+        service._process(service.ledger.begin_job("incremental"), obj, inv)
+    assert service.detail(obj["id"]) == before
+
+
+def test_timeouts_keep_a_service_wide_limit_and_late_results_cannot_commit(tmp_path):
+    service = G.GovernorService(tmp_path, FakeAdapter())
+    job_id = service.ledger.begin_job("incremental")
+    release = threading.Event()
+    calls = []
+    def blocked():
+        calls.append(1)
+        release.wait(5)
+        return "late"
+    try:
+        for _ in range(G.MAX_READ_WORKERS + 3):
+            with pytest.raises(TimeoutError):
+                service._readonly_call(job_id, "blocked", blocked, timeout=0.001)
+        assert len(calls) == G.MAX_READ_WORKERS
+        assert service.status()["readonly_inflight"] == G.MAX_READ_WORKERS
+        assert service.stop() is False
+        assert service.ledger.query("SELECT * FROM observations") == []
+    finally:
+        release.set()
+        deadline = time.monotonic() + 2
+        while service.status()["readonly_inflight"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+    assert service.stop() is True
+    assert service.ledger.query("SELECT * FROM observations") == []
+
+
+def test_public_pair_adapter_does_not_promote_false_errors_or_foreign_storage(tmp_path, monkeypatch):
+    adapter, _, _, source, target, _ = local_fixture(tmp_path)
+    source_ref = {"path": str(source), "storage": "local", "type": "file"}
+    target_ref = {"path": str(target), "storage": "local", "type": "file"}
+    target.write_bytes(source.read_bytes())
+    from app.sdk.utilities import SystemUtils
+    for value in (False, None, "true"):
+        monkeypatch.setattr(SystemUtils, "is_hardlink", lambda *args: value)
+        assert adapter.relationship(source_ref, target_ref)["status"] == "unproven"
+    def denied(*args):
+        raise OSError("fixture read denied")
+    monkeypatch.setattr(SystemUtils, "is_hardlink", denied)
+    assert adapter.relationship(source_ref, target_ref)["status"] == "unproven"
+    assert adapter.relationship(source_ref, {**target_ref, "storage": "remote"})["status"] == "unsupported"
+    assert adapter.relationship(source_ref, source_ref)["status"] == "unproven"
+
+
+def _crash_during_preview(tmp_path):
+    adapter, _, inv, source, target, _ = local_fixture(tmp_path)
+    target.hardlink_to(source)
+    service = G.GovernorService(tmp_path / "state", adapter)
+    run_local_fixture(service, inv)
+    adapter.naming = {"MOVIE_RENAME_FORMAT": "changed"}
+    def blocked_preview(*args):
+        (tmp_path / "ready").write_text("ready", encoding="utf-8")
+        time.sleep(30)
+    adapter.preview = blocked_preview
+    job_id = service.ledger.begin_job("incremental")
+    service._process(job_id, inv.objects[0], inv)
+
+
+def test_completed_unit_survives_process_termination_without_repeating_identity_or_preview(tmp_path):
+    script = "import runpy,sys; from pathlib import Path; ns=runpy.run_path(sys.argv[1]); ns['_crash_during_preview'](Path(sys.argv[2]))"
+    worker = subprocess.Popen([sys.executable, "-c", script, str(Path(__file__).resolve()), str(tmp_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    try:
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "ready").exists() and worker.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert (tmp_path / "ready").exists(), "fixture worker failed to reach the interruption point"
+    finally:
+        if worker.poll() is None:
+            worker.terminate()
+        stdout, stderr = worker.communicate(timeout=5)
+    adapter, obj, inv, _, _, _ = local_fixture(tmp_path)
+    service = G.GovernorService(tmp_path / "state", adapter)
+    assert service.ledger.current_job()["status"] == "interrupted", (stdout, stderr)
+    assert service.detail(obj["id"])["identity_state"] == "confirmed"
+    result = run_local_fixture(service, inv)
+    assert not result["problems"] and not result["confirmations"] and not result["errors"]
+    assert adapter.recognize_calls == adapter.preview_calls == adapter.ai_calls == 0
+
+
+def test_failed_preview_does_not_invalidate_current_physical_observation(tmp_path):
+    adapter, obj, inv, source, target, wrong = local_fixture(tmp_path)
+    wrong = wrong.with_name("Other {tmdb-8}.mkv")
+    target.hardlink_to(source)
+    wrong.hardlink_to(source)
+    inv.histories[0].update(status=True, dest=str(wrong))
+    service = G.GovernorService(tmp_path / "state", adapter)
+    assert run_local_fixture(service, inv)["problems"][0]["kind"] == "false_success"
+    adapter.naming = {"MOVIE_RENAME_FORMAT": "B"}
+    adapter.preview_value["summary"]["failed"] = 1
+    assert run_local_fixture(service, inv)["errors"][0]["kind"] == "preview_error"
+    receipt = service.detail(obj["id"])["relations"]
+    assert not receipt.get("stale") and receipt["coverage"]["checked_pairs"] == 2
+    assert receipt["coverage"]["pending_pairs"] == 0
+    inv.histories = []
+    adapter.preview_value["summary"]["failed"] = 0
+    assert run_local_fixture(service, inv)["problems"][0]["kind"] == "false_success"
+
+
+def test_history_outside_managed_roots_is_not_read_and_blocks_strong_claim(tmp_path):
+    adapter, _, inv, source, target, _ = local_fixture(tmp_path)
+    target.hardlink_to(source)
+    outside = tmp_path / "outside" / "Old.mkv"
+    inv.histories[0].update(status=True, dest=str(outside))
+    original_get = adapter.get_item
+    def guarded_get(storage, path):
+        assert G.normal_path(path) != G.normal_path(outside), "outside root must not be probed"
+        return original_get(storage, path)
+    adapter.get_item = guarded_get
+    service = G.GovernorService(tmp_path / "state", adapter)
+    result = run_local_fixture(service, inv)
+    assert not result["problems"] and result["confirmations"][0]["kind"] == "relation_confirmation"
+
+
+def test_pair_rejects_directory_without_invoking_recursive_sdk_branch(tmp_path, monkeypatch):
+    adapter, _, _, source, target, _ = local_fixture(tmp_path)
+    target.mkdir()
+    from app.sdk.utilities import SystemUtils
+    def forbidden(*args):
+        raise AssertionError("directory must never reach SDK recursive comparison")
+    monkeypatch.setattr(SystemUtils, "is_hardlink", forbidden)
+    result = adapter.relationship({"path": str(source), "storage": "local", "type": "file"}, {"path": str(target), "storage": "local", "type": "file"})
+    assert result["status"] == "unproven"
+
+
+def test_missing_source_does_not_turn_old_failure_into_current_proof(tmp_path):
+    adapter, _, inv, source, _, _ = local_fixture(tmp_path)
+    source.unlink()
+    service = G.GovernorService(tmp_path / "state", adapter)
+    result = run_local_fixture(service, inv)
+    assert not result["problems"] and result["confirmations"][0]["kind"] == "relation_confirmation"
+
+
+def test_batch_timeouts_share_the_same_worker_limit(tmp_path):
+    service = G.GovernorService(tmp_path, FakeAdapter())
+    job_id = service.ledger.begin_job("incremental")
+    release = threading.Event()
+    calls = []
+    def blocked():
+        calls.append(1)
+        release.wait(5)
+    try:
+        for _ in range(2):
+            results = service._readonly_many(job_id, "batch", [(blocked, ())] * (G.MAX_READ_WORKERS + 4), timeout=0.001, concurrency=100)
+            assert all(isinstance(result, TimeoutError) for result in results)
+        assert len(calls) == G.MAX_READ_WORKERS
+        assert service.status()["readonly_inflight"] == G.MAX_READ_WORKERS
+    finally:
+        release.set()
+        deadline = time.monotonic() + 2
+        while service.status()["readonly_inflight"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+    assert service.stop() is True
+
+
+def test_preview_configuration_keeps_rules_with_shared_roots_and_their_order(monkeypatch):
+    from app.sdk.config import settings
+    rules = [{"library_path": "/fixture/library", "media_type": "电影"}, {"library_path": "/fixture/library", "media_type": "电视剧"}]
+    adapter = G.MoviePilotAdapter()
+    adapter._loaded = {"dirs": types.SimpleNamespace(get_dirs=lambda: rules)}
+    monkeypatch.setattr(settings, "MOVIE_RENAME_FORMAT", "fixture-format")
+    before = adapter.preview_configuration()
+    assert len(before["directory_rules"]) == 2 and before["MOVIE_RENAME_FORMAT"] == "fixture-format"
+    rules.reverse()
+    assert G.json_text(before, sort_keys=True) != G.json_text(adapter.preview_configuration(), sort_keys=True)
