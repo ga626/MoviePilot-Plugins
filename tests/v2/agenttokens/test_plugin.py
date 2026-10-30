@@ -4,6 +4,7 @@
 插件包：根 conftest 会先隔离 CONFIG_DIR，再通过生产命名空间暴露对应插件源码。
 """
 from unittest.mock import patch
+from tests._bootstrap import isolated_plugin_chain
 from types import SimpleNamespace
 
 from app.plugins.agenttokens import AgentTokens  # noqa: E402
@@ -11,7 +12,7 @@ from app.plugins.agenttokens import AgentTokens  # noqa: E402
 
 def _plugin() -> AgentTokens:
     """构造插件实例，隔离与被测逻辑无关的宿主 Chain 组合根。"""
-    with patch("app.plugins.PluginChian"):
+    with isolated_plugin_chain():
         return AgentTokens()
 
 

@@ -1,6 +1,7 @@
 import app.plugins.lunatvsource as plugin_module
 from app.plugins.lunatvsource import LunaTVSource
 from app.plugins.lunatvsource.cms import CmsEpisode, CmsResult
+from tests._bootstrap import isolated_plugin_chain
 
 
 def test_tv_native_projection_keeps_quality_out_of_card_title_and_description(monkeypatch):
@@ -37,8 +38,8 @@ def test_tv_native_projection_keeps_quality_out_of_card_title_and_description(mo
         def search(self, *_args, **_kwargs):
             return rows
 
-    monkeypatch.setattr("app.plugins.PluginChian", lambda: object())
-    plugin = LunaTVSource()
+    with isolated_plugin_chain():
+        plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
     monkeypatch.setattr(plugin_module, "_HostTorrentInfo", TorrentInfo)
     monkeypatch.setattr(plugin, "_client", lambda: Client())

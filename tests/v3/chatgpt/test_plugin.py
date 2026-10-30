@@ -5,6 +5,7 @@
 """
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
+from tests._bootstrap import isolated_plugin_chain
 
 from app.core.event import eventmanager
 from app.core.plugin import PluginManager
@@ -25,7 +26,7 @@ def _plugin(config: dict = None) -> ChatGPT:
     保证 send_event 能真实调度到本插件处理器；与当前用例无关的宿主 Chain 组合根不在
     插件仓测试中初始化。
     """
-    with patch("app.plugins.PluginChian"):
+    with isolated_plugin_chain():
         plugin = ChatGPT()
     with patch.object(plugin, "get_data", return_value=None), patch.object(plugin, "save_data"):
         plugin.init_plugin({"enabled": True, **(config or {})})

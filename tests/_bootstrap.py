@@ -12,6 +12,7 @@ import os
 import sys
 from importlib import import_module
 from pathlib import Path
+from unittest.mock import patch
 
 # ``tests/`` 的父级即插件仓根；其同级 ``MoviePilot`` 为后端默认位置（工作区多仓同级布局）
 _TESTS_DIR = Path(__file__).resolve().parent
@@ -48,6 +49,21 @@ if str(_BACKEND_PATH) not in sys.path:
 
 _bootstrap = import_module("app.testing.bootstrap")
 block_real_network = import_module("app.testing.network").block_real_network
+
+
+def isolated_plugin_chain():
+    """在基类实际定义处隔离测试无关 Chain，兼容 SDK 门面迁移。
+
+    不屏蔽被测插件行为，也不初始化真实整理链。旧 app.plugins.PluginChian
+    已可能只是兼容别名，必须 patch 构造函数真正查找的命名空间。
+    """
+    from app.plugins import _PluginBase
+
+    namespace = _PluginBase.__init__.__globals__
+    for name in ("PluginChain", "PluginChian"):
+        if name in namespace:
+            return patch.object(import_module(namespace["__name__"]), name)
+    raise RuntimeError("未找到插件基类实际使用的 Chain 工厂，需更新测试合同")
 
 
 def isolate_config_dir() -> str:

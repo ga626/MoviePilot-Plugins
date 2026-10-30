@@ -9,13 +9,32 @@ const message = ref('')
 const selected = ref(null)
 const repairPlan = ref(null)
 const confirmingRepair = ref(false)
+const identityQuery = ref('')
+const selectedFileRefs = ref([])
+const choosingIdentity = ref(false)
+const cleanupApproved = ref(false)
+const filePage = ref(0)
+const visibleFiles = computed(() => (selected.value?.files || []).slice(filePage.value * 100, (filePage.value + 1) * 100))
 let timer = null
+let refreshRevision = 0
+let detailRevision = 0
 
 const job = computed(() => snapshot.value.status?.job || {})
 const running = computed(() => job.value.status === 'running')
+const readOnly = computed(() => snapshot.value.status?.read_only !== false)
 const stopping = computed(() => running.value && Boolean(job.value.cancel_requested))
 const progress = computed(() => job.value.total ? Math.round((job.value.done || 0) * 100 / job.value.total) : 0)
 const hasResults = computed(() => snapshot.value.problems.length + snapshot.value.confirmations.length + snapshot.value.errors.length > 0)
+const provenanceLabel = computed(() => ({
+  user_confirmed: '已由你确认',
+  native_and_history_agree: '原生识别与历史一致，等待你确认',
+  needs_user_confirmation: '候选尚未确认',
+  search_error: '数据库查询失败，不是没有匹配作品',
+  native_error: '原生识别失败，可直接搜索数据库',
+  ai_error: '智能候选请求失败，可以稍后重试',
+  ai_budget_deferred: '本轮智能候选预算已用完，尚未尝试',
+  source_incomplete: '源文件尚未读完整'
+}[selected.value?.provenance] || '尚无确认依据'))
 const statusTitle = computed(() => ({
   running: stopping.value ? '正在停止' : '正在后台检查',
   completed: '检查完成',
@@ -37,8 +56,10 @@ async function post (path, body) {
 }
 
 async function refresh () {
+  const revision = ++refreshRevision
   try {
-    snapshot.value = await get('plugin/MediaGovernor/findings')
+    const result = await get('plugin/MediaGovernor/findings')
+    if (revision === refreshRevision) snapshot.value = result
   } catch (error) {
     failure(error, '没有读到媒体治理状态')
   }
@@ -69,13 +90,21 @@ async function cancel () {
 }
 
 async function openItem (item) {
+  const revision = ++detailRevision
   busy.value = true
   message.value = ''
   repairPlan.value = null
   confirmingRepair.value = false
   try {
-    selected.value = await get(`plugin/MediaGovernor/objects/${encodeURIComponent(item.object_id)}`)
+    const detail = await get(`plugin/MediaGovernor/objects/${encodeURIComponent(item.object_id)}`)
+    if (revision !== detailRevision) return
+    selected.value = detail
     selected.value.finding = item
+    identityQuery.value = selected.value.digest?.container_hint || ''
+    selectedFileRefs.value = []
+    choosingIdentity.value = false
+    filePage.value = 0
+    cleanupApproved.value = false
   } catch (error) {
     failure(error, '没有读到这部作品的证据')
   } finally {
@@ -92,12 +121,33 @@ async function confirmIdentity (candidate) {
   if (!selected.value) return
   busy.value = true
   try {
-    await post('plugin/MediaGovernor/identity/confirm', { object_id: selected.value.id, candidate_key: candidateKey(candidate) })
+    await post('plugin/MediaGovernor/identity/confirm', { object_id: selected.value.id, candidate_key: candidateKey(candidate), ...(selectedFileRefs.value.length ? { file_refs: selectedFileRefs.value } : {}) })
     message.value = '身份已保存，只重新核对这一部作品。'
     selected.value = null
     await refresh()
   } catch (error) {
     failure(error, '没有保存作品身份')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function searchCandidates () {
+  if (!selected.value) return
+  const revision = detailRevision
+  const objectId = selected.value.id
+  busy.value = true
+  repairPlan.value = null
+  try {
+    const finding = selected.value.finding
+    const result = await post('plugin/MediaGovernor/identity/search', { object_id: objectId, query: identityQuery.value })
+    if (revision !== detailRevision || selected.value?.id !== objectId) return
+    selected.value = result
+    selected.value.finding = finding
+    choosingIdentity.value = true
+    message.value = '数据库只提供候选，请核对年份和类型后选择。'
+  } catch (error) {
+    failure(error, '没有读到数据库候选')
   } finally {
     busy.value = false
   }
@@ -109,6 +159,7 @@ async function previewRepair () {
   try {
     repairPlan.value = await post(`plugin/MediaGovernor/repair/${encodeURIComponent(selected.value.id)}`, { action: 'preview' })
     confirmingRepair.value = false
+    cleanupApproved.value = false
   } catch (error) {
     failure(error, '没有生成当前修复预览')
   } finally {
@@ -120,7 +171,7 @@ async function executeRepair () {
   if (!selected.value || !repairPlan.value?.token) return
   busy.value = true
   try {
-    const result = await post(`plugin/MediaGovernor/repair/${encodeURIComponent(selected.value.id)}`, { action: 'execute', token: repairPlan.value.token })
+    const result = await post(`plugin/MediaGovernor/repair/${encodeURIComponent(selected.value.id)}`, { action: 'execute', token: repairPlan.value.token, cleanup_approved: cleanupApproved.value })
     message.value = result.message || 'MoviePilot 已完成重建，正在复核。'
     selected.value = null
     repairPlan.value = null
@@ -133,6 +184,7 @@ async function executeRepair () {
 }
 
 function closeDetail () {
+  detailRevision++
   selected.value = null
   repairPlan.value = null
   confirmingRepair.value = false
@@ -142,14 +194,15 @@ onMounted(async () => {
   await refresh()
   timer = window.setInterval(() => { if (running.value) refresh() }, 1500)
 })
-onBeforeUnmount(() => window.clearInterval(timer))
+onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRevision++ })
 </script>
 
 <template>
   <main class="governor-shell">
     <section class="hero">
       <div>
-        <p class="eyebrow">MediaGovernor 5.0.1</p>
+        <p class="eyebrow">MediaGovernor 5.1.0</p>
+        <p v-if="readOnly" class="notice">只读模式：可以检查、确认身份和查看预览，不会执行媒体修复。</p>
         <h1>检查现在，找到真实问题</h1>
         <p class="lead">逐作品比较原文件、当前硬链接和 MoviePilot 应有结果。已经完成的结果会立即保存，关掉页面也不会中断。</p>
       </div>
@@ -175,6 +228,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
       <div v-if="running" class="bar"><i :style="{ width: `${progress}%` }" /></div>
       <p v-if="job.error" class="warning">{{ job.error }}</p>
       <p v-if="message" class="notice">{{ message }}</p>
+      <p v-if="snapshot.coverage?.note" class="notice">核查范围：{{ snapshot.coverage.note }}</p>
     </section>
 
     <section class="summary-grid">
@@ -214,17 +268,34 @@ onBeforeUnmount(() => window.clearInterval(timer))
         <p class="eyebrow">作品证据</p>
         <h2>{{ selected.title }}</h2>
         <p class="lead small">{{ selected.finding?.reason }}</p>
+        <p v-if="message" class="warning" role="alert">{{ message }}</p>
 
         <div class="facts">
           <div><span>文件读取</span><b>{{ selected.source?.object?.complete ? '完整' : '未完整' }}</b></div>
           <div><span>作品身份</span><b>{{ selected.identity_state === 'confirmed' ? '已确认' : '等待确认' }}</b></div>
-          <div><span>确认依据</span><b>{{ selected.provenance || '暂无' }}</b></div>
+          <div><span>确认依据</span><b>{{ provenanceLabel }}</b></div>
         </div>
 
-        <section v-if="selected.identity_state !== 'confirmed'" class="choice-area">
+        <p v-if="selected.relations?.stale" class="warning">关系记录需要重新核验，本轮尚不能据此确认文件关联。</p>
+        <p v-if="selected.relations?.coverage" class="notice">候选已记录 {{ selected.relations.pairs?.length || 0 }} 对，本轮已查 {{ selected.relations.coverage.checked_pairs || 0 }} 对，待查 {{ selected.relations.coverage.pending_pairs || 0 }} 对。{{ selected.relations.coverage.note }}</p>
+        <form class="choice-area" @submit.prevent="searchCandidates">
+          <label for="identity-query">搜索正确作品（不使用 AI）</label>
+          <input id="identity-query" v-model="identityQuery" type="search" maxlength="120" required />
+          <button class="secondary" :disabled="busy">查询数据库候选</button>
+        </form>
+
+        <section v-if="selected.identity_state !== 'confirmed' || choosingIdentity" class="choice-area">
           <h3>请选择正确作品</h3>
-          <p v-if="!selected.candidates.length" class="warning">MoviePilot 和智能助手都没有给出可用候选。本项会保留，不会被算成正常。</p>
-          <button v-for="candidate in selected.candidates" :key="candidateKey(candidate)" class="candidate" :disabled="busy" @click="confirmIdentity(candidate)">
+          <p class="notice">原生识别和旧历史只提供候选。请确认一次正确作品，未变化时会保存并复用你的选择；候选都不正确时，保留待确认。</p>
+          <p v-if="!selected.source?.object?.complete" class="warning">源文件尚未读取完整，请重新检查后再确认身份。</p>
+          <p v-if="!selected.candidates.length" class="warning">尚无可用候选。可以在上方搜索作品；本项不会被算成正常。</p>
+          <fieldset v-if="selected.digest?.membership_review_required">
+            <legend>这里有多组标题线索：请先选出属于同一作品的文件</legend>
+            <label v-for="file in visibleFiles" :key="file.ref"><input v-model="selectedFileRefs" type="checkbox" :value="file.ref" /> {{ file.name }}</label>
+            <div><button class="secondary" :disabled="filePage === 0" @click="filePage--">上一页</button> 第 {{ filePage + 1 }} 页 <button class="secondary" :disabled="(filePage + 1) * 100 >= selected.files.length" @click="filePage++">下一页</button></div>
+            <p class="notice">未选择的文件会继续保留在待确认区，不会遗漏或跟着这部作品整理。</p>
+          </fieldset>
+          <button v-for="candidate in selected.candidates" :key="candidateKey(candidate)" class="candidate" :disabled="busy || !selected.source?.object?.complete || (selected.digest?.membership_review_required && !selectedFileRefs.length)" @click="confirmIdentity(candidate)">
             <b>{{ candidate.title || candidate.original_title || '未命名候选' }}</b>
             <span>{{ candidate.year || '年份未知' }} · {{ candidate.media_type }} · {{ candidate.media_source }}/{{ candidate.media_id }}</span>
           </button>
@@ -233,7 +304,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
         <section v-else class="choice-area">
           <h3>{{ selected.identity.title || selected.identity.original_title }}</h3>
           <p>{{ selected.identity.year || '年份未知' }} · {{ selected.identity.media_type }} · {{ selected.identity.media_source }}/{{ selected.identity.media_id }}</p>
-          <button class="primary" :disabled="busy" @click="previewRepair">重新读取并生成修复预览</button>
+          <button class="primary" :disabled="busy || !selected.source?.object?.complete" @click="previewRepair">重新读取并生成修复预览</button>
         </section>
 
         <section v-if="repairPlan" class="preview">
@@ -243,8 +314,10 @@ onBeforeUnmount(() => window.clearInterval(timer))
             <span>{{ row.source?.path }}</span><span>{{ row.current || '没有建立' }}</span><span>{{ row.expected }}</span>
           </div>
           <p class="warning">只会清理这里列出的旧硬链接，再由 MoviePilot 官方整理链重建；不会删除原始下载。</p>
-          <button v-if="!confirmingRepair" class="danger" @click="confirmingRepair = true">继续到最终确认</button>
-          <div v-else class="final-confirm"><b>确认执行这一个作品？</b><button class="secondary" @click="confirmingRepair = false">返回</button><button class="danger" :disabled="busy" @click="executeRepair">确认修复</button></div>
+          <label v-if="repairPlan.entries.some(row => row.cleanup_attributable)"><input v-model="cleanupApproved" type="checkbox" /> 我另外同意清理预览中列出的旧入口</label>
+          <p v-if="readOnly" class="notice">这是只读预览，不会执行。完成只读验收并获单项许可后，才在设置中关闭只读模式。</p>
+          <button v-else-if="!confirmingRepair" class="danger" @click="confirmingRepair = true">继续到最终确认</button>
+          <div v-else class="final-confirm"><b>确认执行这一个作品？</b><button class="secondary" @click="confirmingRepair = false">返回</button><button class="danger" :disabled="busy || readOnly" @click="executeRepair">确认修复</button></div>
         </section>
       </section>
     </div>
@@ -252,6 +325,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
 </template>
 
 <style scoped>
+.choice-area input[type=search]{max-width:100%;padding:8px;margin:8px;border:1px solid var(--line);border-radius:8px;color:var(--ink);background:var(--paper)}.choice-area fieldset{border:1px solid var(--line);margin-top:12px}.choice-area fieldset label{display:block;overflow-wrap:anywhere;margin:6px 0}
 .governor-shell{--ink:rgb(var(--v-theme-on-surface,242,245,250));--muted:rgba(var(--v-theme-on-surface,242,245,250),.68);--line:rgba(var(--v-theme-on-surface,242,245,250),.13);--paper:rgba(var(--v-theme-surface-variant,var(--v-theme-surface,31,27,46)),.54);--surface:rgba(var(--v-theme-surface,31,27,46),.88);--primary:rgb(var(--v-theme-primary,179,157,219));--primary-soft:rgba(var(--v-theme-primary,179,157,219),.15);--amber:rgb(var(--v-theme-warning,255,183,77));--red:rgb(var(--v-theme-error,239,83,80));color:var(--ink);display:grid;gap:16px;padding:20px;max-width:1180px;margin:auto}.governor-shell h1,.governor-shell h2,.governor-shell h3,.governor-shell b,.governor-shell strong{color:var(--ink)}.hero,.status-card,.panel{background:var(--surface);border:1px solid var(--line);border-radius:18px;box-shadow:0 14px 40px rgba(0,0,0,.18);backdrop-filter:blur(16px)}.hero{display:flex;justify-content:space-between;gap:24px;align-items:flex-start;padding:26px;background:linear-gradient(135deg,var(--primary-soft),rgba(var(--v-theme-surface,31,27,46),.94) 56%,rgba(var(--v-theme-background,18,15,28),.9))}.eyebrow{margin:0 0 7px;color:var(--primary);font-size:12px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.hero h1,.modal h2{margin:0;font-size:30px;line-height:1.15}.lead{max-width:720px;color:var(--muted);line-height:1.65}.lead.small{font-size:14px}.actions{display:flex;align-items:flex-start;gap:9px;flex-wrap:wrap;justify-content:flex-end}button{font:inherit}.primary,.secondary,.danger{border-radius:11px;padding:10px 15px;font-weight:700;cursor:pointer}.primary{border:0;color:rgb(var(--v-theme-on-primary,255,255,255));background:var(--primary)}.secondary{border:1px solid var(--line);background:var(--paper);color:var(--ink)}.danger{border:0;color:white;background:var(--red)}button:disabled{opacity:.48;cursor:not-allowed}.advanced{position:relative}.advanced summary{cursor:pointer;color:var(--muted);padding:10px}.advanced[open]{min-width:210px}.advanced p{font-size:12px;color:var(--muted);max-width:220px}.status-card{padding:17px 20px}.status-line{display:flex;justify-content:space-between;align-items:center}.status-line div{display:grid;gap:3px}.status-line span{color:var(--muted);font-size:13px}.bar{height:6px;background:rgba(var(--v-theme-on-surface,242,245,250),.09);border-radius:99px;margin-top:12px;overflow:hidden}.bar i{display:block;height:100%;background:var(--primary);transition:width .25s}.notice,.warning{font-size:13px;line-height:1.55}.notice{color:var(--primary)}.warning{color:var(--amber)}.summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.summary-grid article{display:grid;gap:4px;padding:17px 19px;background:var(--paper);border:1px solid var(--line);border-radius:14px}.summary-grid strong{font-size:27px}.summary-grid span{font-size:12px;color:var(--muted)}.panel{overflow:hidden}.panel header{display:flex;justify-content:space-between;align-items:center;padding:20px 22px 14px}.panel h2{margin:0;font-size:19px}.panel header>span{color:var(--muted);font-size:13px}.result-row{width:100%;display:flex;justify-content:space-between;gap:18px;text-align:left;padding:15px 22px;border:0;border-top:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer}.result-row:hover{background:var(--primary-soft)}.result-row span{display:grid;gap:5px}.result-row small{color:var(--muted);line-height:1.45}.result-row i{font-style:normal;color:var(--primary);white-space:nowrap}.review-panel{border-color:rgba(var(--v-theme-warning,255,183,77),.3)}.error-panel{border-color:rgba(var(--v-theme-error,239,83,80),.3)}.empty{padding:4px 22px 22px;color:var(--muted)}.backdrop{position:fixed;inset:0;background:rgba(5,4,9,.74);display:grid;place-items:center;padding:20px;z-index:50}.modal{position:relative;width:min(920px,96vw);max-height:90vh;overflow:auto;background:rgb(var(--v-theme-surface,31,27,46));color:var(--ink);border:1px solid var(--line);border-radius:20px;padding:28px;box-shadow:0 24px 80px #0008}.close{position:absolute;right:18px;top:14px;border:0;background:transparent;color:var(--ink);font-size:28px;cursor:pointer}.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:20px 0}.facts div{display:grid;gap:5px;padding:12px;background:var(--paper);border-radius:10px}.facts span{font-size:12px;color:var(--muted)}.choice-area{border-top:1px solid var(--line);padding-top:18px}.candidate{width:100%;display:grid;gap:5px;text-align:left;border:1px solid var(--line);background:var(--paper);color:var(--ink);border-radius:11px;padding:12px;margin:8px 0;cursor:pointer}.candidate:hover{border-color:var(--primary)}.candidate span{font-size:12px;color:var(--muted)}.preview{margin-top:22px;padding-top:18px;border-top:1px solid var(--line)}.compare-head,.compare-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;padding:10px;border-bottom:1px solid var(--line)}.compare-head{background:var(--paper);font-size:12px}.compare-row span{overflow-wrap:anywhere;font-size:12px}.final-confirm{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:12px}@media(max-width:760px){.governor-shell{padding:12px}.hero{display:grid}.actions{justify-content:flex-start}.summary-grid{grid-template-columns:1fr 1fr}.facts{grid-template-columns:1fr}.compare-head{display:none}.compare-row{grid-template-columns:1fr}.result-row{display:grid}.modal{padding:22px 16px}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
 </style>

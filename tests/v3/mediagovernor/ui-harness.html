@@ -1,0 +1,40 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>MediaGovernor local contract harness</title></head><body>
+<div id="app"></div>
+<script type="module">
+import { createApp } from 'vue'
+import AppPage from '/src/components/AppPage.vue'
+const item = { id: 'finding', object_id: 'unit', title: '本地交互合同样本', kind: 'identity_confirmation', reason: '模拟数据：不是 NAS 验收' }
+const snapshot = { status: { job: { status: 'completed', total: 1, done: 1, current: '模拟检查完成' }, objects: 1 }, problems: [], confirmations: [item], errors: [], coverage: { note: '仅本地模拟接口' } }
+const candidate = { title: 'Sample film', year: '2001', media_type: 'movie', media_source: 'themoviedb', media_id: '7' }
+const detail = { id: 'unit', title: item.title, source: { object: { complete: true } }, identity_state: 'candidate', identity: {}, candidates: [candidate], provenance: 'needs_user_confirmation', digest: { container_hint: 'Sample', membership_review_required: true }, files: Array.from({ length: 201 }, (_, i) => ({ ref: `file-${i}`, name: `Sample file ${i + 1}` })), relations: { pairs: [], coverage: { checked_pairs: 0, pending_pairs: 0, note: '模拟范围' } } }
+window.__governorCalls = []
+const copy = data => JSON.parse(JSON.stringify(data))
+const envelope = data => ({ success: true, data: copy(data) })
+const api = {
+  async get(path) {
+    return envelope(path.endsWith('/findings') ? snapshot : detail)
+  },
+  async post(path, body) {
+    window.__governorCalls.push({ path, body: copy(body) })
+    if (path.endsWith('/identity/search')) {
+      detail.candidates = [{ ...candidate, title: body.query }]
+      return envelope(detail)
+    }
+    if (path.endsWith('/identity/confirm')) {
+      detail.identity_state = 'confirmed'; detail.identity = detail.candidates[0]
+      detail.digest.membership_review_required = false
+      return envelope({ accepted: true })
+    }
+    if (path.includes('/repair/') && body.action === 'preview') {
+      return envelope({ token: 'fixture-token', entries: [{ source: { path: '/fixture/source' }, current: '/fixture/old', expected: '/fixture/expected', cleanup_attributable: true }] })
+    }
+    if (path.includes('/repair/')) return envelope({ accepted: true, message: '模拟修复回执；没有实际写入' })
+    if (path.endsWith('/audit/start')) {
+      snapshot.status.job.status = body.mode === 'cancel' ? 'cancelled' : 'running'
+      snapshot.status.job.cancel_requested = body.mode === 'cancel'
+    }
+    return envelope(snapshot.status)
+  }
+}
+createApp(AppPage, { api }).mount('#app')
+</script></body></html>
