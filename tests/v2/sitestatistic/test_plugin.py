@@ -1,13 +1,14 @@
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
+from tests._bootstrap import isolated_plugin_chain
 
 from app.plugins.sitestatistic import SiteStatistic
 
 
 def _plugin() -> SiteStatistic:
     """构造站点数据统计插件，并隔离宿主 Chain 初始化。"""
-    with patch("app.plugins.PluginChian"):
+    with isolated_plugin_chain():
         plugin = SiteStatistic()
     plugin._notify_type = "inc"
     return plugin
