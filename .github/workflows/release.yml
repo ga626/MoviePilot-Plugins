@@ -77,6 +77,15 @@ jobs:
                 continue
               fi
 
+              # 已暂存的候选必须由验收流程提升同一资产；自动任务不重建或公开草稿。
+              if release_is_draft="$(gh release view "$tag" --json isDraft --jq '.isDraft')"; then
+                if [ "$release_is_draft" = true ]; then
+                  echo "Preserving staged candidate $tag for explicit same-artifact promotion."
+                  echo "$tag" >> processed_tags.txt
+                  continue
+                fi
+              fi
+
               changed=1
               if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
                 if git diff --quiet "$tag" -- "$plugin_dir"; then
@@ -93,18 +102,19 @@ jobs:
                 continue
               fi
 
+              # 已公开版本不可原地替换；同版本源码变化必须先递增版本。
+              if gh release view "$tag" >/dev/null 2>&1; then
+                echo "Refusing to replace existing release $tag; bump the version." >&2
+                exit 1
+              fi
+              if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+                echo "Refusing to move existing tag $tag; inspect the release state." >&2
+                exit 1
+              fi
+
               echo "Packing $plugin_id from $plugin_dir -> $asset"
               rm -f "$asset"
               python .github/scripts/build_plugin_release_zip.py "$plugin_dir" "$asset"
-
-              # Re-running a version replaces the release asset for that plugin.
-              if gh release view "$tag" >/dev/null 2>&1; then
-                echo "Release $tag exists, deleting..."
-                gh release delete "$tag" -y
-                git push origin :refs/tags/"$tag" || true
-              fi
-
-              git tag -d "$tag" >/dev/null 2>&1 || true
 
               echo "Creating release $tag"
               gh release create "$tag" "$asset" --title "$tag" --notes "$release_notes" --latest --target "$GITHUB_SHA"
