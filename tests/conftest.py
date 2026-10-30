@@ -50,6 +50,23 @@ def _configure_test_plugin_runtime() -> None:
             from app.runtime.extensions.plugin.database import get_plugin_database
 
             environment["database"] = get_plugin_database
+        parameters = inspect.signature(PluginRuntimeEnvironment).parameters
+        if "instance_directory" in parameters:
+            from app.runtime.extensions.plugin.storage import get_plugin_instance_directory
+
+            environment["instance_directory"] = get_plugin_instance_directory
+        if "runtime_declaration" in parameters:
+            from app.startup.initializers.plugins import (
+                _clear_plugin_default_target,
+                _read_plugin_runtime_declaration,
+                _set_plugin_default_target,
+            )
+
+            environment.update(
+                set_default_target=_set_plugin_default_target,
+                clear_default_target=_clear_plugin_default_target,
+                runtime_declaration=_read_plugin_runtime_declaration,
+            )
         return build_plugin_runtime(
             host,
             PluginRuntimeEnvironment(**environment),
