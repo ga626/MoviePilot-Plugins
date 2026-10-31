@@ -21,7 +21,7 @@
     "icon": "Moviepilot_A.png",
     "author": "MoviePilotMediaGovernor contributors",
     "level": 1,
-    "release": false,
+    "release": true,
     "system_version": ">=3.0.0",
     "history": {
     "v5.1.1": "工作流修复候选：公开 SDK 解析与容器集号线索归纳，结构化类型与季集映射全程保留；确认后局部重查与持久队列，逐作品即时落盘；自动续查关系并区分视频覆盖数与候选对数，可选本地 inode 候选索引；逐文件独立呈现错放和缺失。后台只读预览有界等待；修复先原生建立并证实新链接，再经单项许可调用原生单文件清理，不治理父目录。默认只读、AI 关闭；尚未 NAS 同一候选验收，未公开发布。",
