@@ -13,17 +13,25 @@ const identityQuery = ref('')
 const selectedFileRefs = ref([])
 const choosingIdentity = ref(false)
 const cleanupApproved = ref(false)
+const previewing = ref(false)
+const mappingSeason = ref('')
+const mappingGroup = ref('')
+const mappingFormat = ref('')
+const mappingOffset = ref('')
 const filePage = ref(0)
 const visibleFiles = computed(() => (selected.value?.files || []).slice(filePage.value * 100, (filePage.value + 1) * 100))
 let timer = null
 let refreshRevision = 0
 let detailRevision = 0
+let refreshing = false
 
 const job = computed(() => snapshot.value.status?.job || {})
 const running = computed(() => job.value.status === 'running')
 const readOnly = computed(() => snapshot.value.status?.read_only !== false)
+const needsCleanupApproval = computed(() => repairPlan.value?.entries?.some(row => row.cleanup_attributable) && !cleanupApproved.value)
 const stopping = computed(() => running.value && Boolean(job.value.cancel_requested))
 const progress = computed(() => job.value.total ? Math.round((job.value.done || 0) * 100 / job.value.total) : 0)
+const pendingObjects = computed(() => snapshot.value.status?.pending_objects || 0)
 const hasResults = computed(() => snapshot.value.problems.length + snapshot.value.confirmations.length + snapshot.value.errors.length > 0)
 const provenanceLabel = computed(() => ({
   user_confirmed: '已由你确认',
@@ -56,13 +64,15 @@ async function post (path, body) {
 }
 
 async function refresh () {
+  if (refreshing) return
+  refreshing = true
   const revision = ++refreshRevision
   try {
     const result = await get('plugin/MediaGovernor/findings')
     if (revision === refreshRevision) snapshot.value = result
   } catch (error) {
     failure(error, '没有读到媒体治理状态')
-  }
+  } finally { refreshing = false }
 }
 
 async function start (mode) {
@@ -105,6 +115,10 @@ async function openItem (item) {
     choosingIdentity.value = false
     filePage.value = 0
     cleanupApproved.value = false
+    mappingSeason.value = detail.identity?.season ?? ''
+    mappingGroup.value = detail.identity?.episode_group || ''
+    mappingFormat.value = detail.identity?.epformat?.format || ''
+    mappingOffset.value = detail.identity?.epformat?.offset || ''
   } catch (error) {
     failure(error, '没有读到这部作品的证据')
   } finally {
@@ -121,8 +135,10 @@ async function confirmIdentity (candidate) {
   if (!selected.value) return
   busy.value = true
   try {
-    await post('plugin/MediaGovernor/identity/confirm', { object_id: selected.value.id, candidate_key: candidateKey(candidate), ...(selectedFileRefs.value.length ? { file_refs: selectedFileRefs.value } : {}) })
-    message.value = '身份已保存，只重新核对这一部作品。'
+    const mapping = { season: mappingSeason.value === '' ? null : Number(mappingSeason.value), episode_group: mappingGroup.value || null,
+      epformat: mappingFormat.value || mappingOffset.value ? { ...(selected.value.identity?.epformat || {}), format: mappingFormat.value || null, offset: mappingOffset.value || null } : selected.value.identity?.epformat || null }
+    const result = await post('plugin/MediaGovernor/identity/confirm', { object_id: selected.value.id, candidate_key: candidateKey(candidate), mapping, ...(selectedFileRefs.value.length ? { file_refs: selectedFileRefs.value } : {}) })
+    message.value = result?.queued_rechecks ? '身份已保存，已排队局部重查，不会重新扫描全部目录。' : '身份已保存，只重新核对这个源容器。'
     selected.value = null
     await refresh()
   } catch (error) {
@@ -155,16 +171,42 @@ async function searchCandidates () {
 
 async function previewRepair () {
   if (!selected.value) return
+  const revision = detailRevision
+  const objectId = selected.value.id
   busy.value = true
   try {
-    repairPlan.value = await post(`plugin/MediaGovernor/repair/${encodeURIComponent(selected.value.id)}`, { action: 'preview' })
+    previewing.value = true
+    repairPlan.value = null
+    const result = await post(`plugin/MediaGovernor/repair/${encodeURIComponent(objectId)}`, { action: 'preview' })
+    if (revision !== detailRevision || selected.value?.id !== objectId) return
+    acceptPreview(result)
     confirmingRepair.value = false
     cleanupApproved.value = false
   } catch (error) {
+    previewing.value = false
     failure(error, '没有生成当前修复预览')
   } finally {
     busy.value = false
   }
+}
+
+function acceptPreview (result) {
+  if (result.status === 'completed') { repairPlan.value = result.plan; previewing.value = false }
+  else if (['failed', 'interrupted'].includes(result.status)) { message.value = result.message || '预览未完成，请重试'; previewing.value = false }
+  else if (result.token) { repairPlan.value = result; previewing.value = false }
+}
+
+let pollingPreview = false
+async function refreshPreview () {
+  if (!selected.value || !previewing.value || pollingPreview) return
+  const revision = detailRevision
+  const objectId = selected.value.id
+  pollingPreview = true
+  try {
+    const result = await post(`plugin/MediaGovernor/repair/${encodeURIComponent(objectId)}`, { action: 'preview_status' })
+    if (revision === detailRevision && selected.value?.id === objectId) acceptPreview(result)
+  } catch (error) { if (revision === detailRevision) failure(error, '读取后台预览状态失败，可稍后重新预览') }
+  finally { pollingPreview = false }
 }
 
 async function executeRepair () {
@@ -188,11 +230,12 @@ function closeDetail () {
   selected.value = null
   repairPlan.value = null
   confirmingRepair.value = false
+  previewing.value = false
 }
 
 onMounted(async () => {
   await refresh()
-  timer = window.setInterval(() => { if (running.value) refresh() }, 1500)
+  timer = window.setInterval(() => { if (running.value || snapshot.value.status?.readonly_inflight) refresh(); refreshPreview() }, 1500)
 })
 onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRevision++ })
 </script>
@@ -201,7 +244,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
   <main class="governor-shell">
     <section class="hero">
       <div>
-        <p class="eyebrow">MediaGovernor 5.1.0</p>
+        <p class="eyebrow">MediaGovernor 5.1.1</p>
         <p v-if="readOnly" class="notice">只读模式：可以检查、确认身份和查看预览，不会执行媒体修复。</p>
         <h1>检查现在，找到真实问题</h1>
         <p class="lead">逐作品比较原文件、当前硬链接和 MoviePilot 应有结果。已经完成的结果会立即保存，关掉页面也不会中断。</p>
@@ -229,19 +272,24 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
       <p v-if="job.error" class="warning">{{ job.error }}</p>
       <p v-if="message" class="notice">{{ message }}</p>
       <p v-if="snapshot.coverage?.note" class="notice">核查范围：{{ snapshot.coverage.note }}</p>
+      <p v-if="pendingObjects" class="notice">本轮还有 {{ pendingObjects }} 个作品未处理，不能把它们算成正常。</p>
+      <p v-if="job.status !== 'idle' && snapshot.status?.discovery_complete === false" class="notice">尚未完成目录发现，未处理作品总数仍未知。</p>
+      <p v-if="snapshot.status?.inventory_errors" class="warning">本轮有 {{ snapshot.status.inventory_errors }} 处目录读取异常，不代表已经查全。</p>
+      <p v-if="snapshot.status?.readonly_inflight" class="notice">仍有 {{ snapshot.status.readonly_inflight }} 个只读调用未退出。停止等待不代表底层请求已结束。</p>
+      <p v-if="snapshot.status?.queued_rechecks" class="notice">{{ snapshot.status.queued_rechecks }} 个局部重查已排队；停止后保留，下一次检查继续处理。</p>
     </section>
 
     <section class="summary-grid">
       <article><strong>{{ snapshot.problems.length }}</strong><span>已经证明的问题</span></article>
       <article><strong>{{ snapshot.confirmations.length }}</strong><span>需要你确认</span></article>
-      <article><strong>{{ snapshot.errors.length }}</strong><span>本轮没读完</span></article>
+      <article><strong>{{ snapshot.errors.length }}</strong><span>读取或预览错误（另有 {{ pendingObjects }} 个未处理）</span></article>
       <article><strong>{{ snapshot.status.objects || 0 }}</strong><span>当前作品</span></article>
     </section>
 
     <section class="panel">
       <header><div><p class="eyebrow">发现的问题</p><h2>整理失败和假成功</h2></div><span>{{ snapshot.problems.length }} 项</span></header>
       <button v-for="item in snapshot.problems" :key="item.id" class="result-row" @click="openItem(item)">
-        <span><b>{{ item.title }}</b><small>{{ item.reason }}</small></span><i>查看证据与修复 →</i>
+        <span><b>{{ item.title }}</b><small>{{ item.reason }}</small><small>{{ item.current_job ? '本轮结果' : '保留的上轮结果，尚未本轮复核' }} · {{ item.checked_at || '时间未知' }}</small></span><i>查看证据与修复 →</i>
       </button>
       <p v-if="!snapshot.problems.length" class="empty">{{ running ? '已完成的作品还没有形成问题。' : hasResults ? '当前没有已经证明的问题。' : '点击“检查现在”开始。' }}</p>
     </section>
@@ -249,7 +297,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
     <section class="panel review-panel">
       <header><div><p class="eyebrow">需要你确认</p><h2>身份歧义或手工改动</h2></div><span>{{ snapshot.confirmations.length }} 项</span></header>
       <button v-for="item in snapshot.confirmations" :key="item.id" class="result-row" @click="openItem(item)">
-        <span><b>{{ item.title }}</b><small>{{ item.reason }}</small></span><i>选择正确答案 →</i>
+        <span><b>{{ item.title }}</b><small>{{ item.reason }}</small><small>{{ item.current_job ? '本轮结果' : '保留的上轮结果，尚未本轮复核' }} · {{ item.checked_at || '时间未知' }}</small></span><i>选择正确答案 →</i>
       </button>
       <p v-if="!snapshot.confirmations.length" class="empty">没有等待你决定的项目。</p>
     </section>
@@ -257,7 +305,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
     <section class="panel error-panel">
       <header><div><p class="eyebrow">本轮没读完</p><h2>明确的读取或预览错误</h2></div><span>{{ snapshot.errors.length }} 项</span></header>
       <button v-for="item in snapshot.errors" :key="item.id" class="result-row" @click="openItem(item)">
-        <span><b>{{ item.title }}</b><small>{{ item.reason }}</small></span><i>查看失败阶段 →</i>
+        <span><b>{{ item.title }}</b><small>{{ item.reason }}</small><small>{{ item.current_job ? '本轮结果' : '保留的上轮结果，尚未本轮复核' }} · {{ item.checked_at || '时间未知' }}</small></span><i>查看失败阶段 →</i>
       </button>
       <p v-if="!snapshot.errors.length" class="empty">没有读取错误。</p>
     </section>
@@ -269,6 +317,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
         <h2>{{ selected.title }}</h2>
         <p class="lead small">{{ selected.finding?.reason }}</p>
         <p v-if="message" class="warning" role="alert">{{ message }}</p>
+        <p v-if="selected.repair_result?.status" class="notice">最近修复回读：{{ ({ running: '执行中，尚未完成', partial_or_failed: '部分执行或失败；旧许可已失效，请重新检查和预览', verification_pending: '等待回读，不能算成功', verification_read_error: '回读失败，不能算成功', verification_failed: '回读未通过，请重新检查', verified: '新入口与清理范围已回读通过' })[selected.repair_result.status] || '尚未完成' }}。已处理 {{ selected.repair_result.completed_sources?.length || 0 }} 个源文件。</p>
 
         <div class="facts">
           <div><span>文件读取</span><b>{{ selected.source?.object?.complete ? '完整' : '未完整' }}</b></div>
@@ -278,6 +327,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
 
         <p v-if="selected.relations?.stale" class="warning">关系记录需要重新核验，本轮尚不能据此确认文件关联。</p>
         <p v-if="selected.relations?.coverage" class="notice">候选已记录 {{ selected.relations.pairs?.length || 0 }} 对，本轮已查 {{ selected.relations.coverage.checked_pairs || 0 }} 对，待查 {{ selected.relations.coverage.pending_pairs || 0 }} 对。{{ selected.relations.coverage.note }}</p>
+        <p v-if="selected.relations?.coverage" class="notice">源视频 {{ selected.relations.coverage.source_video_count || 0 }} 个，已证实关联 {{ selected.relations.coverage.linked_source_count || 0 }} 个，未关联或未证实 {{ selected.relations.coverage.unlinked_or_unproven_sources || 0 }} 个；候选对数不是已覆盖视频数。</p>
         <form class="choice-area" @submit.prevent="searchCandidates">
           <label for="identity-query">搜索正确作品（不使用 AI）</label>
           <input id="identity-query" v-model="identityQuery" type="search" maxlength="120" required />
@@ -289,8 +339,19 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
           <p class="notice">原生识别和旧历史只提供候选。请确认一次正确作品，未变化时会保存并复用你的选择；候选都不正确时，保留待确认。</p>
           <p v-if="!selected.source?.object?.complete" class="warning">源文件尚未读取完整，请重新检查后再确认身份。</p>
           <p v-if="!selected.candidates.length" class="warning">尚无可用候选。可以在上方搜索作品；本项不会被算成正常。</p>
+          <details>
+            <summary>季集映射（可选，0 表示特别篇）</summary>
+            <label>固定季度 <input v-model="mappingSeason" type="number" min="0" max="999" placeholder="自动解析" /></label>
+            <label>官方剧集组 ID <input v-model="mappingGroup" maxlength="200" /></label>
+            <label>官方集数识别格式 <input v-model="mappingFormat" maxlength="200" /></label>
+            <label>集数偏移 <input v-model="mappingOffset" maxlength="30" /></label>
+            <p class="notice">只在默认季集不适用时填写；确认后会同作品身份一起保存，并用于官方预览和执行。</p>
+          </details>
+          <p v-if="selected.digest?.episode_mapping_review" class="warning">部分裸集号依据同容器共同标题归纳，仅用于搜索；执行集号仍须检查官方预览，必要时设置映射。</p>
           <fieldset v-if="selected.digest?.membership_review_required">
             <legend>这里有多组标题线索：请先选出属于同一作品的文件</legend>
+            <button v-for="group in selected.file_groups || []" :key="group.hint" type="button" class="secondary" @click="selectedFileRefs = [...new Set([...selectedFileRefs, ...group.refs])]">选择 {{ group.hint }}（{{ group.count }} 个）</button>
+            <button type="button" class="secondary" @click="selectedFileRefs = []">清空所选</button>
             <label v-for="file in visibleFiles" :key="file.ref"><input v-model="selectedFileRefs" type="checkbox" :value="file.ref" /> {{ file.name }}</label>
             <div><button class="secondary" :disabled="filePage === 0" @click="filePage--">上一页</button> 第 {{ filePage + 1 }} 页 <button class="secondary" :disabled="(filePage + 1) * 100 >= selected.files.length" @click="filePage++">下一页</button></div>
             <p class="notice">未选择的文件会继续保留在待确认区，不会遗漏或跟着这部作品整理。</p>
@@ -304,20 +365,21 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
         <section v-else class="choice-area">
           <h3>{{ selected.identity.title || selected.identity.original_title }}</h3>
           <p>{{ selected.identity.year || '年份未知' }} · {{ selected.identity.media_type }} · {{ selected.identity.media_source }}/{{ selected.identity.media_id }}</p>
-          <button class="primary" :disabled="busy || !selected.source?.object?.complete" @click="previewRepair">重新读取并生成修复预览</button>
+          <button class="primary" :disabled="busy || previewing || !selected.source?.object?.complete" @click="previewRepair">{{ previewing ? '正在后台生成只读预览…' : '重新读取并生成修复预览' }}</button>
         </section>
 
         <section v-if="repairPlan" class="preview">
           <h3>整理前后对比</h3>
           <div class="compare-head"><b>原文件</b><b>当前硬链接</b><b>修复后</b></div>
           <div v-for="(row, index) in repairPlan.entries" :key="index" class="compare-row">
-            <span>{{ row.source?.path }}</span><span>{{ row.current || '没有建立' }}</span><span>{{ row.expected }}</span>
+            <span>{{ row.source?.path }}</span><span>{{ row.old_items?.map(item => item.path).join('；') || row.current || '没有旧入口' }}</span><span>{{ row.expected }} · {{ row.action === 'keep' ? '保留，不重建' : '建立新链接' }}</span>
           </div>
-          <p class="warning">只会清理这里列出的旧硬链接，再由 MoviePilot 官方整理链重建；不会删除原始下载。</p>
+          <p class="warning">先由 MoviePilot 建立缺少的新链接，全部回读证实后，才用官方单文件删除清理获准的旧入口。不清理父目录，不删除原始下载；执行失败会保留部分完成回执。</p>
+          <p v-if="repairPlan.unplanned_files?.length" class="notice">另有 {{ repairPlan.unplanned_files.length }} 个附件或不支持的项目未列入官方计划，本次不会擅自处理。</p>
           <label v-if="repairPlan.entries.some(row => row.cleanup_attributable)"><input v-model="cleanupApproved" type="checkbox" /> 我另外同意清理预览中列出的旧入口</label>
           <p v-if="readOnly" class="notice">这是只读预览，不会执行。完成只读验收并获单项许可后，才在设置中关闭只读模式。</p>
-          <button v-else-if="!confirmingRepair" class="danger" @click="confirmingRepair = true">继续到最终确认</button>
-          <div v-else class="final-confirm"><b>确认执行这一个作品？</b><button class="secondary" @click="confirmingRepair = false">返回</button><button class="danger" :disabled="busy || readOnly" @click="executeRepair">确认修复</button></div>
+          <button v-else-if="!confirmingRepair" class="danger" :disabled="busy || needsCleanupApproval" @click="confirmingRepair = true">继续到最终确认</button>
+          <div v-else class="final-confirm"><b>确认执行这一个作品？</b><button class="secondary" @click="confirmingRepair = false">返回</button><button class="danger" :disabled="busy || readOnly || needsCleanupApproval" @click="executeRepair">确认修复</button></div>
         </section>
       </section>
     </div>

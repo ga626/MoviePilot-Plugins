@@ -11,6 +11,7 @@ import inspect
 import json
 import re
 import sqlite3
+import stat
 import threading
 import time
 from collections import deque
@@ -18,6 +19,7 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +34,7 @@ MAX_RELATION_PAIRS = 64
 MAX_CANDIDATE_PAGE = 128
 MAX_TREE_NODES = 100000
 MAX_AI_BATCHES_PER_JOB = 8
-PREVIEW_REVISION = "candidate-pairs-v1"
+PREVIEW_REVISION = "file-reconciliation-v2"
 CANDIDATE_RETRY_SECONDS = 3600
 SAMPLE_PATTERN = re.compile(r"(^|[\\/ ._-])(sample|samples|trailer|extras?)([\\/ ._-]|$)", re.IGNORECASE)
 SEASON_PATTERN = re.compile(r"(?:^|[ ._-])S(\d{1,2})(?:E\d{1,4})?", re.IGNORECASE)
@@ -224,7 +226,8 @@ def identity_from_media(value: Any) -> dict[str, Any]:
         "media_source": str(source or ""),
         "media_id": str(media_id or ""),
         "category": str(data.get("category") or ""),
-        "genres": [str(item) for item in genres][:20],
+        "genres": [model_dict(item) or item for item in genres][:20],
+        **{key: data[key] for key in ("season", "episode_group", "epformat") if data.get(key) is not None},
     }
 
 
@@ -242,7 +245,7 @@ def history_identity(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def public_identity(identity: dict[str, Any]) -> dict[str, Any]:
-    return {key: identity.get(key) for key in ("title", "original_title", "year", "media_type", "media_source", "media_id", "category", "genres")}
+    return {key: identity.get(key) for key in ("title", "original_title", "year", "media_type", "media_source", "media_id", "category", "genres", "season", "episode_group", "epformat") if key in identity}
 
 
 def user_confirmed(identity: dict[str, Any] | None) -> bool:
@@ -286,6 +289,17 @@ def proven_misplacement(current: str, expected: str, identity: dict[str, Any], l
         tags = re.findall(r"[\[{](?:" + namespace + r"|" + namespace + r"id)[-= :]+(\d+)[\]}]", current, re.IGNORECASE)
         if tags and any(value != str(identity.get("media_id")) for value in tags):
             return "identity_error"
+    if media_type_key(identity.get("media_type")) == "tv":
+        actual, intended = EPISODE_PATTERN.search(current), EPISODE_PATTERN.search(expected)
+        if actual and intended and tuple(map(int, actual.groups())) != tuple(map(int, intended.groups())):
+            return "episode_error"
+    # 只有显式目录策略可作分类证据，不能从“anime”等路径片段猜规则。
+    matches = [root for root in library_roots if under(current, root.get("path"))]
+    if matches:
+        root = max(matches, key=lambda row: len(normal_path(row.get("path"))))
+        configured_type = media_type_key(root.get("media_type"))
+        if configured_type != "unknown" and configured_type != media_type_key(identity.get("media_type")):
+            return "category_error"
     return None
 
 
@@ -296,33 +310,80 @@ def title_hint(value: str) -> str:
     return re.sub(r"[\W_]+", " ", name, flags=re.UNICODE).strip()[:96]
 
 
+@lru_cache(maxsize=4096)
+def parsed_name(name: str) -> dict[str, Any]:
+    """仅使用公开 SDK 的本地词法解析；失败明确降级，不调用识别或网络。"""
+    try:
+        from app.sdk.media import MetaInfo
+        meta = MetaInfo(title=name)
+        return {"hint": str(meta.cn_name or meta.en_name or "")[:96], "year": str(meta.year or ""),
+                "season": meta.begin_season, "episode": meta.begin_episode,
+                "episode_end": meta.end_episode, "parsed": True}
+    except Exception as error:  # noqa: BLE001 - 无 SDK/解析失败不能证明混包
+        return {"hint": title_hint(name), "parsed": False, "error_type": type(error).__name__}
+
+
+def container_names(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """SDK 已解析的多集共同标题，只补齐同容器的裸数字命名尾集。
+
+    这是查询线索，不是执行用集号映射；至少两个 SDK 集号锚点、唯一最长标题，
+    且目标没有电影年份时才允许归并。未解析/同名不同年仍保留不确定性。
+    """
+    parsed = [dict(parsed_name(item_name(row))) for row in files]
+    anchors: dict[str, list[int]] = {}
+    for value in parsed:
+        if value.get("episode") is not None and value.get("hint"):
+            anchors.setdefault(value["hint"], []).append(int(value.get("season") if value.get("season") is not None else 1))
+    for row, value in zip(files, parsed):
+        if value.get("episode") is not None or value.get("year"):
+            continue
+        matches = []
+        for hint, anchor_seasons in anchors.items():
+            if len(anchor_seasons) < 2 or len(set(anchor_seasons)) != 1:
+                continue
+            prefix = r"[ ._-]+".join(re.escape(part) for part in hint.split())
+            match = re.match(r"^" + prefix + r"[ ._-]+(\d{1,3})[ ._-]+", item_name(row), re.IGNORECASE)
+            if match and 0 < int(match[1]) < 1000:
+                matches.append((hint, int(match[1]), anchor_seasons[0]))
+        if len(matches) == 1:
+            value.update(hint=matches[0][0], episode=matches[0][1], season=matches[0][2], parsed=True, mapping_inferred=True)
+    return parsed
+
+
 def evidence_digest(obj: dict[str, Any]) -> dict[str, Any]:
     """扫描全量本地清单再归纳；不向模型发送路径、历史或原始文件名列表。"""
     families: dict[str, dict[str, Any]] = {}
     years: dict[str, int] = {}
     seasons: dict[int, set[int]] = {}
     files = [row for row in obj.get("entries") or [] if is_media_file(row) and not is_sample(row)]
-    for row in files:
+    unknown = 0
+    parsed_rows = container_names(files)
+    for row, parsed in zip(files, parsed_rows):
         name = item_name(row)
-        hint = title_hint(name)
+        hint = parsed.get("hint") or ""
+        unknown += int(not parsed.get("parsed") or not hint)
         if hint:
-            family = families.setdefault(hint.casefold(), {"hint": hint, "count": 0, "refs": []})
+            family_key = hint.casefold() + (":" + parsed["year"] if parsed.get("year") and parsed.get("episode") is None else "")
+            family = families.setdefault(family_key, {"hint": hint, "count": 0, "refs": []})
             family["count"] += 1
-            if len(family["refs"]) < 2:
-                family["refs"].append(stable_id(row.get("storage") or "local", normal_path(row.get("path"))))
-        for year in set(re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", name)):
+            family["refs"].append(stable_id(row.get("storage") or "local", normal_path(row.get("path"))))
+        for year in [parsed["year"]] if parsed.get("year") else []:
             years[year] = years.get(year, 0) + 1
-        for season, episode in EPISODE_PATTERN.findall(name):
-            seasons.setdefault(int(season), set()).add(int(episode))
+        if parsed.get("episode") is not None:
+            season, episode = int(parsed.get("season") if parsed.get("season") is not None else 1), int(parsed["episode"])
+            end = int(parsed.get("episode_end") or episode)
+            seasons.setdefault(season, set()).update(range(episode, min(end, episode + 500) + 1))
     ordered = sorted(families.values(), key=lambda row: (-row["count"], row["hint"].casefold()))
     # 兼顾主族与罕见尾部，若超限显式给出缺口，不假装摘要完整。
     hints = ordered if len(ordered) <= 10 else [*ordered[:5], *ordered[-5:]]
     return {
-        "schema": "identity-digest/v1", "container_hint": title_hint(item_name(obj.get("root") or {})),
-        "file_count": len(files), "title_hints": hints, "title_family_count": len(families),
+        "schema": "identity-digest/v2", "container_hint": parsed_name(item_name(obj.get("root") or {})).get("hint") or "",
+        "file_count": len(files), "title_hints": [{**row, "refs": row["refs"][:2]} for row in hints], "title_family_count": len(families),
         "years": dict(sorted(years.items())[:12]),
         "episode_shapes": [{"season": season, "count": len(values), "min": min(values), "max": max(values)} for season, values in sorted(seasons.items())[:12]],
-        "membership_review_required": len(families) > 1, "overflow": len(ordered) > 10 or len(years) > 12 or len(seasons) > 12,
+        "membership_review_required": len(families) > 1 and unknown == 0,
+        "parse_unresolved": unknown, "overflow": len(ordered) > 10 or len(years) > 12 or len(seasons) > 12,
+        "episode_mapping_review": any(value.get("mapping_inferred") for value in parsed_rows),
         "source_fingerprint": fingerprint(files),
     }
 
@@ -390,19 +451,15 @@ def partition_entries(top: dict[str, Any], entries: list[dict[str, Any]], histor
             exact_history[source] = history
     videos = [row for row in rows if is_media_file(row) and not is_sample(row)]
     video_parents = {normal_path(Path(str(row.get("path") or "")).parent) for row in videos}
-    sidecars = [
-        row for row in rows
-        if is_sidecar(row) and not is_sample(row)
-        and (normal_path(row.get("path")) in exact_history or normal_path(Path(str(row.get("path") or "")).parent) in video_parents)
-    ]
+    sidecars = [row for row in rows if is_sidecar(row) and not is_sample(row)]
     media_rows = [*videos, *sidecars]
     if not media_rows:
         return []
     groups: dict[str, list[dict[str, Any]]] = {}
     unmatched: list[dict[str, Any]] = []
     for row in media_rows:
-        history = exact_history.get(normal_path(row.get("path")))
-        key = history_group_key(history) if history else ""
+        # 旧下载 hash 可能已经过期；它只提供线索，不决定当前文件边界。
+        key = ""
         if key:
             groups.setdefault(key, []).append(row)
         else:
@@ -494,6 +551,9 @@ class Ledger:
                     assignment_id TEXT NOT NULL, identity_json TEXT NOT NULL
                 );
             """)
+            if "physical_key" not in {row[1] for row in db.execute("PRAGMA table_info(library_files)")}:
+                db.execute("ALTER TABLE library_files ADD COLUMN physical_key TEXT")
+            db.execute("CREATE INDEX IF NOT EXISTS library_physical ON library_files(snapshot,storage,physical_key,path)")
 
     @contextmanager
     def _session(self):
@@ -537,8 +597,8 @@ class Ledger:
 
     def index_library_rows(self, snapshot: str, rows: list[dict[str, Any]]) -> None:
         with self._session() as db:
-            db.executemany("INSERT OR REPLACE INTO library_files VALUES(?,?,?,?,?)", [
-                (snapshot, str(row.get("storage") or "local"), normal_path(row.get("path")), observed_size(row), json_text(row, sort_keys=True)) for row in rows
+            db.executemany("INSERT OR REPLACE INTO library_files(snapshot,storage,path,size,payload_json,physical_key) VALUES(?,?,?,?,?,?)", [
+                (snapshot, str(row.get("storage") or "local"), normal_path(row.get("path")), observed_size(row), json_text(row, sort_keys=True), row.get("_physical_key")) for row in rows
             ])
 
     def library_fingerprint(self, snapshot: str) -> str:
@@ -555,7 +615,7 @@ class Ledger:
         previous = self.one("SELECT fingerprint FROM objects WHERE id=?", (obj["id"],))
         dirty = 1 if not previous or previous["fingerprint"] != obj["fingerprint"] else 0
         self.execute(
-            "INSERT INTO objects VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET label=excluded.label,fingerprint=excluded.fingerprint,source_json=excluded.source_json,dirty=MAX(objects.dirty,excluded.dirty),updated_at=excluded.updated_at",
+            "INSERT INTO objects VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET label=excluded.label,fingerprint=excluded.fingerprint,source_json=excluded.source_json,status=CASE WHEN objects.status='REMOVED' THEN 'DISCOVERED' ELSE objects.status END,dirty=MAX(objects.dirty,excluded.dirty),updated_at=excluded.updated_at",
             (obj["id"], obj["label"], obj["fingerprint"], json_text(obj), "DISCOVERED", dirty, utcnow()),
         )
 
@@ -642,7 +702,10 @@ class MoviePilotAdapter:
     def list_dir(self, item: dict[str, Any]) -> list[dict[str, Any]]:
         ports = self._ports()
         fileitem = ports["FileItem"](**{key: item.get(key) for key in ("path", "storage", "type", "name", "fileid", "parent_fileid") if item.get(key) is not None})
-        return [model_dict(row) for row in (ports["storage"].list_files(fileitem) or [])]
+        rows = ports["storage"].list_files(fileitem)
+        if rows is None:
+            raise RuntimeError("存储接口没有返回目录清单，不能当作空目录")
+        return [model_dict(row) for row in rows]
 
     def get_item(self, storage: str, path: str) -> dict[str, Any] | None:
         value = self._ports()["storage"].get_file_item_strict(storage=storage or "local", path=Path(path))
@@ -671,6 +734,10 @@ class MoviePilotAdapter:
             return {"status": "unsupported", "reason": "宿主没有公开逐文件同对象工具"}
         try:
             source_path, target_path = Path(source["path"]), Path(target["path"])
+            if source_path.is_symlink() or target_path.is_symlink():
+                return {"status": "unsupported", "reason": "符号链接不是本次硬链接核验对象"}
+            if source_path.resolve() == target_path.resolve():
+                return {"status": "unproven", "reason": "源目标只是同一目录项的不同路径，不能证明独立媒体库入口"}
             if not source_path.is_file() or not target_path.is_file():
                 return {"status": "unproven", "reason": "当前引用不再是两个可读取文件"}
             same_object = SystemUtils.is_hardlink(source_path, target_path)
@@ -681,6 +748,19 @@ class MoviePilotAdapter:
             "method": "app.sdk.utilities.SystemUtils.is_hardlink",
             "reason": "本轮证实同对象" if same_object is True else "接口未证实关系，包含对象不同或读取失败的可能",
         }
+
+    @staticmethod
+    def physical_key(item: dict[str, Any]) -> str | None:
+        """同一宿主挂载视野的可选索引键；只缩小候选，最终仍逐对回读。"""
+        if str(item.get("storage") or "local") != "local" or item.get("type") != "file" or not item.get("path"):
+            return None
+        try:
+            value = Path(item["path"]).lstat()
+            if stat.S_ISREG(value.st_mode) and value.st_ino > 0 and value.st_dev > 0:
+                return f"{value.st_dev}:{value.st_ino}"
+        except OSError:
+            pass
+        return None
 
     def histories(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
@@ -707,7 +787,18 @@ class MoviePilotAdapter:
         ports = self._ports()
         source = ports["MediaSource"](identity["media_source"])
         mtype = ports["MediaType"].MOVIE if media_type_key(identity.get("media_type")) == "movie" else ports["MediaType"].TV
-        return ports["media"].recognize_media(media_source=source, media_id=str(identity["media_id"]), mtype=mtype)
+        media = ports["media"].recognize_media(media_source=source, media_id=str(identity["media_id"]), mtype=mtype, episode_group=identity.get("episode_group"))
+        if media and identity_key(identity_from_media(media)) != identity_key(identity):
+            raise ValueError("数据库详情与已确认的作品 ID 或类型不一致，已拒绝预览与执行")
+        return media
+
+    @staticmethod
+    def mapping_options(identity: dict[str, Any]) -> dict[str, Any]:
+        from app.schemas.transfer import EpisodeFormat
+        epformat = identity.get("epformat")
+        return {"season": int(identity["season"]) if identity.get("season") is not None else None,
+                "episode_group": identity.get("episode_group") or None,
+                "epformat": EpisodeFormat(**epformat) if epformat else None}
 
     def preview(self, source: dict[str, Any], identity: dict[str, Any]) -> dict[str, Any]:
         ports = self._ports()
@@ -721,10 +812,10 @@ class MoviePilotAdapter:
         state, payload = ports["transfer"].manual_transfer(
             fileitem=src, target_storage=directory.library_storage, target_path=Path(directory.library_path),
             media_source=ports["MediaSource"](identity["media_source"]), media_id=str(identity["media_id"]),
-            mtype=media.type, season=int(identity.get("season") or 0) or None,
+            mtype=media.type, **self.mapping_options(identity),
             transfer_type=directory.transfer_type or "link", scrape=False,
             library_type_folder=directory.library_type_folder, library_category_folder=directory.library_category_folder,
-            force=True, background=False, preview=True, reorganize=False, sync_extra_files=True,
+            force=True, background=False, preview=True, reorganize=False, sync_extra_files=not source.get("_governor_exact_file", False),
         )
         if not state:
             raise RuntimeError("MoviePilot 返回了失败的官方预览，不能使用其中的目标")
@@ -736,6 +827,7 @@ class MoviePilotAdapter:
         return {"summary": {"total": 0, "success": 0, "failed": 0}, "items": []}
 
     def rebuild(self, entry: dict[str, Any], identity: dict[str, Any]) -> None:
+        """执行已确认的单文件原生命令，不进入有历史清理副作用的 manual_transfer。"""
         ports = self._ports()
         media = self.media_info(identity)
         if not media:
@@ -745,18 +837,50 @@ class MoviePilotAdapter:
         directory = ports["dirs"].get_dir(media=media, src_path=Path(str(source["path"])), storage=source.get("storage") or "local")
         if not directory or not directory.library_path:
             raise RuntimeError("MoviePilot 没有找到匹配的媒体库目录")
-        cleanup = ports["FileItem"](**entry["current_item"]) if entry.get("current_item") else None
-        state, error = ports["transfer"].manual_transfer(
-            fileitem=src, target_storage=directory.library_storage, target_path=Path(directory.library_path),
-            media_source=ports["MediaSource"](identity["media_source"]), media_id=str(identity["media_id"]),
-            mtype=media.type, season=int(identity.get("season") or 0) or None,
-            transfer_type=directory.transfer_type or "link", scrape=False,
+        if str(directory.transfer_type or "link") != "link":
+            raise ValueError("当前目录不是硬链接策略，插件不会改用移动或复制")
+        transfer = getattr(ports["transfer"], "transfer", None)
+        if not callable(transfer):
+            raise RuntimeError("宿主缺少公开单文件整理入口，不能退回会自动清理历史目标的旧入口")
+        from app.sdk.media import MetaInfo
+        official = entry.get("official_item") or {}
+        if media_type_key(identity.get("media_type")) == "tv" and (official.get("season") is None or official.get("episode") is None):
+            raise ValueError("官方预览未给出明确季集，不能执行剧集重建")
+        meta = MetaInfo(title=str(official.get("org_string") or source.get("name") or Path(source["path"]).name))
+        # 直接使用官方预览给出的季集/part，不在插件里重新实现 epformat。
+        for target, key in (("begin_season", "season"), ("begin_episode", "episode"), ("part", "part")):
+            if official.get(key) is not None:
+                setattr(meta, target, official[key])
+        # end_episode 是独立字段，仅设置 total_episode 不会让公开 DTO 自动推导它。
+        meta.end_episode = int(official["episode_end"]) if official.get("episode_end") is not None else None
+        if official.get("episode") is not None:
+            if meta.end_episode is not None and meta.end_episode < int(official["episode"]):
+                raise ValueError("官方预览集号范围无效，未执行媒体写入")
+            meta.total_episode = int(official.get("episode_end") or official["episode"]) - int(official["episode"]) + 1
+        for key in ("resource_team", "customization", "apply_words"):
+            if official.get(key) is not None:
+                setattr(meta, key, official[key])
+        options = dict(fileitem=src, meta=meta, mediainfo=media,
+            target_storage=directory.library_storage, target_path=Path(directory.library_path),
+            transfer_type="link", scrape=False,
             library_type_folder=directory.library_type_folder, library_category_folder=directory.library_category_folder,
-            force=False, background=False, preview=False, reorganize=False, sync_extra_files=False,
-            cleanup_dest_fileitem=cleanup,
         )
-        if not state:
-            raise RuntimeError(str(error or "MoviePilot 没有完成重建"))
+        readonly = ports["transfer"].transfer(**options, preview=True)
+        target_item = model_dict(getattr(readonly, "target_item", None))
+        if not readonly or not getattr(readonly, "success", False) or (normal_path(target_item.get("path")), str(target_item.get("storage") or "local")) != (normal_path(entry.get("expected")), str(entry.get("target_storage") or "local")):
+            raise RuntimeError("原生单文件计划与确认目标不一致，未执行媒体写入")
+        result = transfer(**options, preview=False)
+        if not result or not getattr(result, "success", False) or getattr(result, "overwrite_skipped", False):
+            raise RuntimeError("MoviePilot 没有完成单文件重建；旧入口仍保留")
+
+    def cleanup_entry(self, item: dict[str, Any]) -> None:
+        """只删已确认的单个旧入口；不用会治理父目录的 delete_media_file。"""
+        if item.get("type") != "file":
+            raise ValueError("仅允许清理明确的文件入口")
+        ports = self._ports()
+        dto = ports["FileItem"](**{key: item[key] for key in ("path", "storage", "type", "fileid", "parent_fileid", "name") if key in item})
+        if ports["storage"].delete_file(dto) is not True:
+            raise RuntimeError("官方单文件删除未确认完成；保留旧入口等待复查")
 
     def ai_queries(self, evidence: dict[str, Any]) -> list[str]:
         return self.ai_queries_batch([("one", evidence)]).get("one", [])
@@ -822,6 +946,34 @@ class GovernorService:
         self._read_lock = threading.Lock()
         self._read_inflight = 0
         self._repair_lock = threading.Lock()
+        self._preview_threads: dict[str, threading.Thread] = {}
+        self.ledger.execute("UPDATE observations SET complete=0 WHERE kind='recheck_queue'")
+        for row in self.ledger.query("SELECT object_id,payload_json FROM observations WHERE kind='preview_request' AND complete=0"):
+            value = json.loads(row["payload_json"])
+            value.update(status="interrupted", message="宿主退出中断了只读预览，请重新生成")
+            self.ledger.save_observation(row["object_id"], "preview_request", True, "interrupted", value)
+
+    def _queue_recheck(self, object_ids: list[str]) -> None:
+        for object_id in set(object_ids):
+            self.ledger.save_observation(object_id, "recheck_queue", False, stable_id(object_id, time.time_ns()), {"object_id": object_id})
+
+    def _run_queued(self, job_id: str, mode: str, object_ids: list[str] | None) -> None:
+        """同一所有者线程顺序消费确认期间的局部重查，不再吞掉用户选择。"""
+        while True:
+            claimed = {row["object_id"]: row["fingerprint"] for row in self.ledger.query("SELECT object_id,fingerprint FROM observations WHERE kind='recheck_queue' AND complete=0") if object_ids is None or row["object_id"] in object_ids}
+            self._run(job_id, mode, object_ids)
+            with self._lock:
+                result = self.ledger.one("SELECT status FROM jobs WHERE id=?", (job_id,)) or {}
+                if result.get("status") == "completed":
+                    for object_id, generation in claimed.items():
+                        self.ledger.execute("DELETE FROM observations WHERE object_id=? AND kind='recheck_queue' AND fingerprint=?", (object_id, generation))
+                pending = self.ledger.query("SELECT object_id FROM observations WHERE kind='recheck_queue' AND complete=0")
+                if self._cancel.is_set() or result.get("status") != "completed" or not pending:
+                    self._thread = None
+                    return
+                object_ids = [row["object_id"] for row in pending]
+                mode = "incremental"
+                job_id = self.ledger.begin_job(mode)
 
     def _invalidate_automatic_confirmations(self) -> None:
         """旧版同源一致只保留候选；同时撤回其结论和修复许可，人工决定不受影响。"""
@@ -852,11 +1004,16 @@ class GovernorService:
                 self.ledger.update_job(job["id"], cancel_requested=1, current="停止领取下一部作品；正在等待当前 MoviePilot 调用返回")
             return self.status()
         with self._lock:
+            if self._repair_lock.locked():
+                raise ValueError("原生修复正在执行，不能同时启动检查")
+            if object_ids:
+                self._queue_recheck(object_ids)
             if self._thread and self._thread.is_alive():
                 return self.status()
             self._cancel.clear()
+            parsed_name.cache_clear()
             job_id = self.ledger.begin_job(mode)
-            self._thread = threading.Thread(target=self._run, args=(job_id, mode, object_ids), name="MediaGovernor-v5", daemon=True)
+            self._thread = threading.Thread(target=self._run_queued, args=(job_id, mode, object_ids), name="MediaGovernor-v5", daemon=True)
             self._thread.start()
         return self.status()
 
@@ -866,7 +1023,7 @@ class GovernorService:
         if thread and thread.is_alive():
             thread.join(timeout=5)
         with self._read_lock:
-            return not bool(thread and thread.is_alive()) and self._read_inflight == 0
+            return not bool(thread and thread.is_alive()) and self._read_inflight == 0 and not self._repair_lock.locked() and not any(value.is_alive() for value in self._preview_threads.values())
 
     def _cancelled(self, job_id: str) -> bool:
         row = self.ledger.one("SELECT cancel_requested FROM jobs WHERE id=?", (job_id,))
@@ -1007,6 +1164,22 @@ class GovernorService:
         errors: list[dict[str, str]] = []
         snapshot = stable_id(job_id, "library", time.time_ns())
         count, batch = 0, []
+        physical_key = getattr(self.adapter, "physical_key", None)
+        physical_enabled = callable(physical_key)
+        physical_failures = 0
+        def flush(rows):
+            nonlocal physical_enabled, physical_failures
+            if physical_enabled:
+                try:
+                    keys = self._readonly_call(job_id, "本地对象索引", lambda: [physical_key(row) for row in rows])
+                    rows = [{**row, "_physical_key": key} for row, key in zip(rows, keys)]
+                except AuditCancelled:
+                    raise
+                except Exception:
+                    # stat 加速不可用不等于目录为空；回退大小索引，且本轮不反复启动卡住的探针。
+                    physical_enabled = False
+                    physical_failures += 1
+            self.ledger.index_library_rows(snapshot, rows)
         self.ledger.save_observation("__library__", "inventory", False, snapshot, {"id": snapshot, "complete": False, "file_count": 0, "reason": "正在枚举"})
         for index, root in enumerate(roots, 1):
             self.ledger.update_job(job_id, phase="LIBRARY", current=f"读取媒体库 {index}/{len(roots)}；已记录 {count} 个文件")
@@ -1016,13 +1189,14 @@ class GovernorService:
                 batch.append(row)
                 count += 1
                 if len(batch) >= 256:
-                    self.ledger.index_library_rows(snapshot, batch)
+                    flush(batch)
                     batch = []
                     self.ledger.update_job(job_id, current=f"读取媒体库 {index}/{len(roots)}；已记录 {count} 个文件")
         if batch:
-            self.ledger.index_library_rows(snapshot, batch)
+            flush(batch)
         count = self.ledger.one("SELECT COUNT(*) AS count FROM library_files WHERE snapshot=?", (snapshot,))["count"]
-        result = {"id": snapshot, "complete": not errors, "file_count": count, "fingerprint": self.ledger.library_fingerprint(snapshot), "errors": errors}
+        result = {"id": snapshot, "complete": not errors, "file_count": count, "fingerprint": self.ledger.library_fingerprint(snapshot), "errors": errors,
+                  "physical_index_failures": physical_failures}
         self.ledger.save_observation("__library__", "inventory", not errors, result["fingerprint"], result)
         # 只回收自己的派生索引，不碰对象、人工决定或原始媒体。
         self.ledger.execute("DELETE FROM library_files WHERE snapshot!=?", (snapshot,))
@@ -1084,6 +1258,8 @@ class GovernorService:
                             unassigned.append(entry)
                     partition["entries"] = unassigned
                 partitions = [row for row in partitions if row["entries"]] + list(assigned.values())
+                if not partitions and any(under(error["path"], top.get("path")) or under(top.get("path"), error["path"]) for error in errors):
+                    partitions = [{"group_key": "read-error", "label": item_name(top), "entries": [], "histories": []}]
                 if not partitions and not any(item_name(row).casefold() in DISC_DIRECTORIES for row in entries if row.get("type") == "dir"):
                     continue
                 complete = not any(under(error["path"], top.get("path")) or under(top.get("path"), error["path"]) for error in errors)
@@ -1105,6 +1281,70 @@ class GovernorService:
                 obj["complete"] = False
         library = self._index_library(job_id, library_roots)
         return Inventory(objects, library_roots, histories, errors, library, warnings)
+
+    def _discover_selected(self, job_id: str, object_ids: list[str]) -> Inventory:
+        """单项确认只重读其源容器；旧库索引仅是候选，不冒充新一轮全库枚举。"""
+        downloads = self._readonly_call(job_id, "下载目录配置读取", self.adapter.directories, "download")
+        libraries = self._readonly_call(job_id, "媒体库目录配置读取", self.adapter.directories, "library")
+        if not downloads or not libraries:
+            raise ValueError("当前目录配置不可用，不能局部重查")
+        errors, objects, histories = [], [], []
+        roots = {}
+        for object_id in object_ids:
+            row = self.ledger.one("SELECT source_json FROM objects WHERE id=?", (object_id,))
+            if not row:
+                raise ValueError("局部重查对象不存在，请先检查现在；重查请求仍保留")
+            old = json.loads(row["source_json"])
+            root = old.get("root") or {}
+            roots[(str(root.get("storage") or "local"), normal_path(root.get("path")))] = root
+        memberships = {row["file_id"]: row for row in self.ledger.query("SELECT * FROM memberships")}
+        for (storage, path), old_root in roots.items():
+            if not any(str(row.get("storage") or "local") == storage and under(path, row.get("path")) for row in downloads):
+                raise ValueError("源容器已不在受管下载目录中，请先检查现在")
+            top = self._readonly_call(job_id, "源容器读取", self.adapter.get_item, storage, path)
+            if top is None:
+                # get_file_item_strict 的 None 是已证不存在，不是目录读取失败。
+                continue
+            entries = self._walk(job_id, top, errors)
+            partitions = partition_entries(top, entries, [])
+            assigned = {}
+            for partition in partitions:
+                unassigned = []
+                for entry in partition["entries"]:
+                    ref = stable_id(entry.get("storage") or "local", normal_path(entry.get("path")))
+                    choice = memberships.get(ref)
+                    if choice and choice["file_fp"] == fingerprint([entry]):
+                        answer = json.loads(choice["identity_json"])
+                        group = assigned.setdefault(choice["assignment_id"], {"group_key": "membership:" + choice["assignment_id"], "label": answer.get("title") or item_name(top), "entries": [], "user_identity": answer})
+                        group["entries"].append(entry)
+                    else:
+                        unassigned.append(entry)
+                partition["entries"] = unassigned
+            partitions = [row for row in partitions if row["entries"]] + list(assigned.values())
+            if not partitions and errors:
+                partitions = [{"group_key": "read-error", "label": item_name(top), "entries": []}]
+            if not partitions and any(item_name(row).casefold() in DISC_DIRECTORIES for row in entries if row.get("type") == "dir"):
+                partitions = [{"group_key": "disc", "label": item_name(top), "entries": entries}]
+            for partition in partitions:
+                obj = {"id": stable_id(storage, path, partition["group_key"]), "label": partition["label"],
+                       "root": top, "entries": partition["entries"], "group_key": partition["group_key"],
+                       "complete": not errors, "preview_sources": [top] if len(partitions) == 1 else partition["entries"]}
+                if partition.get("user_identity"):
+                    obj["user_identity"] = partition["user_identity"]
+                obj["fingerprint"] = fingerprint([top, *obj["entries"]])
+                objects.append(obj)
+            for old in self.ledger.query("SELECT id,source_json FROM objects WHERE status!='REMOVED'"):
+                old_obj = json.loads(old["source_json"])
+                old_top = old_obj.get("root") or {}
+                if (str(old_top.get("storage") or "local"), normal_path(old_top.get("path"))) == (storage, path):
+                    source = self.ledger.one("SELECT payload_json FROM observations WHERE object_id=? AND kind='source'", (old["id"],))
+                    if source:
+                        histories.extend(json.loads(source["payload_json"]).get("histories") or [])
+        indexed = self.ledger.one("SELECT payload_json FROM observations WHERE object_id='__library__' AND kind='inventory'")
+        library = json.loads(indexed["payload_json"]) if indexed else {}
+        # 仍可核验具体目标，但不能用缓存证明“没有其他入口”。
+        library = {**library, "complete": False, "cached": True}
+        return Inventory(objects, libraries, histories, errors, library)
 
     @staticmethod
     def _evidence(obj: dict[str, Any]) -> dict[str, Any]:
@@ -1149,7 +1389,7 @@ class GovernorService:
         """只记录阶段/类型，不保存查询词、路径或供应商异常正文。"""
         old = self.ledger.one("SELECT payload_json FROM observations WHERE object_id=? AND kind='identity_diagnostics'", (obj["id"],))
         payload = json.loads(old["payload_json"]) if old and not reset else {"attempts": []}
-        attempt = {"stage": stage, "status": status}
+        attempt = {"stage": stage, "status": status, "at": utcnow()}
         if error is not None:
             attempt["error_type"] = type(error).__name__
         payload["attempts"] = [*payload["attempts"], attempt][-24:]
@@ -1185,8 +1425,8 @@ class GovernorService:
         if not identity_key(native) or (history_candidates and identity_key(native) not in history_candidates):
             digest = self._evidence(obj)
             hints = [row["hint"] for row in digest["title_hints"][:3]] or [digest["container_hint"]]
-            year = next(iter(digest["years"])) if len(digest["years"]) == 1 else ""
-            selected_queries = queries if queries is not None else [" ".join(filter(None, (hint, year))) for hint in hints if hint and not hint.isdigit()]
+            # 剧集包的年份可能是播出季年份，不作为强过滤条件。
+            selected_queries = queries if queries is not None else [hint for hint in hints if hint and not hint.isdigit()]
             def search(query: str) -> None:
                 rows = self._readonly_call(job_id, "候选搜索", self.adapter.search, query, timeout=SEARCH_TIMEOUT_SECONDS) if job_id else self.adapter.search(query)
                 self._identity_attempt(obj, "database", "candidates" if rows else "empty")
@@ -1227,12 +1467,16 @@ class GovernorService:
         return [row for row in preview.get("items") or [] if isinstance(row, dict)]
 
     def _official_preview(self, obj: dict[str, Any], identity: dict[str, Any], job_id: str | None = None) -> dict[str, Any]:
+        deadline = time.monotonic() + 60
         sources = obj.get("preview_sources") or [obj.get("root") or {}]
         items: list[dict[str, Any]] = []
         messages: list[str] = []
         failed_responses = 0
         for source in sources:
-            value = self._readonly_call(job_id, "官方预览", self.adapter.preview, source, identity) if job_id else self.adapter.preview(source, identity)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("本作品官方预览超过总预算 60 秒，未生成可执行计划")
+            value = self._readonly_call(job_id, "官方预览", self.adapter.preview, source, identity, timeout=min(MOVIEPILOT_TIMEOUT_SECONDS, remaining))
             response_items = self._preview_items(value)
             summary = value.get("summary") or {}
             if int(summary.get("failed") or 0) > 0 or not response_items or int(summary.get("total") or 0) != len(response_items):
@@ -1242,16 +1486,23 @@ class GovernorService:
                 messages.append(str(value["message"]))
         # 同一文件可能因附加文件同步被多次带出，以 source+target 去重。
         unique = list({(normal_path(row.get("source")), str(row.get("target_storage") or "local"), normal_path(row.get("target"))): row for row in items}.values())
-        required = {normal_path(row.get("path")) for row in obj.get("entries") or [] if is_media_file(row) or is_sidecar(row)}
+        required = {normal_path(row.get("path")) for row in obj.get("entries") or [] if is_media_file(row)}
+        allowed = {normal_path(row.get("path")) for row in obj.get("entries") or []}
         represented = {normal_path(row.get("source")) for row in unique}
-        if required and required != represented:
+        if required - represented or represented - allowed:
             failed_responses += 1
             messages.append("官方预览未覆盖本作品的完整文件集合，或带出了范围外文件")
         if len(represented) != len(unique):
             failed_responses += 1
             messages.append("同一个源文件出现多个预览目标，需先确认")
+        if len({(str(row.get("target_storage") or "local"), normal_path(row.get("target"))) for row in unique}) != len(unique):
+            failed_responses += 1
+            messages.append("不同源文件指向同一个预览目标，已拒绝覆盖")
         failed = failed_responses + sum(not row.get("success", True) or not row.get("source") or not row.get("target") for row in unique)
-        return {"summary": {"total": len(unique), "success": max(0, len(unique) - failed), "failed": failed}, "items": unique, "message": "；".join(messages[:3])}
+        accounted = [{"ref": stable_id(row.get("storage") or "local", normal_path(row.get("path"))),
+                      "reason": "官方预览未计划此附件，插件不猜测目标" if is_sidecar(row) else "不支持的文件类型或原盘目录"}
+                     for row in obj.get("entries") or [] if normal_path(row.get("path")) not in represented]
+        return {"summary": {"total": len(unique), "success": max(0, len(unique) - failed), "failed": failed}, "items": unique, "unplanned_files": accounted, "message": "；".join(messages[:3])}
 
     def _observe_relations(self, obj: dict[str, Any], histories: list[dict[str, Any]], preview: dict[str, Any], inventory: Inventory, job_id: str | None, previous: dict[str, Any]) -> dict[str, Any]:
         """身份前候选发现 + 有界公平逐对核验；False 不作为未关联证据。"""
@@ -1274,17 +1525,31 @@ class GovernorService:
             if library.get("id"):
                 prior = (previous_discovery.get("sources") or {}).get(path, {}) if same_index else {}
                 cursor = str(prior.get("cursor") or "")
-                if not prior.get("complete") and not (same_run and prior):
+                if not prior.get("complete"):
                     clauses = "snapshot=? AND storage=? AND path>?"
                     params: tuple[Any, ...] = (library["id"], source["storage"], cursor)
                     size = observed_size(original)
-                    if size is not None:
+                    physical_key = getattr(self.adapter, "physical_key", None)
+                    physical = None
+                    if callable(physical_key) and not library.get("cached") and not library.get("physical_index_failures"):
+                        try:
+                            physical = self._readonly_call(job_id, "源对象索引", physical_key, original)
+                        except AuditCancelled:
+                            raise
+                        except Exception:
+                            library["physical_index_failures"] = int(library.get("physical_index_failures") or 0) + 1
+                    suffix_params: tuple[Any, ...] = ()
+                    if physical:
+                        clauses += " AND (physical_key=? OR physical_key IS NULL)"
+                        suffix_params = (physical,)
+                    elif size is not None:
                         clauses += " AND (size=? OR size IS NULL)"
-                        params += (size,)
+                        suffix_params = (size,)
+                    params += suffix_params
                     rows = self.ledger.query("SELECT path,payload_json FROM library_files WHERE " + clauses + " ORDER BY path LIMIT ?", params + (MAX_CANDIDATE_PAGE,))
                     targets.extend((source["storage"], row["path"], "library") for row in rows)
                     cursor = rows[-1]["path"] if rows else cursor
-                    pending = self.ledger.one("SELECT COUNT(*) AS count FROM library_files WHERE " + clauses, (library["id"], source["storage"], cursor) + ((size,) if size is not None else ()))
+                    pending = self.ledger.one("SELECT COUNT(*) AS count FROM library_files WHERE " + clauses, (library["id"], source["storage"], cursor) + suffix_params)
                     prior = {"cursor": cursor, "complete": not pending["count"], "remaining": pending["count"]}
                 discovery["sources"][path] = prior
                 remaining += int(prior.get("remaining") or 0)
@@ -1322,7 +1587,7 @@ class GovernorService:
         start = next((index + 1 for index, pair in enumerate(pairs) if pair["id"] == last_id), 0)
         rotated = pairs[start:] + pairs[:start]
         already_checked = sum(pair["status"] != "pending" for pair in pairs) if same_run else 0
-        selected = [pair for pair in rotated if pair["status"] == "pending"][:max(0, MAX_RELATION_PAIRS - already_checked)]
+        selected = [pair for pair in rotated if pair["status"] == "pending"][:MAX_RELATION_PAIRS]
         if job_id:
             results = self._readonly_many(job_id, "文件关系核验", [(probe, (pair,)) for pair in selected])
         else:
@@ -1338,21 +1603,41 @@ class GovernorService:
             else:
                 pair.update(result)
             pair["observed_at"] = utcnow()
+        media_paths = {normal_path(row.get("path")) for row in source_items.values() if is_media_file(row)}
+        linked = {pair["source"]["path"] for pair in pairs if pair["status"] == "verified"} & media_paths
         return {"pairs": pairs, "discovery": discovery, "source_fp": obj.get("fingerprint"), "_job_id": job_id,
                 "cursor_id": selected[-1]["id"] if selected else last_id, "coverage": {
             "scope": "library_candidates" if library else "known_candidates", "exhaustive": False,
             "enumeration_complete": bool(library.get("complete")), "candidate_discovery_complete": not remaining,
             "checked_pairs": already_checked + len(selected), "pending_pairs": sum(pair["status"] == "pending" for pair in pairs) + remaining,
             "discovery_pending": remaining, "library_file_count": library.get("file_count", 0),
+            "source_video_count": len(media_paths), "linked_source_count": len(linked),
+            "unlinked_or_unproven_sources": len(media_paths - linked),
+            "library_snapshot_cached": bool(library.get("cached")),
             "unproven_pairs": sum(pair["status"] in {"unproven", "unsupported", "read_error"} for pair in pairs),
             "note": "依据当前库清单、必要大小条件及已有线索发现候选；未证实/待读不等于未关联；不声明跨存储或所有物理关系查全" if library else "仅已有候选，未取得当前媒体库枚举合同",
         }}
+
+    def _complete_relations(self, obj, histories, preview, inventory, job_id, previous):
+        """每页有界、页间可停止；单轮公平走完，不要求用户反复点检查。"""
+        receipt = self._observe_relations(obj, histories, preview, inventory, job_id, previous)
+        if job_id is None:
+            return receipt
+        while receipt["coverage"]["pending_pairs"]:
+            self._check_cancelled(job_id)
+            self.ledger.save_observation(obj["id"], "physical", False, obj["fingerprint"], receipt)
+            self.ledger.update_job(job_id, current=f"核验关联：{obj['label']}；已查 {receipt['coverage']['checked_pairs']} 对，待查 {receipt['coverage']['pending_pairs']} 对")
+            after = self._observe_relations(obj, histories, preview, inventory, job_id, receipt)
+            if after == receipt:
+                break
+            receipt = after
+        return receipt
 
     def _findings(self, obj: dict[str, Any], histories: list[dict[str, Any]], identity_state: str, identity: dict[str, Any], preview: dict[str, Any], inventory: Inventory, job_id: str | None = None, relation_observation: dict[str, Any] | None = None, previous: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []
         if not obj.get("complete"):
             return [{"kind": "read_error", "reason": ISSUE_LABELS["read_error"], "evidence": {"stage": "source_inventory"}}]
-        receipt = self._observe_relations(obj, histories, preview, inventory, job_id, previous or {})
+        receipt = self._complete_relations(obj, histories, preview, inventory, job_id, previous or {})
         if relation_observation is not None:
             relation_observation.update(receipt)
         latest = latest_histories(histories)
@@ -1373,16 +1658,14 @@ class GovernorService:
         path_deviations = 0
         comparisons: list[dict[str, Any]] = []
         if any(pair["status"] == "read_error" for pair in receipt["pairs"]):
-            return [{"kind": "read_error", "reason": "当前候选读取失败，已停止强结论判定", "evidence": receipt}]
-        unproven = receipt["coverage"]["pending_pairs"] + receipt["coverage"]["unproven_pairs"] + int(bool(inventory.library and not inventory.library.get("complete")))
+            findings.append({"kind": "read_error", "reason": "部分候选读取失败；不影响其他已证明事实", "evidence": receipt})
+        unproven = receipt["coverage"]["pending_pairs"] + receipt["coverage"]["unproven_pairs"]
         for row in preview_items:
             source = normal_path(row.get("source"))
             expected = str(row.get("target") or "")
             current_history = latest.get(source)
             pairs = [pair for pair in receipt["pairs"] if pair["source"]["path"] == source]
             expected_pair = next((pair for pair in pairs if "expected" in pair["roles"] and normal_path(pair["target"]["path"]) == normal_path(expected) and pair["target"]["storage"] == str(row.get("target_storage") or "local")), None)
-            if not expected_pair or expected_pair["status"] in {"pending", "unsupported", "unproven"}:
-                continue
             intended_category = expected_category(identity)
             preview_category = root_category(expected, inventory.library_roots)
             contradictory_current = any(pair["status"] == "verified" and root_category(pair["target"]["path"], inventory.library_roots) == intended_category for pair in pairs)
@@ -1392,7 +1675,8 @@ class GovernorService:
             if category_conflict and (not ambiguous_tv_anime or contradictory_current):
                 return [{"kind": "preview_error", "reason": "MoviePilot 预览目录与已确认作品类型矛盾，已停止判定", "evidence": receipt}]
             wrong = [pair for pair in pairs if pair["status"] == "verified" and (normal_path(pair["target"]["path"]), pair["target"]["storage"]) != (normal_path(expected), str(row.get("target_storage") or "local"))]
-            comparisons.append({"source": source, "expected": expected, "expected_relation": expected_pair["status"], "known_targets": [pair["target"] for pair in pairs]})
+            comparisons.append({"source": source, "expected": expected, "expected_relation": expected_pair["status"] if expected_pair else "pending", "known_targets": [pair["target"] for pair in pairs]})
+            rule_changes_before = rule_changes
             if wrong:
                 prior = previous or {}
                 same_basis = prior.get("identity_key") == identity_key(identity) and prior.get("source_fp") == obj["fingerprint"]
@@ -1409,11 +1693,15 @@ class GovernorService:
                             false_kinds.append(kind)
                         else:
                             path_deviations += 1
-            elif expected_pair["status"] == "verified":
+            # 错误入口与正确入口缺失是两个独立事实，不能用 elif 遮掉其中一个。
+            if not expected_pair or expected_pair["status"] in {"pending", "unsupported", "unproven", "read_error"}:
+                unproven += int(not expected_pair)
                 continue
-            elif current_history and bool(current_history.get("status")):
+            if expected_pair["status"] == "verified" or rule_changes > rule_changes_before:
+                continue
+            elif current_history and bool(current_history.get("status")) and not wrong:
                 manual_changes += 1
-            elif not (inventory.library and not inventory.library.get("complete")) and expected_pair["status"] == "missing":
+            elif expected_pair["status"] == "missing" and (wrong or not inventory.library or inventory.library.get("complete")):
                 native_missing += 1
             else:
                 unproven += 1
@@ -1449,7 +1737,7 @@ class GovernorService:
             configuration = getattr(self.adapter, "preview_configuration", None)
             naming = self._readonly_call(job_id, "预览规则读取", configuration) if callable(configuration) else {}
             rule_fp = stable_id(config_fp, json_text(naming, sort_keys=True))
-            basis = stable_id(PREVIEW_REVISION, obj["fingerprint"], identity_key(identity), identity.get("season"), rule_fp)
+            basis = stable_id(PREVIEW_REVISION, obj["fingerprint"], json_text(identity, sort_keys=True), rule_fp)
             cached = self.ledger.one("SELECT payload_json FROM observations WHERE object_id=? AND kind='preview'", (obj["id"],))
             cached_payload = json.loads(cached["payload_json"]) if cached else {}
             if preview_cache_usable(cached_payload, basis) and not force_preview:
@@ -1490,6 +1778,7 @@ class GovernorService:
             self.ledger.save_observation(obj["id"], "relations", complete, obj["fingerprint"], observation)
             self.ledger.save_observation(obj["id"], "digest", True, obj["fingerprint"], self._evidence(obj))
             self.ledger.replace_findings(obj["id"], findings)
+            self.ledger.save_observation(obj["id"], "checked_job", True, obj["fingerprint"], {"job_id": job_id})
 
     def _finish_cancelled(self, job_id: str, message: str = "已停止，已完成结果仍然保留") -> None:
         row = self.ledger.one("SELECT done FROM jobs WHERE id=?", (job_id,)) or {}
@@ -1497,29 +1786,41 @@ class GovernorService:
 
     def _run(self, job_id: str, mode: str, object_ids: list[str] | None) -> None:
         try:
-            inventory = self._discover(job_id)
+            inventory = self._discover_selected(job_id, object_ids) if object_ids else self._discover(job_id)
             self._check_cancelled(job_id)
             library_fp = fingerprint(inventory.library_roots)
             self.ledger.save_observation("__library__", "configuration", True, library_fp, {"roots": inventory.library_roots})
             self.ledger.save_observation("__library__", "warnings", True, library_fp, {"warnings": inventory.warnings})
+            self.ledger.save_observation(job_id, "inventory_result", not inventory.errors, library_fp, {"error_count": len(inventory.errors), "warning_count": len(inventory.warnings)})
             current_ids = {obj["id"] for obj in inventory.objects}
             for obj in inventory.objects:
                 self.ledger.upsert_object(obj)
                 if obj.get("user_identity"):
                     self.ledger.save_identity(obj["id"], "confirmed", obj["fingerprint"], obj["user_identity"], [obj["user_identity"]], "user_confirmed")
-            if current_ids and not inventory.errors:
+            if object_ids and not inventory.errors:
+                # 局部重查只退役所选源容器的旧划分，绝不清空其他作品。
+                roots = set()
+                for object_id in object_ids:
+                    old = self.ledger.one("SELECT source_json FROM objects WHERE id=?", (object_id,))
+                    root = (json.loads(old["source_json"]).get("root") or {}) if old else {}
+                    roots.add((str(root.get("storage") or "local"), normal_path(root.get("path"))))
+                for old in self.ledger.query("SELECT id,source_json FROM objects WHERE status!='REMOVED'"):
+                    root = json.loads(old["source_json"]).get("root") or {}
+                    if old["id"] not in current_ids and (str(root.get("storage") or "local"), normal_path(root.get("path"))) in roots:
+                        self.ledger.execute("UPDATE objects SET status='REMOVED',dirty=0 WHERE id=?", (old["id"],))
+                        self.ledger.execute("UPDATE findings SET status='resolved' WHERE object_id=?", (old["id"],))
+            elif current_ids and not inventory.errors:
                 placeholders = ",".join("?" for _ in current_ids)
                 self.ledger.execute(f"UPDATE objects SET status='REMOVED',dirty=0 WHERE id NOT IN ({placeholders})", tuple(current_ids))
                 self.ledger.execute(f"UPDATE findings SET status='resolved' WHERE object_id NOT IN ({placeholders})", tuple(current_ids))
-            elif not current_ids and not inventory.errors:
+            elif not object_ids and not current_ids and not inventory.errors:
                 self.ledger.execute("UPDATE objects SET status='REMOVED',dirty=0")
                 self.ledger.execute("UPDATE findings SET status='resolved' WHERE status='open'")
             # 增量运行仍逐项做廉价的目标存在性探针，以发现用户在文件管理器中的删除/移动；
             # 身份和官方预览在指纹、规则与目录配置未变化时复用，不再次消耗 AI 或重算路径。
             selected = list(inventory.objects)
-            if object_ids:
-                selected = [obj for obj in selected if obj["id"] in object_ids]
             self.ledger.update_job(job_id, phase="RECONCILING", total=len(selected), done=0, current="准备逐批核对作品")
+            self.ledger.save_observation(job_id, "selection", True, "selected", {"count": len(selected)})
             completed = 0
             ai_batches = 0
             for offset in range(0, len(selected), 4):
@@ -1527,18 +1828,33 @@ class GovernorService:
                 batch = selected[offset:offset + 4]
                 resolved: dict[str, tuple[str, dict[str, Any], list[dict[str, Any]], str]] = {}
                 needs_queries: list[dict[str, Any]] = []
+                deferred_ids: set[str] = set()
+                def finish(obj):
+                    nonlocal completed
+                    self._check_cancelled(job_id)
+                    self.ledger.update_job(job_id, phase="RECONCILING", current=f"核对：{obj['label']}", done=completed)
+                    try:
+                        self._process(job_id, obj, inventory, resolved.get(obj["id"]), force_preview=mode == "full")
+                    except AuditCancelled:
+                        raise
+                    except Exception as error:  # noqa: BLE001 - 单项失败也有本轮回执
+                        self.ledger.replace_findings(obj["id"], [{"kind": "read_error", "reason": f"核对阶段失败：{str(error)[:180]}", "evidence": {"stage": "reconciliation"}}])
+                        self.ledger.save_observation(obj["id"], "checked_job", False, obj["fingerprint"], {"job_id": job_id})
+                    completed += 1
+                    self.ledger.update_job(job_id, done=completed)
                 for obj in batch:
                     self._check_cancelled(job_id)
                     self.ledger.update_job(job_id, phase="RELATIONS", current=f"调查当前文件关联：{obj['label']}", done=completed)
                     if obj.get("complete"):
                         old = self.ledger.one("SELECT payload_json FROM observations WHERE object_id=? AND kind='relations'", (obj["id"],))
                         prior = json.loads(old["payload_json"]) if old else {}
-                        physical = self._observe_relations(obj, self._histories_for(obj, inventory.histories), {}, inventory, job_id, prior)
+                        physical = self._complete_relations(obj, self._histories_for(obj, inventory.histories), {}, inventory, job_id, prior)
                         self._check_cancelled(job_id)
                         self.ledger.save_observation(obj["id"], "physical", False, obj["fingerprint"], physical)
                     self.ledger.update_job(job_id, phase="IDENTIFYING", current=f"识别：{obj['label']}", done=completed)
                     if not obj.get("complete"):
                         resolved[obj["id"]] = ("candidate", {}, [], "source_incomplete")
+                        finish(obj)
                         continue
                     saved = self._saved_identity(obj)
                     reused_candidate = bool(mode != "full" and saved and saved["state"] == "candidate" and self._identity_cache_usable(saved, obj))
@@ -1548,6 +1864,9 @@ class GovernorService:
                     digest = self._evidence(obj)
                     if self.ai_enabled and not probe[2] and probe[0] != "confirmed" and probe[3] != "search_error" and not reused_candidate and not digest["membership_review_required"] and not digest["overflow"]:
                         needs_queries.append(obj)
+                        deferred_ids.add(obj["id"])
+                    else:
+                        finish(obj)
                 query_map: dict[str, list[str]] = {}
                 if needs_queries and ai_batches >= MAX_AI_BATCHES_PER_JOB:
                     for obj in needs_queries:
@@ -1597,16 +1916,8 @@ class GovernorService:
                             candidates.append(candidate)
                     resolved[object_id] = (state, identity, candidates[:12], provenance)
                 for obj in batch:
-                    self._check_cancelled(job_id)
-                    self.ledger.update_job(job_id, phase="RECONCILING", current=f"核对：{obj['label']}", done=completed)
-                    try:
-                        self._process(job_id, obj, inventory, resolved.get(obj["id"]), force_preview=mode == "full")
-                    except AuditCancelled:
-                        raise
-                    except Exception as error:  # noqa: BLE001 - 一部失败不能终止其余作品
-                        self.ledger.replace_findings(obj["id"], [{"kind": "read_error", "reason": f"核对阶段失败：{str(error)[:180]}", "evidence": {"stage": "reconciliation"}}])
-                    completed += 1
-                    self.ledger.update_job(job_id, done=completed)
+                    if obj["id"] in deferred_ids:
+                        finish(obj)
             self.ledger.update_job(job_id, status="completed", phase="DONE", done=len(selected), current="检查完成", finished_at=utcnow())
         except AuditCancelled:
             self._finish_cancelled(job_id)
@@ -1616,11 +1927,20 @@ class GovernorService:
     def status(self) -> dict[str, Any]:
         job = self.ledger.current_job() or {"status": "idle", "phase": "IDLE", "total": 0, "done": 0, "current": "尚未检查", "error": ""}
         counts = {row["kind"]: row["count"] for row in self.ledger.query("SELECT kind,COUNT(*) count FROM findings WHERE status='open' GROUP BY kind")}
-        return {"job": job, "counts": counts, "objects": (self.ledger.one("SELECT COUNT(*) count FROM objects WHERE status!='REMOVED'") or {}).get("count", 0), "readonly_inflight": self._read_inflight, "readonly_limit": MAX_READ_WORKERS, "ai_enabled": self.ai_enabled, "read_only": self.read_only}
+        selection = self.ledger.one("SELECT payload_json FROM observations WHERE object_id=? AND kind='selection'", (job.get("id"),))
+        inventory_result = self.ledger.one("SELECT payload_json FROM observations WHERE object_id=? AND kind='inventory_result'", (job.get("id"),))
+        pending = max(0, int(json.loads(selection["payload_json"])["count"]) - int(job.get("done") or 0)) if selection else None
+        return {"job": job, "counts": counts, "pending_objects": pending, "discovery_complete": bool(selection),
+                "inventory_errors": json.loads(inventory_result["payload_json"]).get("error_count", 0) if inventory_result else 0,
+                "queued_rechecks": len(self.ledger.query("SELECT object_id FROM observations WHERE kind='recheck_queue' AND complete=0")),
+                "objects": (self.ledger.one("SELECT COUNT(*) count FROM objects WHERE status!='REMOVED'") or {}).get("count", 0), "readonly_inflight": self._read_inflight, "readonly_limit": MAX_READ_WORKERS, "ai_enabled": self.ai_enabled, "read_only": self.read_only}
 
     def findings(self) -> dict[str, Any]:
         rows = self.ledger.query("SELECT f.*,o.label FROM findings f JOIN objects o ON o.id=f.object_id WHERE f.status='open' ORDER BY f.kind,o.label")
-        public = [{"id": row["id"], "object_id": row["object_id"], "title": row["label"], "kind": row["kind"], "reason": row["reason"]} for row in rows]
+        job_id = (self.ledger.current_job() or {}).get("id")
+        checked = {row["object_id"]: json.loads(row["payload_json"]).get("job_id") for row in self.ledger.query("SELECT object_id,payload_json FROM observations WHERE kind='checked_job'")}
+        public = [{"id": row["id"], "object_id": row["object_id"], "title": row["label"], "kind": row["kind"], "reason": row["reason"],
+                   "checked_at": row["updated_at"], "current_job": bool(job_id and checked.get(row["object_id"]) == job_id)} for row in rows]
         problems = [row for row in public if row["kind"] in {"native_failure", "false_success"}]
         confirmations = [row for row in public if row["kind"] in {"identity_confirmation", "manual_change", "relation_confirmation", "rule_change", "path_deviation"}]
         errors = [row for row in public if row["kind"] in {"read_error", "preview_error"}]
@@ -1638,11 +1958,19 @@ class GovernorService:
         preview = self.ledger.one("SELECT * FROM observations WHERE object_id=? AND kind='preview'", (object_id,)) or {}
         relations = self.ledger.one("SELECT * FROM observations WHERE object_id=? AND kind='relations'", (object_id,)) or {}
         diagnostics = self.ledger.one("SELECT payload_json FROM observations WHERE object_id=? AND kind='identity_diagnostics'", (object_id,)) or {}
+        repair_result = self.ledger.one("SELECT payload_json FROM observations WHERE object_id=? AND kind='repair_result'", (object_id,)) or {}
         confirmed = user_confirmed(identity) and self._identity_cache_usable(identity, json.loads(obj["source_json"]))
         candidates = json.loads(identity.get("candidates_json") or "[]")
         chosen = json.loads(identity.get("identity_json") or "{}")
         if not confirmed and identity_key(chosen) and not any(identity_key(value) == identity_key(chosen) for value in candidates):
             candidates.insert(0, chosen)
+        file_groups = {}
+        entries = json.loads(obj["source_json"]).get("entries") or []
+        for row, parsed in zip(entries, container_names(entries)):
+            hint = parsed.get("hint") or "未解析文件"
+            if parsed.get("year") and parsed.get("episode") is None:
+                hint += " (" + parsed["year"] + ")"
+            file_groups.setdefault(hint, []).append(stable_id(row.get("storage") or "local", normal_path(row.get("path"))))
         return {
             "id": object_id, "title": obj["label"], "fingerprint": obj["fingerprint"],
             "source": json.loads(source.get("payload_json") or "{}"),
@@ -1651,9 +1979,11 @@ class GovernorService:
             "candidates": candidates,
             "provenance": identity.get("provenance") or "",
             "identity_diagnostics": json.loads(diagnostics.get("payload_json") or "{}"),
+            "repair_result": json.loads(repair_result.get("payload_json") or "{}"),
             "preview": json.loads(preview.get("payload_json") or "{}"),
             "relations": json.loads(relations.get("payload_json") or "{}"),
             "digest": self._evidence(json.loads(obj["source_json"])),
+            "file_groups": [{"hint": hint, "refs": refs, "count": len(refs)} for hint, refs in file_groups.items()],
             "files": [{"ref": stable_id(row.get("storage") or "local", normal_path(row.get("path"))), "name": item_name(row)} for row in json.loads(obj["source_json"]).get("entries") or []],
         }
 
@@ -1665,7 +1995,13 @@ class GovernorService:
         if not query or len(query) > 120:
             raise ValueError("请填写 1–120 字的作品搜索词")
         before = self.ledger.one("SELECT * FROM identities WHERE object_id=?", (object_id,))
-        rows = self._readonly_call(None, "候选搜索", self.adapter.search, query, timeout=SEARCH_TIMEOUT_SECONDS)
+        obj = (detail.get("source") or {}).get("object") or {"id": object_id, "fingerprint": detail["fingerprint"]}
+        try:
+            rows = self._readonly_call(None, "候选搜索", self.adapter.search, query, timeout=SEARCH_TIMEOUT_SECONDS)
+        except Exception as error:
+            self._identity_attempt(obj, "manual_database", "error", error)
+            raise
+        self._identity_attempt(obj, "manual_database", "candidates" if rows else "empty")
         candidates: list[dict[str, Any]] = []
         for row in [*(rows or []), *detail["candidates"]]:
             if identity_key(row) and not any(identity_key(old) == identity_key(row) for old in candidates):
@@ -1677,13 +2013,27 @@ class GovernorService:
             self.ledger.save_identity(object_id, detail["identity_state"], detail["fingerprint"], detail["identity"], candidates[:12], detail["provenance"] or "needs_user_confirmation")
         return self.detail(object_id)
 
-    def confirm_identity(self, object_id: str, candidate_key: str, file_refs: list[str] | None = None) -> dict[str, Any]:
+    def confirm_identity(self, object_id: str, candidate_key: str, file_refs: list[str] | None = None, mapping: dict[str, Any] | None = None) -> dict[str, Any]:
         detail = self.detail(object_id)
         if not detail:
             raise ValueError("作品不存在")
         candidate = next((row for row in detail["candidates"] if identity_key(row) == candidate_key), None)
         if not candidate:
             raise ValueError("候选已经过期，请重新检查")
+        candidate = dict(candidate)
+        if mapping is not None:
+            if not isinstance(mapping, dict) or set(mapping) - {"season", "episode_group", "epformat"}:
+                raise ValueError("季集映射格式无效")
+            if mapping.get("season") is not None and (isinstance(mapping["season"], bool) or not isinstance(mapping["season"], int) or not 0 <= mapping["season"] <= 999):
+                raise ValueError("季度必须是 0–999 的整数；0 表示特别篇")
+            if mapping.get("episode_group") is not None and (not isinstance(mapping["episode_group"], str) or len(mapping["episode_group"]) > 200):
+                raise ValueError("剧集组格式无效")
+            if mapping.get("epformat") is not None:
+                from app.schemas.transfer import EpisodeFormat
+                if not isinstance(mapping["epformat"], dict) or set(mapping["epformat"]) - {"format", "detail", "part", "offset"}:
+                    raise ValueError("集数映射格式无效")
+                mapping = {**mapping, "epformat": EpisodeFormat(**mapping["epformat"]).model_dump(exclude_none=True)}
+            candidate.update(mapping)
         if media_type_key(candidate.get("media_type")) not in {"movie", "tv"}:
             raise ValueError("候选缺少电影/电视剧类型，不能确认")
         source = detail["source"].get("object") or {}
@@ -1702,8 +2052,8 @@ class GovernorService:
             valid = {stable_id(row.get("storage") or "local", normal_path(row.get("path"))): row for row in entries}
             if not file_refs or len(set(file_refs)) != len(file_refs) or any(ref not in valid for ref in file_refs):
                 raise ValueError("所选文件已经变化，请重新读取")
-            if not any(is_media_file(valid[ref]) for ref in file_refs):
-                raise ValueError("至少选择一个正片文件")
+            if not any(is_media_file(valid[ref]) or is_sidecar(valid[ref]) for ref in file_refs):
+                raise ValueError("至少选择一个媒体或附件文件")
             assignment_id = stable_id(identity_key(candidate), *sorted(file_refs))
             with self._lock, self.ledger.transaction():
                 current = self.ledger.one("SELECT fingerprint FROM objects WHERE id=?", (object_id,))
@@ -1712,7 +2062,7 @@ class GovernorService:
                 for ref in file_refs:
                     self.ledger.execute("INSERT OR REPLACE INTO memberships VALUES(?,?,?,?)", (ref, fingerprint([valid[ref]]), assignment_id, json_text(candidate)))
                 self.ledger.execute("DELETE FROM observations WHERE object_id=? AND kind='repair_plan'", (object_id,))
-            return self.start("incremental")
+            return self.start("incremental", [object_id])
         with self._lock, self.ledger.transaction():
             current = self.ledger.one("SELECT fingerprint FROM objects WHERE id=?", (object_id,))
             if not current or current["fingerprint"] != detail["fingerprint"] or self.ledger.one("SELECT * FROM identities WHERE object_id=?", (object_id,)) != saved:
@@ -1721,6 +2071,31 @@ class GovernorService:
             self.ledger.execute("UPDATE objects SET dirty=1 WHERE id=?", (object_id,))
             self.ledger.execute("DELETE FROM observations WHERE object_id=? AND kind='repair_plan'", (object_id,))
         return self.start("incremental", [object_id])
+
+    def request_repair_preview(self, object_id: str) -> dict[str, Any]:
+        with self._lock:
+            self._preview_threads = {key: value for key, value in self._preview_threads.items() if value.is_alive()}
+            if object_id in self._preview_threads:
+                return self.repair_preview_status(object_id)
+            if len(self._preview_threads) >= 2 or self._repair_lock.locked():
+                raise ValueError("已有只读预览或修复在运行，请等待当前任务结束")
+            request_id = stable_id(object_id, time.time_ns())
+            self.ledger.save_observation(object_id, "preview_request", False, request_id, {"status": "running", "request_id": request_id, "started_at": utcnow()})
+            def run():
+                try:
+                    plan = self.repair_preview(object_id)
+                    value = {"status": "completed", "request_id": request_id, "plan": plan}
+                except Exception as error:  # noqa: BLE001 - 只读任务边界；不保存宿主异常正文
+                    value = {"status": "failed", "request_id": request_id, "message": str(error)[:240]}
+                self.ledger.save_observation(object_id, "preview_request", True, request_id, value)
+            worker = threading.Thread(target=run, daemon=True, name="MediaGovernor-preview")
+            self._preview_threads[object_id] = worker
+            worker.start()
+            return self.repair_preview_status(object_id)
+
+    def repair_preview_status(self, object_id: str) -> dict[str, Any]:
+        row = self.ledger.one("SELECT payload_json FROM observations WHERE object_id=? AND kind='preview_request'", (object_id,))
+        return json.loads(row["payload_json"]) if row else {"status": "idle"}
 
     def repair_preview(self, object_id: str) -> dict[str, Any]:
         detail = self.detail(object_id)
@@ -1739,61 +2114,129 @@ class GovernorService:
         library_roots = json.loads(library_config.get("payload_json") or "{}").get("roots") or []
         entries = []
         for row in self._preview_items(preview):
+            intended_category = expected_category(detail["identity"])
+            preview_category = root_category(str(row.get("target") or ""), library_roots)
+            ambiguous_tv_anime = intended_category == "tv" and preview_category == "anime" and not detail["identity"].get("genres")
+            if intended_category not in {"unknown", "other"} and preview_category not in {"other", intended_category} and not ambiguous_tv_anime:
+                raise ValueError("官方预览分类与已确认身份矛盾，不能生成修复计划")
             history = latest.get(normal_path(row.get("source")))
             current_path = str((history or {}).get("dest") or model_dict((history or {}).get("dest_fileitem")).get("path") or "")
             source_item = next((item for item in obj.get("entries") or [] if normal_path(item.get("path")) == normal_path(row.get("source"))), obj.get("root"))
             current_item = model_dict((history or {}).get("dest_fileitem")) or ({"path": current_path, "storage": (history or {}).get("dest_storage") or "local", "type": "file"} if current_path else None)
             if not any(str(root.get("storage") or "local") == str(row.get("target_storage") or "local") and under(row.get("target"), root.get("path")) for root in library_roots):
                 raise ValueError("官方预期目标不在本轮受管媒体库范围内，请重新检查")
-            # 只有“成功历史明确指向、且与新目标不同”的旧目标才允许交给官方 cleanup 参数。
-            attributable = bool(history and history.get("status") and current_path and normal_path(current_path) != normal_path(row.get("target")))
-            if attributable and not any(str(root.get("storage") or "local") == str((current_item or {}).get("storage") or "local") and under(current_path, root.get("path")) for root in library_roots):
-                attributable = False
+            known = [pair["target"] for pair in detail.get("relations", {}).get("pairs", [])
+                     if normal_path(pair.get("source", {}).get("path")) == normal_path(row.get("source")) and pair.get("status") == "verified"]
+            # 历史只增加一个待回读候选；是否能清理只认当前物理关系。
+            if current_item:
+                known.append(current_item)
+            old_items = []
+            for old in known:
+                old = {**old, "storage": old.get("storage") or "local", "type": "file"}
+                if (old["storage"], normal_path(old.get("path"))) == (str(row.get("target_storage") or "local"), normal_path(row.get("target"))):
+                    continue
+                if not any(str(root.get("storage") or "local") == old["storage"] and under(old.get("path"), root.get("path")) for root in library_roots):
+                    continue
+                if not any((item["storage"], normal_path(item.get("path"))) == (old["storage"], normal_path(old.get("path"))) for item in old_items):
+                    old_items.append(old)
+            current_item = old_items[0] if old_items else None
+            current_path = str((current_item or {}).get("path") or "")
+            attributable = bool(old_items)
             entries.append({
                 "source": {key: source_item.get(key) for key in ("path", "storage", "type", "name", "size", "modify_time") if source_item.get(key) is not None},
                 "current": current_path, "current_item": current_item if attributable else None,
                 "expected": row.get("target"), "target_storage": row.get("target_storage") or "local",
                 "history_id": (history or {}).get("id"), "cleanup_attributable": attributable,
+                "old_items": old_items,
+                "official_item": row,
             })
+        expected_entries = {(entry["target_storage"], normal_path(entry["expected"])) for entry in entries}
+        for entry in entries:
+            entry["old_items"] = [old for old in entry["old_items"] if (old["storage"], normal_path(old.get("path"))) not in expected_entries]
+            entry["current_item"] = entry["old_items"][0] if entry["old_items"] else None
+            entry["current"] = str((entry["current_item"] or {}).get("path") or "")
+            entry["cleanup_attributable"] = bool(entry["old_items"])
         if not entries or any(not row.get("expected") for row in entries):
             raise ValueError("官方预览没有给出完整目标，不能执行修复")
+        self._validate_download_protection(entries)
         live = self._repair_live_state(entries)
         for entry, state in zip(entries, live):
             if state["source"] == "missing":
                 raise ValueError("源文件当前不可见，请重新检查")
             if state["expected"] != "missing" and state["expected_relation"] != "verified":
                 raise ValueError("现有目标与源文件的关系尚未证实，不能覆盖")
-            if entry["cleanup_attributable"] and state["current"] != "missing" and state["current_relation"] != "verified":
+            if any(old["fingerprint"] != "missing" and old["relation"] != "verified" for old in state["old"]):
                 raise ValueError("旧目标与源文件的关系尚未证实，不能清理")
+            entry["action"] = "create" if state["expected"] == "missing" else "keep"
+            entry["cleanup_attributable"] = any(old["fingerprint"] != "missing" for old in state["old"])
         token = stable_id(object_id, detail["fingerprint"], identity_key(detail["identity"]), json_text(entries, sort_keys=True), json_text(live, sort_keys=True))
-        plan = {"token": token, "object_fingerprint": detail["fingerprint"], "identity": detail["identity"], "entries": entries, "live": live, "created_at": utcnow()}
-        self.ledger.save_observation(object_id, "repair_plan", True, token, plan)
+        plan = {"token": token, "object_fingerprint": detail["fingerprint"], "identity": detail["identity"], "entries": entries, "live": live, "unplanned_files": preview.get("unplanned_files", []),
+                "cleanup_scope": "only_listed_files_after_all_new_links_verified", "created_at": utcnow()}
+        with self.ledger.transaction():
+            current = self.detail(object_id)
+            if not current or current["fingerprint"] != detail["fingerprint"] or current["identity"] != detail["identity"]:
+                raise ValueError("文件或人工身份在预览期间变化，请重新生成")
+            self.ledger.save_observation(object_id, "repair_plan", True, token, plan)
         return plan
+
+    def _validate_download_protection(self, entries: list[dict[str, Any]]) -> None:
+        roots = self._readonly_call(None, "下载保护范围", self.adapter.directories, "download")
+        if not roots or any(not normal_path(root.get("path")) for root in roots):
+            raise ValueError("无法确认下载保护范围，不能生成或执行媒体写入计划")
+        for entry in entries:
+            affected = [{"storage": entry.get("target_storage") or "local", "path": entry.get("expected")}, *(entry.get("old_items") or [])]
+            for item in affected:
+                if any(str(root.get("storage") or "local") == str(item.get("storage") or "local") and under(item.get("path"), root.get("path")) for root in roots):
+                    raise ValueError("计划触及下载保护范围，不能写入或清理")
 
     def _repair_live_state(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         state: list[dict[str, Any]] = []
+        deadline = time.monotonic() + 60
+        items_cache = {}
+        def read(label, fn, *args):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("文件回读超过总预算 60 秒，请重新预览")
+            return self._readonly_call(None, label, fn, *args, timeout=min(MOVIEPILOT_TIMEOUT_SECONDS, remaining))
+        def get_item(label, storage, path):
+            key = (storage, normal_path(path))
+            if key not in items_cache:
+                items_cache[key] = read(label, self.adapter.get_item, storage, path)
+            return items_cache[key]
+        def stamp(item):
+            if not item:
+                return "missing"
+            observed = fingerprint([item])
+            physical_key = getattr(self.adapter, "physical_key", None)
+            physical = read("本地对象回读", physical_key, item) if callable(physical_key) else None
+            return stable_id(observed, physical) if physical else observed
         for entry in entries:
             source = entry["source"]
-            source_item = self.adapter.get_item(str(source.get("storage") or "local"), str(source.get("path") or ""))
+            source_item = get_item("源文件回读", str(source.get("storage") or "local"), str(source.get("path") or ""))
             current_item = None
             if entry.get("current") and entry.get("current_item"):
                 storage = str((entry.get("current_item") or {}).get("storage") or "local")
-                current_item = self.adapter.get_item(storage, str(entry["current"]))
-            target_item = self.adapter.get_item(str(entry.get("target_storage") or "local"), str(entry.get("expected") or ""))
+                current_item = get_item("旧目标回读", storage, str(entry["current"]))
+            target_item = get_item("新目标回读", str(entry.get("target_storage") or "local"), str(entry.get("expected") or ""))
             relationship = getattr(self.adapter, "relationship", None)
             def relation(item, storage, path):
                 if not item or not source_item:
                     return "missing"
                 if not callable(relationship):
                     return "unsupported"
-                result = relationship({**source, **source_item}, {"storage": storage, "path": path, **item})
+                result = read("修复关系回读", relationship, {**source, **source_item}, {"storage": storage, "path": path, **item})
                 return result.get("status", "unproven") if isinstance(result, dict) else "unproven"
+            old_states = []
+            for old in entry.get("old_items", [entry["current_item"]] if entry.get("current_item") else []):
+                old_item = get_item("旧入口回读", str(old.get("storage") or "local"), str(old.get("path") or ""))
+                old_states.append({"item": old, "fingerprint": stamp(old_item), "relation": relation(old_item, old.get("storage") or "local", old.get("path") or "")})
             state.append({
-                "source": fingerprint([source_item]) if source_item else "missing",
-                "current": fingerprint([current_item]) if current_item else "missing",
-                "expected": fingerprint([target_item]) if target_item else "missing",
+                "source": stamp(source_item),
+                "current": stamp(current_item),
+                "expected": stamp(target_item),
                 "current_relation": relation(current_item, str((entry.get("current_item") or {}).get("storage") or "local"), str(entry.get("current") or "")),
                 "expected_relation": relation(target_item, str(entry.get("target_storage") or "local"), str(entry.get("expected") or "")),
+                "old": old_states,
             })
         return state
 
@@ -1804,9 +2247,15 @@ class GovernorService:
             with self._lock:
                 if self._thread and self._thread.is_alive():
                     raise ValueError("检查仍在运行，请先停止检查再确认修复")
-                return self._repair_execute_locked(object_id, token, cleanup_approved)
+                if self._read_inflight:
+                    raise ValueError("仍有超时或停止后的只读调用未退出，请等待后再修复")
+                if any(thread.is_alive() for thread in self._preview_threads.values()):
+                    raise ValueError("后台只读预览尚未结束，请等待后再修复")
+                result = self._repair_execute_locked(object_id, token, cleanup_approved)
         finally:
             self._repair_lock.release()
+        self.start("incremental", [object_id])
+        return result
 
     def _repair_execute_locked(self, object_id: str, token: str, cleanup_approved: bool) -> dict[str, Any]:
         if self.read_only:
@@ -1820,6 +2269,7 @@ class GovernorService:
             raise ValueError("作品身份确认已经变化，请重新确认并生成修复预览")
         if plan.get("object_fingerprint") != detail["fingerprint"]:
             raise ValueError("原文件已经变化，请重新检查")
+        self._validate_download_protection(plan.get("entries") or [])
         # 第二次调用官方预览，并重新读取源、旧目标和新目标；任何变化都使确认失效。
         obj = (detail.get("source") or {}).get("object") or {}
         if not obj.get("complete") or obj.get("fingerprint") != detail["fingerprint"]:
@@ -1840,9 +2290,34 @@ class GovernorService:
             self.ledger.save_observation(object_id, "repair_result", False, token, progress)
         try:
             for entry in plan.get("entries") or []:
-                self.adapter.rebuild(entry, plan["identity"])
+                if entry.get("action") != "keep":
+                    single_source = {**entry["source"], "_governor_exact_file": True}
+                    single = self._official_preview({"entries": [entry["source"]], "preview_sources": [single_source]}, plan["identity"])
+                    single_items = self._preview_items(single)
+                    if not preview_cache_usable({**single, "_basis": "single"}, "single") or len(single_items) != 1 or (normal_path(single_items[0].get("target")), str(single_items[0].get("target_storage") or "local")) != (normal_path(entry["expected"]), entry.get("target_storage") or "local"):
+                        raise RuntimeError("官方单文件预览与确认计划不一致，未执行这一个文件")
+                    self.adapter.rebuild({**entry, "current_item": None, "cleanup_attributable": False}, plan["identity"])
                 progress["completed_sources"].append(stable_id(entry["source"].get("storage") or "local", entry["source"].get("path")))
                 self.ledger.save_observation(object_id, "repair_result", False, token, progress)
+            ready = self._repair_live_state(plan.get("entries") or [])
+            if any(state["expected_relation"] != "verified" or state["source"] != old["source"] for state, old in zip(ready, plan["live"])):
+                raise RuntimeError("新入口尚未全部证实，禁止清理任何旧入口")
+            progress["cleaned_entries"] = []
+            for entry in plan.get("entries") or []:
+                for old in entry.get("old_items") or []:
+                    # 每次删除前再核验；native delete_file 不治理父目录，不碰下载原件。
+                    live_entry = self._repair_live_state([entry])[0]
+                    old_state = next(value for value in live_entry["old"] if value["item"] == old)
+                    if old_state["fingerprint"] == "missing":
+                        continue
+                    if live_entry["expected_relation"] != "verified" or old_state["relation"] != "verified":
+                        raise RuntimeError("清理前文件关系变化，保留旧入口")
+                    cleanup = getattr(self.adapter, "cleanup_entry", None)
+                    if not callable(cleanup):
+                        raise RuntimeError("宿主没有单文件清理能力，保留旧入口")
+                    cleanup(old)
+                    progress["cleaned_entries"].append(stable_id(old.get("storage"), old.get("path")))
+                    self.ledger.save_observation(object_id, "repair_result", False, token, progress)
         except Exception:
             progress.update(status="partial_or_failed", failed=True)
             self.ledger.save_observation(object_id, "repair_result", False, token, progress)
@@ -1861,7 +2336,7 @@ class GovernorService:
                 verification_errors.append("MoviePilot 返回成功，但修复后的硬链接不存在；问题仍会保留")
             if state["expected_relation"] != "verified":
                 verification_errors.append("新目标存在，但未证实与源文件同对象；问题仍会保留")
-            if entry.get("cleanup_attributable") and normal_path(entry.get("current")) != normal_path(entry.get("expected")) and state["current"] != "missing":
+            if entry.get("cleanup_attributable") and any(old["fingerprint"] != "missing" for old in state["old"]):
                 verification_errors.append("新硬链接已建立，但可归因的旧硬链接仍存在；问题仍会保留")
         if verification_errors:
             progress.update(status="verification_failed", failed=True, errors=verification_errors)
@@ -1871,5 +2346,6 @@ class GovernorService:
         progress.update(status="verified", failed=False)
         self.ledger.save_observation(object_id, "repair_result", True, token, progress)
         self.ledger.execute("UPDATE objects SET dirty=1 WHERE id=?", (object_id,))
-        self.start("incremental", [object_id])
+        # 当前持有修复互斥；由下一次明确检查消费持久局部队列。
+        self._queue_recheck([object_id])
         return {"accepted": True, "message": "MoviePilot 已完成重建，正在只复核这一部作品"}

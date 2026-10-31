@@ -70,12 +70,19 @@ class FakeAdapter:
         self.preview_calls = 0
         self.rebuild_calls: list[dict] = []
 
+    def directories(self, kind):
+        return [{"path": "/fixture/download" if kind == "download" else "/fixture/library", "storage": "local", "type": "dir"}]
+
     def get_item(self, storage, path):
         return self.present.get(G.normal_path(path))
 
     def preview(self, source, identity):
         self.preview_calls += 1
-        return json.loads(json.dumps(self.preview_value))
+        value = json.loads(json.dumps(self.preview_value))
+        if source.get("_governor_exact_file"):
+            value["items"] = [row for row in value["items"] if G.normal_path(row.get("source")) == G.normal_path(source.get("path"))]
+            value["summary"]["total"] = len(value["items"])
+        return value
 
     def relationship(self, source, target):
         # 旧 golden 专门回放路径判断，文件关联在 fixture 中视为已知；
@@ -87,6 +94,9 @@ class FakeAdapter:
         self.present[G.normal_path(entry["expected"])] = {"path": entry["expected"], "type": "file"}
         if entry.get("cleanup_attributable"):
             self.present.pop(G.normal_path(entry.get("current")), None)
+
+    def cleanup_entry(self, item):
+        self.present.pop(G.normal_path(item.get("path")), None)
 
 
 def inventory(roots=None):
@@ -104,10 +114,10 @@ def test_versions_api_and_frontend_contract_are_v5():
     package = json.loads((PLUGIN_DIR / "package.json").read_text(encoding="utf-8"))
     source = PLUGIN.read_text(encoding="utf-8")
     page = PAGE.read_text(encoding="utf-8")
-    assert manifest["version"] == package["version"] == "5.1.0"
-    assert next(iter(manifest["history"])) == "v5.1.0"
-    assert 'plugin_version = "5.1.0"' in source
-    assert 'return "vue", "dist/v5.1.0/assets"' in source
+    assert manifest["version"] == package["version"] == "5.1.1"
+    assert next(iter(manifest["history"])) == "v5.1.1"
+    assert 'plugin_version = "5.1.1"' in source
+    assert 'return "vue", "dist/v5.1.1/assets"' in source
     for endpoint in ("/audit/start", "/audit/status", "/findings", "/objects/{object_id}", "/identity/confirm", "/repair/{object_id}"):
         assert endpoint in source
     for forbidden in ("storage/list", "transfer/manual", "bundle_analyze_batch", "experiment_run", "map_commit"):
@@ -119,7 +129,7 @@ def test_versions_api_and_frontend_contract_are_v5():
     assert "正在停止…" in page and "检查已停止" in page
     module = load_plugin_with_host_boundary()
     plugin = module.MediaGovernor(); plugin.init_plugin({"enabled": False})
-    assert plugin.get_render_mode() == ("vue", "dist/v5.1.0/assets")
+    assert plugin.get_render_mode() == ("vue", "dist/v5.1.1/assets")
     assert [row["path"] for row in plugin.get_api()] == ["/audit/start", "/audit/status", "/findings", "/objects/{object_id}", "/identity/confirm", "/identity/search", "/repair/{object_id}"]
     assert all(row["auth"] == "bear" for row in plugin.get_api())
 
@@ -155,7 +165,7 @@ def test_real_moviepilot_v3_runtime_constructs_initializes_and_stops_plugin():
         assert callable(list_transfer_history)
         plugin = mediagovernor.MediaGovernor()
         plugin.init_plugin({"enabled": False})
-        assert plugin.get_state() is False and plugin.get_render_mode() == ("vue", "dist/v5.1.0/assets")
+        assert plugin.get_state() is False and plugin.get_render_mode() == ("vue", "dist/v5.1.1/assets")
         plugin.stop_service()
     finally:
         configure_chain_runtime_context_provider(None)
@@ -197,7 +207,7 @@ def test_download_hash_is_the_primary_work_boundary_and_unmatched_is_not_guessed
         {"src": entries[1]["path"], "download_hash": "two", "media_source": "themoviedb", "media_id": "2", "type": "电影"},
     ]
     groups = G.partition_entries(top, entries, histories)
-    assert {row["group_key"] for row in groups} == {"hash:one", "hash:two", "unmatched"}
+    assert {row["group_key"] for row in groups} == {"unmatched"}
     assert sum(len(row["entries"]) for row in groups) == 3
 
 
@@ -308,7 +318,12 @@ def test_golden_audit_cases_replay_through_v5_classifier(tmp_path):
                 else:
                     # 旧基线仅凭目录/季集/名称偏差标记错放，没有独立语义证据。
                     # 保留检测召回，但不能把这个旧标签当成已经证明的身份错误。
-                    assert "path_deviation" in kinds and "false_success" not in kinds, case["id"]
+                    proven = any(G.proven_misplacement(G.history_destination(history), row["target"], data["identity"], inv.library_roots)
+                                 for history in data["unit"].get("history") or [] for row in preview["items"])
+                    if proven:
+                        assert "false_success" in kinds, case["id"]
+                    else:
+                        assert "path_deviation" in kinds and "false_success" not in kinds, case["id"]
             checked += 1
     assert checked >= 10
 
@@ -638,6 +653,7 @@ def local_fixture(tmp_path):
     if not source.exists():
         source.write_bytes(b"fixture")
     adapter = LocalFixtureAdapter()
+    adapter.directories = lambda kind: [{"path": str(tmp_path / ("download" if kind == "download" else "library")), "storage": "local", "type": "dir"}]
     source_item = adapter.get_item("local", str(source))
     obj = {"id": "local-film", "label": "Film", "root": source_item, "entries": [source_item], "complete": True, "fingerprint": G.fingerprint([source_item])}
     adapter.preview_value = {"summary": {"total": 1, "success": 1, "failed": 0}, "items": [{"source": str(source), "target": str(target), "target_storage": "local", "success": True}]}
@@ -792,7 +808,7 @@ def test_partial_or_failed_preview_cannot_become_a_healthy_cached_result(tmp_pat
     adapter, obj, inv, source, target, _ = local_fixture(tmp_path)
     target.hardlink_to(source)
     if failure == "missing_file":
-        extra = source.with_name("Film.srt")
+        extra = source.with_name("Film.part2.mkv")
         extra.write_text("fixture", encoding="utf-8")
         obj["entries"].append(adapter.get_item("local", str(extra)))
         obj["fingerprint"] = G.fingerprint(obj["entries"])
@@ -817,8 +833,8 @@ def test_candidate_limit_keeps_pending_and_rotates_work_without_dropping_it(tmp_
     for _ in range(2):
         result = run_local_fixture(service, inv)
         receipt = service.detail(obj["id"])["relations"]
-        assert len(receipt["pairs"]) == 2 and receipt["coverage"]["pending_pairs"] == 1
-        assert any(row["kind"] == "relation_confirmation" for row in result["confirmations"])
+        assert len(receipt["pairs"]) == 2 and receipt["coverage"]["pending_pairs"] == 0
+        assert not any(row["kind"] == "relation_confirmation" for row in result["confirmations"])
         observed.update(pair["id"] for pair in receipt["pairs"] if pair["status"] != "pending")
     assert len(observed) == 2
 

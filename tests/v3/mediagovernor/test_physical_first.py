@@ -138,7 +138,9 @@ def test_database_failure_is_not_empty_result_or_ai_trigger(tmp_path):
     object_id = service.ledger.one("SELECT id FROM objects")["id"]
     detail = service.detail(object_id)
     assert detail["provenance"] == "search_error" and adapter.ai_calls == 0
-    assert detail["identity_diagnostics"]["attempts"][-1] == {"stage": "database", "status": "error", "error_type": "ConnectionError"}
+    attempt = detail["identity_diagnostics"]["attempts"][-1]
+    assert attempt.pop("at")
+    assert attempt == {"stage": "database", "status": "error", "error_type": "ConnectionError"}
     assert "private upstream" not in json.dumps(detail["identity_diagnostics"])
     saved = service.ledger.one("SELECT * FROM identities WHERE object_id=?", (object_id,))
     obj = json.loads(service.ledger.one("SELECT source_json FROM objects WHERE id=?", (object_id,))["source_json"])
