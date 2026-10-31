@@ -27,7 +27,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "逐作品核对当前文件与 MoviePilot 应有结果，找出整理失败和假成功。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "5.1.0"
+    plugin_version = "5.1.1"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -61,7 +61,7 @@ class MediaGovernor(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> tuple[str, str]:
-        return "vue", "dist/v5.1.0/assets"
+        return "vue", "dist/v5.1.1/assets"
 
     def get_sidebar_nav(self) -> list[dict[str, Any]]:
         return []
@@ -118,7 +118,7 @@ class MediaGovernor(_PluginBase):
             refs = body.get("file_refs")
             if refs is not None and (not isinstance(refs, list) or not all(isinstance(value, str) for value in refs)):
                 raise ValueError("文件选择格式错误")
-            result = await asyncio.to_thread(self._service.confirm_identity, str(body.get("object_id") or ""), str(body.get("candidate_key") or ""), refs)
+            result = await asyncio.to_thread(self._service.confirm_identity, str(body.get("object_id") or ""), str(body.get("candidate_key") or ""), refs, body.get("mapping"))
             return GovernorResponse(success=True, data=result)
         except Exception as error:  # noqa: BLE001 - API 边界必须把宿主异常转成可读响应
             return GovernorResponse(success=False, message=str(error))
@@ -140,7 +140,9 @@ class MediaGovernor(_PluginBase):
             body = await request.json() or {}
             action = str(body.get("action") or "preview")
             if action == "preview":
-                data = await asyncio.to_thread(self._service.repair_preview, object_id)
+                data = self._service.request_repair_preview(object_id)
+            elif action == "preview_status":
+                data = self._service.repair_preview_status(object_id)
             elif action == "execute":
                 if self._service.read_only:
                     raise ValueError("当前为只读模式，只能检查和预览，不能执行媒体修复")

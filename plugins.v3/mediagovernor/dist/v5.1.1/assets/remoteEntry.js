@@ -2,14 +2,14 @@ const currentImports = {};
       const exportSet = new Set(['Module', '__esModule', 'default', '_export_sfc']);
       let moduleMap = {
 "./Page":()=>{
-      dynamicLoadingCss(["__federation_expose_AppPage-BRb6iBUP.css"], false, './Page');
-      return __federation_import('./__federation_expose_Page-DM5DfPT2.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      dynamicLoadingCss(["__federation_expose_AppPage-DSYHUSdq.css"], false, './Page');
+      return __federation_import('./__federation_expose_Page-DCJFeBoc.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Config":()=>{
       dynamicLoadingCss(["__federation_expose_Config-Doejpufx.css"], false, './Config');
-      return __federation_import('./__federation_expose_Config-EbQvocuA.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      return __federation_import('./__federation_expose_Config-B3ZxI-S4.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./AppPage":()=>{
-      dynamicLoadingCss(["__federation_expose_AppPage-BRb6iBUP.css"], false, './AppPage');
-      return __federation_import('./__federation_expose_AppPage-BGT4rac5.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
+      dynamicLoadingCss(["__federation_expose_AppPage-DSYHUSdq.css"], false, './AppPage');
+      return __federation_import('./__federation_expose_AppPage-CyvbUTyl.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
       const seen = {};
       const dynamicLoadingCss = (cssFilePaths, dontAppendStylesToHead, exposeItemName) => {
         const metaUrl = import.meta.url;
@@ -20,7 +20,7 @@ const currentImports = {};
 
         const curUrl = metaUrl.substring(0, metaUrl.lastIndexOf('remoteEntry.js'));
         const base = '/';
-        'v5.1.0/assets';
+        'v5.1.1/assets';
 
         cssFilePaths.forEach(cssPath => {
          let href = '';
