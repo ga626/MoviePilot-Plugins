@@ -32,9 +32,11 @@ const needsCleanupApproval = computed(() => repairPlan.value?.entries?.some(row 
 const stopping = computed(() => running.value && Boolean(job.value.cancel_requested))
 const progress = computed(() => job.value.total ? Math.round((job.value.done || 0) * 100 / job.value.total) : 0)
 const pendingObjects = computed(() => snapshot.value.status?.pending_objects || 0)
-const hasResults = computed(() => snapshot.value.problems.length + snapshot.value.confirmations.length + snapshot.value.errors.length > 0)
+const hasResults = computed(() => snapshot.value.problems.length + snapshot.value.confirmations.length + snapshot.value.errors.length + (snapshot.value.normal?.length || 0) > 0)
+const identityReady = computed(() => ['confirmed', 'verified'].includes(selected.value?.identity_state))
 const provenanceLabel = computed(() => ({
   user_confirmed: '已由你确认',
+  rule_database_verified: selected.value?.identity_state === 'verified' ? '源文件规则与数据库核验通过（非人工确认）' : '旧的自动核验已失效，需要重新检查',
   native_and_history_agree: '原生识别与历史一致，等待你确认',
   needs_user_confirmation: '候选尚未确认',
   search_error: '数据库查询失败，不是没有匹配作品',
@@ -131,6 +133,13 @@ function candidateKey (candidate) {
   return `${source}:${candidate?.media_id || ''}:${candidate?.media_type || 'unknown'}`
 }
 
+function editIdentity () {
+  choosingIdentity.value = true
+  repairPlan.value = null
+  confirmingRepair.value = false
+  cleanupApproved.value = false
+}
+
 async function confirmIdentity (candidate) {
   if (!selected.value) return
   busy.value = true
@@ -150,6 +159,10 @@ async function confirmIdentity (candidate) {
 
 async function searchCandidates () {
   if (!selected.value) return
+  if (previewing.value) {
+    message.value = '请等待当前只读预览结束后再改选作品。'
+    return
+  }
   const revision = detailRevision
   const objectId = selected.value.id
   busy.value = true
@@ -244,7 +257,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
   <main class="governor-shell">
     <section class="hero">
       <div>
-        <p class="eyebrow">MediaGovernor 5.1.1</p>
+        <p class="eyebrow">MediaGovernor 5.1.2 · 只读识别候选</p>
         <p v-if="readOnly" class="notice">只读模式：可以检查、确认身份和查看预览，不会执行媒体修复。</p>
         <h1>检查现在，找到真实问题</h1>
         <p class="lead">逐作品比较原文件、当前硬链接和 MoviePilot 应有结果。已经完成的结果会立即保存，关掉页面也不会中断。</p>
@@ -281,7 +294,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
 
     <section class="summary-grid">
       <article><strong>{{ snapshot.problems.length }}</strong><span>已经证明的问题</span></article>
-      <article><strong>{{ snapshot.confirmations.length }}</strong><span>需要你确认</span></article>
+      <article><strong>{{ snapshot.confirmations.length }}</strong><span>尚未确定，需要补充证据</span></article>
       <article><strong>{{ snapshot.errors.length }}</strong><span>读取或预览错误（另有 {{ pendingObjects }} 个未处理）</span></article>
       <article><strong>{{ snapshot.status.objects || 0 }}</strong><span>当前作品</span></article>
     </section>
@@ -294,8 +307,15 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
       <p v-if="!snapshot.problems.length" class="empty">{{ running ? '已完成的作品还没有形成问题。' : hasResults ? '当前没有已经证明的问题。' : '点击“检查现在”开始。' }}</p>
     </section>
 
+    <section v-if="snapshot.normal?.length" class="panel">
+      <header><div><p class="eyebrow">本轮已核对</p><h2>未发现问题的作品</h2></div><span>{{ snapshot.normal.length }} 个</span></header>
+      <button v-for="item in snapshot.normal" :key="item.object_id" class="result-row" @click="openItem(item)">
+        <span><b>{{ item.title }}</b><small>{{ item.reason }}</small></span><i>查看核对依据 →</i>
+      </button>
+    </section>
+
     <section class="panel review-panel">
-      <header><div><p class="eyebrow">需要你确认</p><h2>身份歧义或手工改动</h2></div><span>{{ snapshot.confirmations.length }} 项</span></header>
+      <header><div><p class="eyebrow">尚未确定</p><h2>身份歧义或待补充证据</h2></div><span>{{ snapshot.confirmations.length }} 项</span></header>
       <button v-for="item in snapshot.confirmations" :key="item.id" class="result-row" @click="openItem(item)">
         <span><b>{{ item.title }}</b><small>{{ item.reason }}</small><small>{{ item.current_job ? '本轮结果' : '保留的上轮结果，尚未本轮复核' }} · {{ item.checked_at || '时间未知' }}</small></span><i>选择正确答案 →</i>
       </button>
@@ -321,22 +341,23 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
 
         <div class="facts">
           <div><span>文件读取</span><b>{{ selected.source?.object?.complete ? '完整' : '未完整' }}</b></div>
-          <div><span>作品身份</span><b>{{ selected.identity_state === 'confirmed' ? '已确认' : '等待确认' }}</b></div>
+          <div><span>作品身份</span><b>{{ selected.identity_state === 'confirmed' ? '你已确认' : selected.identity_state === 'verified' ? '自动核验通过' : '尚未确定' }}</b></div>
           <div><span>确认依据</span><b>{{ provenanceLabel }}</b></div>
         </div>
 
         <p v-if="selected.relations?.stale" class="warning">关系记录需要重新核验，本轮尚不能据此确认文件关联。</p>
+        <p v-if="selected.identity_state === 'verified'" class="notice">数据库核验时间：{{ selected.identity_audit?.checked_at || '未知' }}。缓存绑定当前源指纹与核验策略，最长复用 24 小时；文件变化或核验失效后会重新检查。</p>
         <p v-if="selected.relations?.coverage" class="notice">候选已记录 {{ selected.relations.pairs?.length || 0 }} 对，本轮已查 {{ selected.relations.coverage.checked_pairs || 0 }} 对，待查 {{ selected.relations.coverage.pending_pairs || 0 }} 对。{{ selected.relations.coverage.note }}</p>
-        <p v-if="selected.relations?.coverage" class="notice">源视频 {{ selected.relations.coverage.source_video_count || 0 }} 个，已证实关联 {{ selected.relations.coverage.linked_source_count || 0 }} 个，未关联或未证实 {{ selected.relations.coverage.unlinked_or_unproven_sources || 0 }} 个；候选对数不是已覆盖视频数。</p>
+        <p v-if="selected.relations?.coverage" class="notice">源视频 {{ selected.relations.coverage.source_video_count ?? '未知' }} 个，已证实关联 {{ selected.relations.coverage.linked_source_count ?? '未知' }} 个，未关联或未证实 {{ selected.relations.coverage.unlinked_or_unproven_sources ?? '未知' }} 个；候选对数不是已覆盖视频数。</p>
         <form class="choice-area" @submit.prevent="searchCandidates">
           <label for="identity-query">搜索正确作品（不使用 AI）</label>
           <input id="identity-query" v-model="identityQuery" type="search" maxlength="120" required />
-          <button class="secondary" :disabled="busy">查询数据库候选</button>
+          <button class="secondary" :disabled="busy || previewing">查询数据库候选</button>
         </form>
 
-        <section v-if="selected.identity_state !== 'confirmed' || choosingIdentity" class="choice-area">
+        <section v-if="!identityReady || choosingIdentity" class="choice-area">
           <h3>请选择正确作品</h3>
-          <p class="notice">原生识别和旧历史只提供候选。请确认一次正确作品，未变化时会保存并复用你的选择；候选都不正确时，保留待确认。</p>
+          <p class="notice">证据明确的作品会自动核验，不要求逐部点击。这里保留尚未解决的歧义；你也可补充搜索词或纠正候选。原生识别、历史与 AI 都不能直接决定身份。</p>
           <p v-if="!selected.source?.object?.complete" class="warning">源文件尚未读取完整，请重新检查后再确认身份。</p>
           <p v-if="!selected.candidates.length" class="warning">尚无可用候选。可以在上方搜索作品；本项不会被算成正常。</p>
           <details>
@@ -365,6 +386,8 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
         <section v-else class="choice-area">
           <h3>{{ selected.identity.title || selected.identity.original_title }}</h3>
           <p>{{ selected.identity.year || '年份未知' }} · {{ selected.identity.media_type }} · {{ selected.identity.media_source }}/{{ selected.identity.media_id }}</p>
+          <p v-if="selected.identity_state === 'verified'" class="notice">自动核验只表示源文件命名证据与数据库相符，不代表视频内容鉴定或整剧下载完整。可据此进行只读对账，是否完成以该项结果为准；自动核验不授予媒体修复许可。</p>
+          <button class="secondary" :disabled="busy || previewing" @click="editIdentity">身份或季集不对？纠正它</button>
           <button class="primary" :disabled="busy || previewing || !selected.source?.object?.complete" @click="previewRepair">{{ previewing ? '正在后台生成只读预览…' : '重新读取并生成修复预览' }}</button>
         </section>
 
@@ -379,7 +402,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
           <label v-if="repairPlan.entries.some(row => row.cleanup_attributable)"><input v-model="cleanupApproved" type="checkbox" /> 我另外同意清理预览中列出的旧入口</label>
           <p v-if="readOnly" class="notice">这是只读预览，不会执行。完成只读验收并获单项许可后，才在设置中关闭只读模式。</p>
           <button v-else-if="!confirmingRepair" class="danger" :disabled="busy || needsCleanupApproval" @click="confirmingRepair = true">继续到最终确认</button>
-          <div v-else class="final-confirm"><b>确认执行这一个作品？</b><button class="secondary" @click="confirmingRepair = false">返回</button><button class="danger" :disabled="busy || readOnly || needsCleanupApproval" @click="executeRepair">确认修复</button></div>
+          <div v-else class="final-confirm"><b>确认按 {{ selected.identity.title }}（{{ selected.identity.year }} · {{ selected.identity.media_type }} · {{ selected.identity.media_source }}/{{ selected.identity.media_id }}）执行此计划？</b><button class="secondary" @click="confirmingRepair = false">返回</button><button class="danger" :disabled="busy || readOnly || needsCleanupApproval" @click="executeRepair">确认修复</button></div>
         </section>
       </section>
     </div>

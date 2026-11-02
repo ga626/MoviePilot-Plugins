@@ -36,6 +36,20 @@ MAX_TREE_NODES = 100000
 MAX_AI_BATCHES_PER_JOB = 8
 PREVIEW_REVISION = "file-reconciliation-v2"
 CANDIDATE_RETRY_SECONDS = 3600
+IDENTITY_AUDIT_REVISION = "source-database-v1"
+IDENTITY_AUDIT_SECONDS = 86400
+AUDIT_REASONS = {
+    "source_incomplete": "源文件范围未读完整，不能自动核验身份",
+    "source_ambiguous": "源文件有多组标题、未解析项或推断集号，需要补充作品线索",
+    "source_year_missing": "源文件与同名容器都没有明确年份，尚不能排除同名作品",
+    "source_structure_ambiguous": "源文件的电影或季集结构不明确，不能自动选择类型",
+    "database_unavailable": "当前宿主没有可用的数据库详情接口，身份仍为候选",
+    "database_error": "数据库核验失败，不代表没有匹配作品；可稍后重新检查",
+    "database_page_full": "数据库搜索页已满，尚不能证明同名候选唯一",
+    "database_no_exact_match": "数据库候选与源标题、类型或年份不完全一致，需要补充线索",
+    "database_ambiguous": "数据库中有多个同名同类型候选，未自动选择第一项",
+    "database_detail_conflict": "数据库详情与源文件标题、类型、年份或候选 ID 不一致",
+}
 SAMPLE_PATTERN = re.compile(r"(^|[\\/ ._-])(sample|samples|trailer|extras?)([\\/ ._-]|$)", re.IGNORECASE)
 SEASON_PATTERN = re.compile(r"(?:^|[ ._-])S(\d{1,2})(?:E\d{1,4})?", re.IGNORECASE)
 EPISODE_PATTERN = re.compile(r"S(\d{1,2})E(\d{1,4})", re.IGNORECASE)
@@ -250,6 +264,58 @@ def public_identity(identity: dict[str, Any]) -> dict[str, Any]:
 
 def user_confirmed(identity: dict[str, Any] | None) -> bool:
     return bool(identity and identity.get("state") == "confirmed" and identity.get("provenance") == "user_confirmed")
+
+
+def title_key(value: Any) -> str:
+    return re.sub(r"[\W_]+", "", str(value or "").casefold(), flags=re.UNICODE)
+
+
+def source_identity_evidence(obj: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """仅提炼当前源证据；不把历史、目标名或推断的裸集号作为身份证明。"""
+    if not obj.get("complete"):
+        return {}, "source_incomplete"
+    digest = evidence_digest(obj)
+    if (not digest["file_count"] or digest["title_family_count"] != 1 or digest["parse_unresolved"]
+            or digest["overflow"] or digest["episode_mapping_review"]):
+        return {}, "source_ambiguous"
+    files = [row for row in obj.get("entries") or [] if is_media_file(row) and not is_sample(row)]
+    parsed = [parsed_name(item_name(row)) for row in files]
+    hint = digest["title_hints"][0]["hint"]
+    episodes = [row.get("episode") is not None for row in parsed]
+    if all(episodes):
+        mtype = "tv"
+    elif not any(episodes) and len(files) == 1 and all(row.get("season") is None for row in parsed):
+        mtype = "movie"
+    else:
+        return {}, "source_structure_ambiguous"
+    years = set(digest["years"])
+    root = parsed_name(item_name(obj.get("root") or {}))
+    if root.get("parsed") and title_key(root.get("hint")) == title_key(hint) and root.get("year"):
+        years.add(str(root["year"]))
+    if not years:
+        return {}, "source_year_missing"
+    if len(years) != 1:
+        return {}, "source_ambiguous"
+    return {"title": hint, "year": next(iter(years)), "media_type": mtype,
+            "seasons": sorted({int(row.get("season") if row.get("season") is not None else 1) for row in parsed}) if mtype == "tv" else []}, ""
+
+
+def source_matches_database(evidence: dict[str, Any], identity: dict[str, Any], details: dict[str, Any] | None = None) -> bool:
+    """精确匹配不是视频内容鉴定；多义/不完整数据不会被宽松相似度放行。"""
+    if media_type_key(identity.get("media_type")) != evidence["media_type"]:
+        return False
+    titles = [identity.get("title"), identity.get("original_title")]
+    if title_key(evidence["title"]) not in {title_key(value) for value in titles if value}:
+        return False
+    if evidence["media_type"] == "movie":
+        return str(identity.get("year") or "") == evidence["year"]
+    if details is None:
+        # 首季可以保守按首播年预筛；后续季度不能误用首播年。
+        return evidence["seasons"] != [1] or str(identity.get("year") or "") == evidence["year"]
+    season_years = details.get("season_years")
+    if not isinstance(season_years, dict):
+        return False
+    return all(str(season_years.get(str(season), season_years.get(season)) or "") == evidence["year"] for season in evidence["seasons"])
 
 
 def latest_histories(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -1371,11 +1437,25 @@ class GovernorService:
         if not saved:
             return False
         matches = saved["fingerprint"] == obj["fingerprint"]
+        if saved["state"] == "verified":
+            audit = self._identity_audit(obj["id"])
+            try:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(audit["checked_at"])).total_seconds()
+                return bool(matches and obj.get("complete") and saved.get("provenance") == "rule_database_verified"
+                            and audit.get("policy") == IDENTITY_AUDIT_REVISION and audit.get("source_fp") == obj["fingerprint"]
+                            and audit.get("status") == "verified" and audit.get("identity_key") == identity_key(json.loads(saved["identity_json"]))
+                            and 0 <= age < IDENTITY_AUDIT_SECONDS)
+            except (KeyError, ValueError, TypeError):
+                return False
         if not matches and saved["state"] == "confirmed":
             source = self.ledger.one("SELECT payload_json FROM observations WHERE object_id=? AND kind='source'", (saved["object_id"],))
             old = json.loads(source["payload_json"]).get("object") if source else None
             matches = bool(old and old.get("complete") and obj.get("complete") and identity_basis(old) == identity_basis(obj))
         if saved["state"] == "candidate":
+            audit = self._identity_audit(obj["id"])
+            if callable(getattr(self.adapter, "media_info", None)) and (
+                    audit.get("policy") != IDENTITY_AUDIT_REVISION or audit.get("source_fp") != obj["fingerprint"] or audit.get("status") == "error"):
+                return False
             if saved.get("provenance") in {"ai_budget_deferred", "ai_error", "search_error", "native_error"}:
                 return False
             try:
@@ -1384,6 +1464,50 @@ class GovernorService:
             except (ValueError, TypeError):
                 return False
         return matches
+
+    def _identity_audit(self, object_id: str) -> dict[str, Any]:
+        row = self.ledger.one("SELECT payload_json FROM observations WHERE object_id=? AND kind='identity_audit'", (object_id,))
+        return json.loads(row["payload_json"]) if row else {}
+
+    def _verify_source_identity(self, obj: dict[str, Any], job_id: str | None) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
+        """一次源标题搜索 + 一次详情回读；独立于历史/原生/AI 投票。"""
+        evidence, reason = source_identity_evidence(obj)
+        candidates: list[dict[str, Any]] = []
+        identity: dict[str, Any] = {}
+        status = "pending"
+        if not reason and not callable(getattr(self.adapter, "media_info", None)):
+            reason = "database_unavailable"
+        if not reason:
+            try:
+                rows = self._readonly_call(job_id, "源身份数据库搜索", self.adapter.search, evidence["title"], timeout=SEARCH_TIMEOUT_SECONDS)
+                candidates = [public_identity(row) for row in rows or [] if identity_key(row)]
+                matches = {identity_key(row): row for row in candidates if source_matches_database(evidence, row)}
+                if len(candidates) >= 8:
+                    reason = "database_page_full"
+                elif len(matches) != 1:
+                    reason = "database_ambiguous" if len(matches) > 1 else "database_no_exact_match"
+                else:
+                    candidate = next(iter(matches.values()))
+                    data = model_dict(self._readonly_call(job_id, "源身份数据库详情", self.adapter.media_info, candidate, timeout=SEARCH_TIMEOUT_SECONDS))
+                    resolved = identity_from_media(data)
+                    if identity_key(resolved) != identity_key(candidate) or not source_matches_database(evidence, resolved, data):
+                        reason = "database_detail_conflict"
+                    else:
+                        identity = public_identity(resolved)
+                        status = "verified"
+                self._identity_attempt(obj, "source_database", status)
+            except AuditCancelled:
+                raise
+            except Exception as error:  # noqa: BLE001 - 数据源失败不是无匹配，更不是作品错误
+                reason, status = "database_error", "error"
+                self._identity_attempt(obj, "source_database", "error", error)
+        self.ledger.save_observation(obj["id"], "identity_audit", status == "verified", obj["fingerprint"], {
+            "policy": IDENTITY_AUDIT_REVISION, "source_fp": obj["fingerprint"], "status": status,
+            "reason": reason, "checked_at": utcnow(), "identity_key": identity_key(identity),
+            "evidence": evidence, "candidate_count": len(candidates),
+            "scope": "source_naming_database_match_not_content_or_download_completeness",
+        })
+        return identity, candidates, reason
 
     def _identity_attempt(self, obj: dict[str, Any], stage: str, status: str, error: BaseException | None = None, reset: bool = False) -> None:
         """只记录阶段/类型，不保存查询词、路径或供应商异常正文。"""
@@ -1400,8 +1524,13 @@ class GovernorService:
         reusable = self._identity_cache_usable(saved, obj)
         if reusable and user_confirmed(saved):
             return "confirmed", json.loads(saved["identity_json"]), json.loads(saved["candidates_json"]), saved["provenance"]
+        if reusable and saved["state"] == "verified" and not force:
+            return "verified", json.loads(saved["identity_json"]), json.loads(saved["candidates_json"]), saved["provenance"]
         if reusable and saved["state"] == "candidate" and not force:
             return "candidate", {}, json.loads(saved["candidates_json"]), saved["provenance"]
+        verified, independent, audit_reason = self._verify_source_identity(obj, job_id)
+        if verified:
+            return "verified", verified, independent[:12], "rule_database_verified"
         history_candidates = {identity_key(value): value for row in histories if identity_key(value := history_identity(row))}
         native: dict[str, Any] = {}
         provenance = "needs_user_confirmation"
@@ -1415,14 +1544,16 @@ class GovernorService:
             native = {}
             provenance = "native_error"
             self._identity_attempt(obj, "native", "error", error, reset=True)
-        candidates = list(history_candidates.values())
+        candidates = [*independent, *[row for key, row in history_candidates.items() if key not in {identity_key(value) for value in independent}]]
         if identity_key(native):
             candidates = [native, *[row for row in candidates if identity_key(row) != identity_key(native)]]
         if identity_key(native) and len(history_candidates) == 1 and identity_key(native) in history_candidates:
             result = {**history_candidates[identity_key(native)], **{key: value for key, value in native.items() if value}}
             candidates = [result, *[row for row in candidates if identity_key(row) != identity_key(result)]]
-            return "candidate", {}, candidates[:12], "native_and_history_agree"
-        if not identity_key(native) or (history_candidates and identity_key(native) not in history_candidates):
+            return "candidate", {}, candidates[:12], "search_error" if audit_reason == "database_error" else "native_and_history_agree"
+        if audit_reason == "database_error":
+            return "candidate", {}, candidates[:12], "search_error"
+        if not independent and audit_reason not in {"database_no_exact_match", "database_page_full", "database_ambiguous", "database_detail_conflict"} and (not identity_key(native) or (history_candidates and identity_key(native) not in history_candidates)):
             digest = self._evidence(obj)
             hints = [row["hint"] for row in digest["title_hints"][:3]] or [digest["container_hint"]]
             # 剧集包的年份可能是播出季年份，不作为强过滤条件。
@@ -1641,8 +1772,10 @@ class GovernorService:
         if relation_observation is not None:
             relation_observation.update(receipt)
         latest = latest_histories(histories)
-        if identity_state != "confirmed":
-            findings.append({"kind": "identity_confirmation", "reason": "文件线索与历史身份不能相互证明，请确认正确作品", "evidence": {"candidate_count": 0}})
+        if identity_state not in {"confirmed", "verified"}:
+            audit = self._identity_audit(obj["id"])
+            reason = AUDIT_REASONS.get(audit.get("reason"), "尚未取得可用的源文件与数据库核验结果；候选不是最终答案")
+            findings.append({"kind": "identity_confirmation", "reason": reason, "evidence": {"candidate_count": 0, "audit_reason": audit.get("reason")}})
             if inventory.library and not inventory.library.get("complete"):
                 findings.append({"kind": "relation_confirmation", "reason": "媒体库本轮没有读完整，已找到的关联保留，其余尚未确定", "evidence": receipt})
             return findings
@@ -1730,9 +1863,11 @@ class GovernorService:
             # 批量识别之后发生的人工选择优先于该批次的旧候选快照。
             resolved = ("confirmed", json.loads(saved["identity_json"]), json.loads(saved["candidates_json"]), saved["provenance"])
         state, identity, candidates, provenance = resolved or self._resolve_identity(obj, histories, job_id=job_id)
+        if state == "verified" and not self._identity_cache_usable({"object_id": obj["id"], "state": state, "fingerprint": obj["fingerprint"], "provenance": provenance, "identity_json": json_text(identity)}, obj):
+            state, identity, provenance = "candidate", {}, "needs_user_confirmation"
         preview: dict[str, Any] = {}
         rule_fp = ""
-        if state == "confirmed" and obj.get("complete"):
+        if state in {"confirmed", "verified"} and obj.get("complete"):
             config_fp = fingerprint(inventory.library_roots)
             configuration = getattr(self.adapter, "preview_configuration", None)
             naming = self._readonly_call(job_id, "预览规则读取", configuration) if callable(configuration) else {}
@@ -1862,7 +1997,7 @@ class GovernorService:
                     probe = self._resolve_identity(obj, histories, allow_ai=False, force=mode == "full", job_id=job_id)
                     resolved[obj["id"]] = probe
                     digest = self._evidence(obj)
-                    if self.ai_enabled and not probe[2] and probe[0] != "confirmed" and probe[3] != "search_error" and not reused_candidate and not digest["membership_review_required"] and not digest["overflow"]:
+                    if self.ai_enabled and not probe[2] and probe[0] not in {"confirmed", "verified"} and probe[3] != "search_error" and not reused_candidate and not digest["membership_review_required"] and not digest["overflow"]:
                         needs_queries.append(obj)
                         deferred_ids.add(obj["id"])
                     else:
@@ -1944,10 +2079,14 @@ class GovernorService:
         problems = [row for row in public if row["kind"] in {"native_failure", "false_success"}]
         confirmations = [row for row in public if row["kind"] in {"identity_confirmation", "manual_change", "relation_confirmation", "rule_change", "path_deviation"}]
         errors = [row for row in public if row["kind"] in {"read_error", "preview_error"}]
+        normal = []
+        for row in self.ledger.query("SELECT i.*,o.label,o.source_json FROM identities i JOIN objects o ON o.id=i.object_id JOIN observations r ON r.object_id=o.id AND r.kind='relations' AND r.complete=1 JOIN observations p ON p.object_id=o.id AND p.kind='preview' AND p.complete=1 WHERE o.status!='REMOVED' AND NOT EXISTS (SELECT 1 FROM findings f WHERE f.object_id=o.id AND f.status='open')"):
+            if job_id and checked.get(row["object_id"]) == job_id and (user_confirmed(row) or row["state"] == "verified") and self._identity_cache_usable(row, json.loads(row["source_json"])):
+                normal.append({"object_id": row["object_id"], "title": row["label"], "reason": "本轮已完成官方预期入口与物理关系核对，未发现问题；不代表下载集数完整", "current_job": True})
         indexed = self.ledger.one("SELECT payload_json FROM observations WHERE object_id='__library__' AND kind='inventory'")
         library = json.loads(indexed["payload_json"]) if indexed else {}
         note = ("已按当前媒体库清单发现候选" if library.get("complete") else "本轮媒体库未读取完整") + "；待读、未证实和路径差异均不是确定性故障" if library else "未取得当前媒体库枚举合同，仅核对已有候选"
-        return {"status": self.status(), "problems": problems, "confirmations": confirmations, "errors": errors, "coverage": {"scope": "library_candidates" if library else "known_candidates", "exhaustive": False, "library_complete": bool(library.get("complete")), "library_file_count": library.get("file_count", 0), "note": note}}
+        return {"status": self.status(), "problems": problems, "confirmations": confirmations, "errors": errors, "normal": normal, "coverage": {"scope": "library_candidates" if library else "known_candidates", "exhaustive": False, "library_complete": bool(library.get("complete")), "library_file_count": library.get("file_count", 0), "note": note}}
 
     def detail(self, object_id: str) -> dict[str, Any] | None:
         obj = self.ledger.one("SELECT * FROM objects WHERE id=?", (object_id,))
@@ -1959,10 +2098,10 @@ class GovernorService:
         relations = self.ledger.one("SELECT * FROM observations WHERE object_id=? AND kind='relations'", (object_id,)) or {}
         diagnostics = self.ledger.one("SELECT payload_json FROM observations WHERE object_id=? AND kind='identity_diagnostics'", (object_id,)) or {}
         repair_result = self.ledger.one("SELECT payload_json FROM observations WHERE object_id=? AND kind='repair_result'", (object_id,)) or {}
-        confirmed = user_confirmed(identity) and self._identity_cache_usable(identity, json.loads(obj["source_json"]))
+        usable = (user_confirmed(identity) or identity.get("state") == "verified") and self._identity_cache_usable(identity, json.loads(obj["source_json"]))
         candidates = json.loads(identity.get("candidates_json") or "[]")
         chosen = json.loads(identity.get("identity_json") or "{}")
-        if not confirmed and identity_key(chosen) and not any(identity_key(value) == identity_key(chosen) for value in candidates):
+        if not usable and identity_key(chosen) and not any(identity_key(value) == identity_key(chosen) for value in candidates):
             candidates.insert(0, chosen)
         file_groups = {}
         entries = json.loads(obj["source_json"]).get("entries") or []
@@ -1974,8 +2113,9 @@ class GovernorService:
         return {
             "id": object_id, "title": obj["label"], "fingerprint": obj["fingerprint"],
             "source": json.loads(source.get("payload_json") or "{}"),
-            "identity_state": "confirmed" if confirmed else "candidate",
-            "identity": chosen if confirmed else {},
+            "identity_state": identity["state"] if usable else "candidate",
+            "identity": chosen if usable else {},
+            "identity_audit": self._identity_audit(object_id),
             "candidates": candidates,
             "provenance": identity.get("provenance") or "",
             "identity_diagnostics": json.loads(diagnostics.get("payload_json") or "{}"),
@@ -2099,7 +2239,7 @@ class GovernorService:
 
     def repair_preview(self, object_id: str) -> dict[str, Any]:
         detail = self.detail(object_id)
-        if not detail or detail["identity_state"] != "confirmed":
+        if not detail or detail["identity_state"] not in {"confirmed", "verified"}:
             raise ValueError("必须先确认作品身份")
         source_payload = detail["source"]
         obj = source_payload.get("object") or {}
@@ -2265,7 +2405,7 @@ class GovernorService:
         if not row or not detail or row["fingerprint"] != token:
             raise ValueError("预览已经过期，请重新生成")
         plan = json.loads(row["payload_json"])
-        if detail["identity_state"] != "confirmed" or json_text(plan.get("identity") or {}, sort_keys=True) != json_text(detail["identity"], sort_keys=True):
+        if detail["identity_state"] not in {"confirmed", "verified"} or json_text(plan.get("identity") or {}, sort_keys=True) != json_text(detail["identity"], sort_keys=True):
             raise ValueError("作品身份确认已经变化，请重新确认并生成修复预览")
         if plan.get("object_fingerprint") != detail["fingerprint"]:
             raise ValueError("原文件已经变化，请重新检查")
@@ -2281,6 +2421,10 @@ class GovernorService:
         frozen_targets = [(normal_path(item.get("source", {}).get("path")), str(item.get("target_storage") or "local"), normal_path(item.get("expected"))) for item in plan.get("entries") or []]
         if fresh_targets != frozen_targets or self._repair_live_state(plan.get("entries") or []) != plan.get("live"):
             raise ValueError("文件或官方预览已经变化，请重新生成预览")
+        # 详情/现场回读可能耗时；不能用开始回读时尚有效、写入前已到期的自动核验。
+        current = self.detail(object_id)
+        if not current or current["identity_state"] not in {"confirmed", "verified"} or json_text(current["identity"], sort_keys=True) != json_text(plan.get("identity") or {}, sort_keys=True):
+            raise ValueError("作品身份核验已经失效，请重新检查并生成修复预览")
         if any(entry.get("cleanup_attributable") for entry in plan.get("entries") or []) and not cleanup_approved:
             raise ValueError("计划包含旧入口清理，须单独确认清理许可")
         # 媒体写入不是事务：先消费单次许可，每项保存回执；失败必须重新预览。
