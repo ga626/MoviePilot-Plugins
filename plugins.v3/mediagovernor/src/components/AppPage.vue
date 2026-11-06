@@ -257,7 +257,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
   <main class="governor-shell">
     <section class="hero">
       <div>
-        <p class="eyebrow">MediaGovernor 5.1.2 · 只读识别候选</p>
+        <p class="eyebrow">MediaGovernor 5.1.3 · 只读识别候选</p>
         <p v-if="readOnly" class="notice">只读模式：可以检查、确认身份和查看预览，不会执行媒体修复。</p>
         <h1>检查现在，找到真实问题</h1>
         <p class="lead">逐作品比较原文件、当前硬链接和 MoviePilot 应有结果。已经完成的结果会立即保存，关掉页面也不会中断。</p>
@@ -347,6 +347,12 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
 
         <p v-if="selected.relations?.stale" class="warning">关系记录需要重新核验，本轮尚不能据此确认文件关联。</p>
         <p v-if="selected.identity_state === 'verified'" class="notice">数据库核验时间：{{ selected.identity_audit?.checked_at || '未知' }}。缓存绑定当前源指纹与核验策略，最长复用 24 小时；文件变化或核验失效后会重新检查。</p>
+        <p v-if="selected.digest?.episode_mapping_review" class="warning">作品身份与季集映射分开核验：存在推断集号，官方预览映射状态为 {{ selected.preview?.mapping?.status || '尚未核对' }}；身份通过不代表集号已通过。</p>
+        <details v-if="selected.identity_audit?.detail_comparisons?.length">
+          <summary>数据库详情字段核对（不含原始详情）</summary>
+          <p v-for="(receipt, index) in selected.identity_audit.detail_comparisons" :key="index" class="notice">{{ receipt.requested_key || '请求身份缺失' }} → {{ receipt.returned_key || '详情身份缺失' }}：{{ Object.entries(receipt.fields).map(([key, value]) => `${key}=${value}`).join('；') }}</p>
+        </details>
+        <p v-if="selected.relations?.coverage?.unsupported_source_count" class="warning">{{ selected.relations.coverage.unsupported_source_count }} 个原盘或目录未进入逐文件配对；当前合同不支持其物理关系，不会算成正常或整理失败。</p>
         <p v-if="selected.relations?.coverage" class="notice">候选已记录 {{ selected.relations.pairs?.length || 0 }} 对，本轮已查 {{ selected.relations.coverage.checked_pairs || 0 }} 对，待查 {{ selected.relations.coverage.pending_pairs || 0 }} 对。{{ selected.relations.coverage.note }}</p>
         <p v-if="selected.relations?.coverage" class="notice">源视频 {{ selected.relations.coverage.source_video_count ?? '未知' }} 个，已证实关联 {{ selected.relations.coverage.linked_source_count ?? '未知' }} 个，未关联或未证实 {{ selected.relations.coverage.unlinked_or_unproven_sources ?? '未知' }} 个；候选对数不是已覆盖视频数。</p>
         <form class="choice-area" @submit.prevent="searchCandidates">

@@ -34,18 +34,20 @@ MAX_RELATION_PAIRS = 64
 MAX_CANDIDATE_PAGE = 128
 MAX_TREE_NODES = 100000
 MAX_AI_BATCHES_PER_JOB = 8
-PREVIEW_REVISION = "file-reconciliation-v2"
+PREVIEW_REVISION = "file-reconciliation-v3"
 CANDIDATE_RETRY_SECONDS = 3600
-IDENTITY_AUDIT_REVISION = "source-database-v1"
+IDENTITY_AUDIT_REVISION = "source-database-v2"
+MAX_IDENTITY_CANDIDATES = 64
+MAX_IDENTITY_DETAILS = 3
 IDENTITY_AUDIT_SECONDS = 86400
 AUDIT_REASONS = {
     "source_incomplete": "源文件范围未读完整，不能自动核验身份",
-    "source_ambiguous": "源文件有多组标题、未解析项或推断集号，需要补充作品线索",
+    "source_ambiguous": "源文件有多组标题、未解析项或超出证据预算，需要补充作品线索",
     "source_year_missing": "源文件与同名容器都没有明确年份，尚不能排除同名作品",
     "source_structure_ambiguous": "源文件的电影或季集结构不明确，不能自动选择类型",
     "database_unavailable": "当前宿主没有可用的数据库详情接口，身份仍为候选",
     "database_error": "数据库核验失败，不代表没有匹配作品；可稍后重新检查",
-    "database_page_full": "数据库搜索页已满，尚不能证明同名候选唯一",
+    "database_page_full": "本次数据库返回超过核验预算，候选尚未全部检查",
     "database_no_exact_match": "数据库候选与源标题、类型或年份不完全一致，需要补充线索",
     "database_ambiguous": "数据库中有多个同名同类型候选，未自动选择第一项",
     "database_detail_conflict": "数据库详情与源文件标题、类型、年份或候选 ID 不一致",
@@ -57,6 +59,14 @@ EPISODE_PATTERN = re.compile(r"S(\d{1,2})E(\d{1,4})", re.IGNORECASE)
 
 class AuditCancelled(Exception):
     """用户要求停止只读检查；不得被记录成检查失败。"""
+
+
+class IdentityDetailConflict(ValueError):
+    """公开身份不符；只携带脱敏字段状态，不携带数据库原文。"""
+
+    def __init__(self, receipt):
+        super().__init__("数据库详情与请求的作品 ID、来源或类型不一致")
+        self.receipt = receipt
 
 
 def utcnow() -> str:
@@ -241,6 +251,7 @@ def identity_from_media(value: Any) -> dict[str, Any]:
         "media_id": str(media_id or ""),
         "category": str(data.get("category") or ""),
         "genres": [model_dict(item) or item for item in genres][:20],
+        "aliases": media_aliases(data),
         **{key: data[key] for key in ("season", "episode_group", "epformat") if data.get(key) is not None},
     }
 
@@ -259,7 +270,17 @@ def history_identity(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def public_identity(identity: dict[str, Any]) -> dict[str, Any]:
-    return {key: identity.get(key) for key in ("title", "original_title", "year", "media_type", "media_source", "media_id", "category", "genres", "season", "episode_group", "epformat") if key in identity}
+    return {**{key: identity.get(key) for key in ("title", "original_title", "year", "media_type", "media_source", "media_id", "category", "genres", "season", "episode_group", "epformat") if key in identity}, "aliases": media_aliases(identity)}
+
+
+def media_aliases(data: dict[str, Any]) -> list[str]:
+    """仅接纳宿主媒体 DTO 的名称字段，不从概述、路径或查询词制造别名。"""
+    values = [data.get(key) for key in ("title", "original_title", "original_name", "en_title", "hk_title", "tw_title", "sg_title")]
+    for key in ("names", "aliases"):
+        rows = data.get(key)
+        if isinstance(rows, list):
+            values.extend(rows)
+    return list(dict.fromkeys(value.strip()[:160] for value in values if isinstance(value, str) and value.strip()))[:64]
 
 
 def user_confirmed(identity: dict[str, Any] | None) -> bool:
@@ -275,16 +296,21 @@ def source_identity_evidence(obj: dict[str, Any]) -> tuple[dict[str, Any], str]:
     if not obj.get("complete"):
         return {}, "source_incomplete"
     digest = evidence_digest(obj)
-    if (not digest["file_count"] or digest["title_family_count"] != 1 or digest["parse_unresolved"]
-            or digest["overflow"] or digest["episode_mapping_review"]):
+    discs = [row for row in obj.get("entries") or [] if row.get("type") == "dir" and item_name(row).casefold() in DISC_DIRECTORIES]
+    if discs and not digest["file_count"]:
+        root = parsed_name(item_name(obj.get("root") or {}))
+        if len(discs) == 1 and root.get("parsed") and root.get("hint"):
+            return {"title": root["hint"], "year": str(root.get("year") or ""), "media_type": "movie", "seasons": [], "disc": True, "mapping_review": False}, ""
+    if (not digest["file_count"] or digest["title_family_count"] != 1 or digest["parse_unresolved"] or digest["overflow"]):
         return {}, "source_ambiguous"
     files = [row for row in obj.get("entries") or [] if is_media_file(row) and not is_sample(row)]
-    parsed = [parsed_name(item_name(row)) for row in files]
+    parsed = container_names(files)
     hint = digest["title_hints"][0]["hint"]
     episodes = [row.get("episode") is not None for row in parsed]
     if all(episodes):
         mtype = "tv"
-    elif not any(episodes) and len(files) == 1 and all(row.get("season") is None for row in parsed):
+    elif not any(episodes) and all(row.get("season") is None for row in parsed) and (len(files) == 1 or (
+            all(row.get("part") for row in parsed) and len({row["part"] for row in parsed}) == len(files))):
         mtype = "movie"
     else:
         return {}, "source_structure_ambiguous"
@@ -292,11 +318,10 @@ def source_identity_evidence(obj: dict[str, Any]) -> tuple[dict[str, Any], str]:
     root = parsed_name(item_name(obj.get("root") or {}))
     if root.get("parsed") and title_key(root.get("hint")) == title_key(hint) and root.get("year"):
         years.add(str(root["year"]))
-    if not years:
-        return {}, "source_year_missing"
-    if len(years) != 1:
+    if len(years) > 1 and mtype == "movie":
         return {}, "source_ambiguous"
-    return {"title": hint, "year": next(iter(years)), "media_type": mtype,
+    return {"title": hint, "year": next(iter(years)) if len(years) == 1 else "", "years": sorted(years), "media_type": mtype,
+            "mapping_review": bool(digest["episode_mapping_review"]),
             "seasons": sorted({int(row.get("season") if row.get("season") is not None else 1) for row in parsed}) if mtype == "tv" else []}, ""
 
 
@@ -304,18 +329,48 @@ def source_matches_database(evidence: dict[str, Any], identity: dict[str, Any], 
     """精确匹配不是视频内容鉴定；多义/不完整数据不会被宽松相似度放行。"""
     if media_type_key(identity.get("media_type")) != evidence["media_type"]:
         return False
-    titles = [identity.get("title"), identity.get("original_title")]
+    titles = media_aliases(identity)
     if title_key(evidence["title"]) not in {title_key(value) for value in titles if value}:
         return False
     if evidence["media_type"] == "movie":
-        return str(identity.get("year") or "") == evidence["year"]
+        return bool(identity.get("year")) and (not evidence["year"] or str(identity.get("year")) == evidence["year"])
     if details is None:
         # 首季可以保守按首播年预筛；后续季度不能误用首播年。
-        return evidence["seasons"] != [1] or str(identity.get("year") or "") == evidence["year"]
+        return not evidence["year"] or evidence["seasons"] != [1] or str(identity.get("year") or "") == evidence["year"]
+    if not evidence["year"] and not evidence.get("years"):
+        return bool(identity.get("year"))
     season_years = details.get("season_years")
     if not isinstance(season_years, dict):
         return False
-    return all(str(season_years.get(str(season), season_years.get(season)) or "") == evidence["year"] for season in evidence["seasons"])
+    allowed = {str(identity.get("year") or ""), *[str(season_years.get(str(season), season_years.get(season)) or "") for season in evidence["seasons"]]}
+    allowed.discard("")
+    # 合集/多季文件常标整剧首播年；不能要求它等于每一季的首播年。
+    return set([*evidence.get("years", []), *([evidence["year"]] if evidence["year"] else [])]) <= allowed
+
+
+def detail_comparison(evidence: dict[str, Any], requested: dict[str, Any], returned: dict[str, Any], details: dict[str, Any]) -> dict[str, Any]:
+    """只保留公开身份键和有限字段状态，不输出原始名称/路径/数据库详情。"""
+    fields = {}
+    def components(identity):
+        source = str(identity.get("media_source") or "").casefold()
+        return {"media_source": {"tmdb": "themoviedb", "the_movie_db": "themoviedb"}.get(source, source),
+                "media_id": str(identity.get("media_id") or "").strip(), "media_type": media_type_key(identity.get("media_type"))}
+    old, new = components(requested), components(returned)
+    for key in ("media_source", "media_id", "media_type"):
+        fields[key] = "missing" if not new[key] or (key == "media_type" and new[key] == "unknown") else "match" if old[key] == new[key] else "mismatch"
+    names = media_aliases(returned)
+    fields["title"] = "missing" if not names else "match" if title_key(evidence.get("title")) in {title_key(name) for name in names} else "mismatch"
+    if not evidence.get("year") and not evidence.get("years"):
+        fields["year"] = "not_provided" if returned.get("year") else "missing"
+    elif evidence.get("media_type") == "movie":
+        fields["year"] = "missing" if not returned.get("year") else "match" if str(returned["year"]) == str(evidence.get("year")) else "mismatch"
+    else:
+        year_map = details.get("season_years")
+        allowed = {str(returned.get("year") or "")}
+        if isinstance(year_map, dict):
+            allowed.update(str(year_map.get(str(season), year_map.get(season)) or "") for season in evidence.get("seasons", []))
+        fields["year"] = "missing" if not isinstance(year_map, dict) else "match" if set([*evidence.get("years", []), *([evidence["year"]] if evidence.get("year") else [])]) <= allowed else "mismatch"
+    return {"requested_key": identity_key(requested), "returned_key": identity_key(returned), "fields": fields}
 
 
 def latest_histories(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -384,7 +439,7 @@ def parsed_name(name: str) -> dict[str, Any]:
         meta = MetaInfo(title=name)
         return {"hint": str(meta.cn_name or meta.en_name or "")[:96], "year": str(meta.year or ""),
                 "season": meta.begin_season, "episode": meta.begin_episode,
-                "episode_end": meta.end_episode, "parsed": True}
+                "episode_end": meta.end_episode, "part": str(getattr(meta, "part", "") or ""), "parsed": True}
     except Exception as error:  # noqa: BLE001 - 无 SDK/解析失败不能证明混包
         return {"hint": title_hint(name), "parsed": False, "error_type": type(error).__name__}
 
@@ -847,7 +902,7 @@ class MoviePilotAdapter:
 
     def search(self, query: str) -> list[dict[str, Any]]:
         _, rows = self._ports()["media"].search(query)
-        return [identity_from_media(row) for row in rows or [] if identity_key(identity_from_media(row))][:8]
+        return [identity_from_media(row) for row in rows or [] if identity_key(identity_from_media(row))]
 
     def media_info(self, identity: dict[str, Any]) -> Any:
         ports = self._ports()
@@ -855,7 +910,7 @@ class MoviePilotAdapter:
         mtype = ports["MediaType"].MOVIE if media_type_key(identity.get("media_type")) == "movie" else ports["MediaType"].TV
         media = ports["media"].recognize_media(media_source=source, media_id=str(identity["media_id"]), mtype=mtype, episode_group=identity.get("episode_group"))
         if media and identity_key(identity_from_media(media)) != identity_key(identity):
-            raise ValueError("数据库详情与已确认的作品 ID 或类型不一致，已拒绝预览与执行")
+            raise IdentityDetailConflict(detail_comparison({"title": identity.get("title"), "year": identity.get("year"), "media_type": identity.get("media_type"), "seasons": []}, identity, identity_from_media(media), model_dict(media)))
         return media
 
     @staticmethod
@@ -1470,31 +1525,50 @@ class GovernorService:
         return json.loads(row["payload_json"]) if row else {}
 
     def _verify_source_identity(self, obj: dict[str, Any], job_id: str | None) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
-        """一次源标题搜索 + 一次详情回读；独立于历史/原生/AI 投票。"""
+        """有界源搜索及独立详情回读；不以结果顺序、历史或 AI 投票定身份。"""
         evidence, reason = source_identity_evidence(obj)
         candidates: list[dict[str, Any]] = []
         identity: dict[str, Any] = {}
         status = "pending"
+        comparisons: list[dict[str, Any]] = []
         if not reason and not callable(getattr(self.adapter, "media_info", None)):
             reason = "database_unavailable"
         if not reason:
             try:
                 rows = self._readonly_call(job_id, "源身份数据库搜索", self.adapter.search, evidence["title"], timeout=SEARCH_TIMEOUT_SECONDS)
-                candidates = [public_identity(row) for row in rows or [] if identity_key(row)]
+                candidates = list({identity_key(row): public_identity(row) for row in rows or [] if identity_key(row)}.values())
                 matches = {identity_key(row): row for row in candidates if source_matches_database(evidence, row)}
-                if len(candidates) >= 8:
+                if len(candidates) > MAX_IDENTITY_CANDIDATES:
                     reason = "database_page_full"
-                elif len(matches) != 1:
-                    reason = "database_ambiguous" if len(matches) > 1 else "database_no_exact_match"
+                    candidates = candidates[:MAX_IDENTITY_CANDIDATES]
+                elif len(matches) > 1:
+                    reason = "database_ambiguous"
                 else:
-                    candidate = next(iter(matches.values()))
-                    data = model_dict(self._readonly_call(job_id, "源身份数据库详情", self.adapter.media_info, candidate, timeout=SEARCH_TIMEOUT_SECONDS))
-                    resolved = identity_from_media(data)
-                    if identity_key(resolved) != identity_key(candidate) or not source_matches_database(evidence, resolved, data):
-                        reason = "database_detail_conflict"
+                    # 搜索投影可能只有本地译名；最多回读三项同类型/年份候选的可信详情别名。
+                    plausible = list(matches.values()) or [row for row in candidates
+                        if row.get("media_type") == evidence["media_type"] and (
+                            not evidence["year"] or (evidence["media_type"] == "tv" and evidence["seasons"] != [1])
+                            or str(row.get("year") or "") == evidence["year"])]
+                    if len(plausible) > MAX_IDENTITY_DETAILS:
+                        reason = "database_page_full"
                     else:
-                        identity = public_identity(resolved)
-                        status = "verified"
+                        verified = []
+                        for candidate in plausible:
+                            try:
+                                data = model_dict(self._readonly_call(job_id, "源身份数据库详情", self.adapter.media_info, candidate, timeout=SEARCH_TIMEOUT_SECONDS))
+                            except IdentityDetailConflict as error:
+                                comparisons.append(error.receipt)
+                                continue
+                            resolved = identity_from_media(data)
+                            comparison = detail_comparison(evidence, candidate, resolved, data)
+                            comparisons.append(comparison)
+                            if identity_key(resolved) == identity_key(candidate) and source_matches_database(evidence, resolved, data):
+                                verified.append(public_identity(resolved))
+                        if len(verified) == 1 and (len(plausible) == 1 or all(
+                                all(value not in {"missing"} for value in row["fields"].values()) for row in comparisons)):
+                            identity, status = verified[0], "verified"
+                        else:
+                            reason = "database_ambiguous" if len(verified) > 1 else "database_detail_conflict" if comparisons else "database_no_exact_match"
                 self._identity_attempt(obj, "source_database", status)
             except AuditCancelled:
                 raise
@@ -1505,6 +1579,7 @@ class GovernorService:
             "policy": IDENTITY_AUDIT_REVISION, "source_fp": obj["fingerprint"], "status": status,
             "reason": reason, "checked_at": utcnow(), "identity_key": identity_key(identity),
             "evidence": evidence, "candidate_count": len(candidates),
+            "detail_comparisons": comparisons,
             "scope": "source_naming_database_match_not_content_or_download_completeness",
         })
         return identity, candidates, reason
@@ -1528,22 +1603,26 @@ class GovernorService:
             return "verified", json.loads(saved["identity_json"]), json.loads(saved["candidates_json"]), saved["provenance"]
         if reusable and saved["state"] == "candidate" and not force:
             return "candidate", {}, json.loads(saved["candidates_json"]), saved["provenance"]
+        self._identity_attempt(obj, "source", "started", reset=True)
         verified, independent, audit_reason = self._verify_source_identity(obj, job_id)
         if verified:
             return "verified", verified, independent[:12], "rule_database_verified"
         history_candidates = {identity_key(value): value for row in histories if identity_key(value := history_identity(row))}
+        if audit_reason in {"database_error", "database_page_full", "database_ambiguous", "database_detail_conflict", "database_no_exact_match"}:
+            candidates = [*independent, *[row for key, row in history_candidates.items() if key not in {identity_key(value) for value in independent}]]
+            return "candidate", {}, candidates[:12], "search_error" if audit_reason == "database_error" else "needs_user_confirmation"
         native: dict[str, Any] = {}
         provenance = "needs_user_confirmation"
         try:
             path = str(obj["root"].get("path") or "")
             native = self._readonly_call(job_id, "作品识别", self.adapter.recognize, path) if job_id else self.adapter.recognize(path)
-            self._identity_attempt(obj, "native", "candidates" if identity_key(native) else "empty", reset=True)
+            self._identity_attempt(obj, "native", "candidates" if identity_key(native) else "empty")
         except AuditCancelled:
             raise
         except Exception as error:  # noqa: BLE001 - 记录失败阶段，仍允许独立数据库搜索
             native = {}
             provenance = "native_error"
-            self._identity_attempt(obj, "native", "error", error, reset=True)
+            self._identity_attempt(obj, "native", "error", error)
         candidates = [*independent, *[row for key, row in history_candidates.items() if key not in {identity_key(value) for value in independent}]]
         if identity_key(native):
             candidates = [native, *[row for row in candidates if identity_key(row) != identity_key(native)]]
@@ -1629,11 +1708,29 @@ class GovernorService:
         if len({(str(row.get("target_storage") or "local"), normal_path(row.get("target"))) for row in unique}) != len(unique):
             failed_responses += 1
             messages.append("不同源文件指向同一个预览目标，已拒绝覆盖")
+        mapping = {"status": "not_applicable", "inferred_sources": 0, "checked_sources": 0, "conflicts": 0}
+        if media_type_key(identity.get("media_type")) == "tv":
+            mapping["status"] = "official_preview"
+            files = [row for row in obj.get("entries") or [] if is_media_file(row) and not is_sample(row)]
+            for source, parsed in zip(files, container_names(files)):
+                if any(identity.get(key) is not None for key in ("season", "episode_group", "epformat")):
+                    mapping["status"] = "explicit_options_official_preview"
+                    continue
+                mapping["checked_sources"] += 1
+                mapping["inferred_sources"] += int(bool(parsed.get("mapping_inferred")))
+                planned = [row for row in unique if normal_path(row.get("source")) == normal_path(source.get("path"))]
+                target = parsed_name(Path(str(planned[0].get("target") or "")).name) if len(planned) == 1 else {}
+                if parsed.get("episode") is None or (target.get("season"), target.get("episode"), target.get("episode_end") or target.get("episode")) != (parsed.get("season"), parsed.get("episode"), parsed.get("episode_end") or parsed.get("episode")):
+                    mapping["conflicts"] += 1
+            if mapping["conflicts"]:
+                mapping["status"] = "unresolved"
+                failed_responses += 1
+                messages.append("作品身份已核验，但源季集线索与官方预览不一致；季集映射尚未通过")
         failed = failed_responses + sum(not row.get("success", True) or not row.get("source") or not row.get("target") for row in unique)
         accounted = [{"ref": stable_id(row.get("storage") or "local", normal_path(row.get("path"))),
                       "reason": "官方预览未计划此附件，插件不猜测目标" if is_sidecar(row) else "不支持的文件类型或原盘目录"}
                      for row in obj.get("entries") or [] if normal_path(row.get("path")) not in represented]
-        return {"summary": {"total": len(unique), "success": max(0, len(unique) - failed), "failed": failed}, "items": unique, "unplanned_files": accounted, "message": "；".join(messages[:3])}
+        return {"summary": {"total": len(unique), "success": max(0, len(unique) - failed), "failed": failed}, "items": unique, "unplanned_files": accounted, "mapping": mapping, "message": "；".join(messages[:3])}
 
     def _observe_relations(self, obj: dict[str, Any], histories: list[dict[str, Any]], preview: dict[str, Any], inventory: Inventory, job_id: str | None, previous: dict[str, Any]) -> dict[str, Any]:
         """身份前候选发现 + 有界公平逐对核验；False 不作为未关联证据。"""
@@ -1646,7 +1743,8 @@ class GovernorService:
         same_index = previous_discovery.get("fingerprint") == library.get("fingerprint") and previous.get("source_fp") == obj.get("fingerprint")
         discovery = {"fingerprint": library.get("fingerprint"), "sources": {}}
         remaining = 0
-        source_items = {normal_path(row.get("path")): row for row in obj.get("entries") or [] if row.get("path")}
+        unsupported = [row for row in obj.get("entries") or [] if row.get("type") != "file"]
+        source_items = {normal_path(row.get("path")): row for row in obj.get("entries") or [] if row.get("path") and row.get("type") == "file"}
         previews = self._preview_items(preview)
         for path, original in source_items.items():
             source = {"path": path, "storage": original.get("storage") or obj.get("root", {}).get("storage") or "local", "type": original.get("type") or "unknown"}
@@ -1743,6 +1841,7 @@ class GovernorService:
             "checked_pairs": already_checked + len(selected), "pending_pairs": sum(pair["status"] == "pending" for pair in pairs) + remaining,
             "discovery_pending": remaining, "library_file_count": library.get("file_count", 0),
             "source_video_count": len(media_paths), "linked_source_count": len(linked),
+            "unsupported_source_count": len(unsupported),
             "unlinked_or_unproven_sources": len(media_paths - linked),
             "library_snapshot_cached": bool(library.get("cached")),
             "unproven_pairs": sum(pair["status"] in {"unproven", "unsupported", "read_error"} for pair in pairs),
@@ -1772,12 +1871,16 @@ class GovernorService:
         if relation_observation is not None:
             relation_observation.update(receipt)
         latest = latest_histories(histories)
+        if receipt["coverage"].get("unsupported_source_count"):
+            findings.append({"kind": "relation_confirmation", "reason": "原盘或目录不是逐文件硬链接对象；当前物理关系合同不支持，未判为正常或整理失败", "evidence": {"unsupported_source_count": receipt["coverage"]["unsupported_source_count"]}})
         if identity_state not in {"confirmed", "verified"}:
             audit = self._identity_audit(obj["id"])
             reason = AUDIT_REASONS.get(audit.get("reason"), "尚未取得可用的源文件与数据库核验结果；候选不是最终答案")
             findings.append({"kind": "identity_confirmation", "reason": reason, "evidence": {"candidate_count": 0, "audit_reason": audit.get("reason")}})
             if inventory.library and not inventory.library.get("complete"):
                 findings.append({"kind": "relation_confirmation", "reason": "媒体库本轮没有读完整，已找到的关联保留，其余尚未确定", "evidence": receipt})
+            return findings
+        if receipt["coverage"].get("unsupported_source_count"):
             return findings
         preview_items = self._preview_items(preview)
         summary = preview.get("summary") if isinstance(preview.get("summary"), dict) else {}
@@ -1867,7 +1970,7 @@ class GovernorService:
             state, identity, provenance = "candidate", {}, "needs_user_confirmation"
         preview: dict[str, Any] = {}
         rule_fp = ""
-        if state in {"confirmed", "verified"} and obj.get("complete"):
+        if state in {"confirmed", "verified"} and obj.get("complete") and not any(row.get("type") != "file" for row in obj.get("entries") or []):
             config_fp = fingerprint(inventory.library_roots)
             configuration = getattr(self.adapter, "preview_configuration", None)
             naming = self._readonly_call(job_id, "预览规则读取", configuration) if callable(configuration) else {}

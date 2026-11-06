@@ -82,7 +82,7 @@ def test_database_ambiguity_or_failure_never_reaches_official_preview(tmp_path, 
     if failure == "multiple":
         adapter.search = lambda _: [identity, {**identity, "media_id": "999"}]
     elif failure == "page_full":
-        adapter.search = lambda _: [identity, *[{**identity, "title": f"Other {n}", "media_id": str(100 + n)} for n in range(7)]]
+        adapter.search = lambda _: [identity, *[{**identity, "title": f"Other {n}", "media_id": str(100 + n)} for n in range(G.MAX_IDENTITY_CANDIDATES)]]
     elif failure in {"wrong_year", "wrong_type"}:
         changed = {**identity, **({"year": "2025"} if failure == "wrong_year" else {"media_type": "tv"})}
         adapter.search = lambda _: [changed]
@@ -103,7 +103,7 @@ def test_database_ambiguity_or_failure_never_reaches_official_preview(tmp_path, 
     assert service.detail(obj["id"])["identity_audit"]["reason"]
 
 
-@pytest.mark.parametrize("failure", ["incomplete", "missing_year", "mixed", "unparsed", "inferred_episode"])
+@pytest.mark.parametrize("failure", ["incomplete", "missing_year", "mixed", "unparsed"])
 def test_insufficient_source_evidence_never_auto_verifies(tmp_path, monkeypatch, failure):
     adapter, obj, inv, _, _ = audit_fixture(tmp_path)
     if failure == "incomplete":
