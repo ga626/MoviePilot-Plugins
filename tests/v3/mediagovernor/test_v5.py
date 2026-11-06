@@ -114,10 +114,10 @@ def test_versions_api_and_frontend_contract_are_v5():
     package = json.loads((PLUGIN_DIR / "package.json").read_text(encoding="utf-8"))
     source = PLUGIN.read_text(encoding="utf-8")
     page = PAGE.read_text(encoding="utf-8")
-    assert manifest["version"] == package["version"] == "5.1.1"
-    assert next(iter(manifest["history"])) == "v5.1.1"
-    assert 'plugin_version = "5.1.1"' in source
-    assert 'return "vue", "dist/v5.1.1/assets"' in source
+    assert manifest["version"] == package["version"] == "5.1.2"
+    assert next(iter(manifest["history"])) == "v5.1.2"
+    assert 'plugin_version = "5.1.2"' in source
+    assert 'return "vue", "dist/v5.1.2/assets"' in source
     for endpoint in ("/audit/start", "/audit/status", "/findings", "/objects/{object_id}", "/identity/confirm", "/repair/{object_id}"):
         assert endpoint in source
     for forbidden in ("storage/list", "transfer/manual", "bundle_analyze_batch", "experiment_run", "map_commit"):
@@ -129,7 +129,7 @@ def test_versions_api_and_frontend_contract_are_v5():
     assert "正在停止…" in page and "检查已停止" in page
     module = load_plugin_with_host_boundary()
     plugin = module.MediaGovernor(); plugin.init_plugin({"enabled": False})
-    assert plugin.get_render_mode() == ("vue", "dist/v5.1.1/assets")
+    assert plugin.get_render_mode() == ("vue", "dist/v5.1.2/assets")
     assert [row["path"] for row in plugin.get_api()] == ["/audit/start", "/audit/status", "/findings", "/objects/{object_id}", "/identity/confirm", "/identity/search", "/repair/{object_id}"]
     assert all(row["auth"] == "bear" for row in plugin.get_api())
 
@@ -165,7 +165,7 @@ def test_real_moviepilot_v3_runtime_constructs_initializes_and_stops_plugin():
         assert callable(list_transfer_history)
         plugin = mediagovernor.MediaGovernor()
         plugin.init_plugin({"enabled": False})
-        assert plugin.get_state() is False and plugin.get_render_mode() == ("vue", "dist/v5.1.1/assets")
+        assert plugin.get_state() is False and plugin.get_render_mode() == ("vue", "dist/v5.1.2/assets")
         plugin.stop_service()
     finally:
         configure_chain_runtime_context_provider(None)
