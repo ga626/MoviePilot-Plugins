@@ -103,8 +103,40 @@ jobs:
           pnpm build
           git diff --exit-code -- dist
 
+  plugin-dependency-scope:
+    name: V3 dependency scope
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.dependency-scope.outputs.run }}
+    steps:
+      - name: Checkout plugin repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # 工作流和测试改动由合同测试验证；仅依赖声明或安装器变化需要真实安装。
+      - name: Determine whether dependency gate is required
+        id: dependency-scope
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only --no-renames "$BASE_SHA" HEAD -- \
+            'plugins.v3/*/pyproject.toml' \
+            'scripts/check_v3_dependency_install.py')"
+          if [ -n "$changed" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Dependency declarations or installer changed; checking all supported platforms."
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Dependencies unchanged; platform installation jobs are not required."
+          fi
+
   plugin-dependency-install-gate:
     name: V3 dependency install (${{ matrix.name }})
+    needs: plugin-dependency-scope
+    if: needs.plugin-dependency-scope.outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -132,23 +164,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Determine whether dependency gate is required
-        id: dependency-scope
-        shell: bash
-        run: |
-          set -euo pipefail
-          if git diff --quiet "${{ github.event.pull_request.base.sha }}" HEAD -- \
-            'plugins.v3/*/pyproject.toml' \
-            'scripts/check_v3_dependency_install.py' \
-            'tests/ci/test_v3_dependency_install_gate.py' \
-            '.github/workflows/plugin-gate.yml'; then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Set up uv
-        if: steps.dependency-scope.outputs.run == 'true'
         uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: '3.14'
@@ -156,7 +172,30 @@ jobs:
           cache-dependency-glob: plugins.v3/*/pyproject.toml
 
       - name: Install V3 plugin dependencies
-        if: steps.dependency-scope.outputs.run == 'true'
         env:
           PYTHONUTF8: '1'
         run: uv run --no-project --python 3.14 python scripts/check_v3_dependency_install.py --python 3.14 --platform "${{ matrix.platform }}"
+
+  plugin-dependency-gate:
+    name: V3 dependency gate
+    needs: [plugin-dependency-scope, plugin-dependency-install-gate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required installation results
+        shell: bash
+        env:
+          SCOPE_RESULT: ${{ needs.plugin-dependency-scope.result }}
+          INSTALL_REQUIRED: ${{ needs.plugin-dependency-scope.outputs.run }}
+          INSTALL_RESULT: ${{ needs.plugin-dependency-install-gate.result }}
+        run: |
+          set -euo pipefail
+          [ "$SCOPE_RESULT" = success ]
+          if [ "$INSTALL_REQUIRED" = false ] && [ "$INSTALL_RESULT" = skipped ]; then
+            echo "Dependencies unchanged; platform installations were not run."
+          elif [ "$INSTALL_REQUIRED" = true ] && [ "$INSTALL_RESULT" = success ]; then
+            echo "All required platform installations passed."
+          else
+            echo "Dependency gate incomplete or failed." >&2
+            exit 1
+          fi
