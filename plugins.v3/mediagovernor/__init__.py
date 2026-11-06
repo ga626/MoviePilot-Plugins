@@ -27,7 +27,7 @@ class MediaGovernor(_PluginBase):
     plugin_name = "媒体治理"
     plugin_desc = "逐作品核对当前文件与 MoviePilot 应有结果，找出整理失败和假成功。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "5.1.2"
+    plugin_version = "5.1.3"
     plugin_author = "MoviePilotMediaGovernor contributors"
     author_url = ""
     plugin_config_prefix = "mediagovernor_"
@@ -61,7 +61,7 @@ class MediaGovernor(_PluginBase):
 
     @staticmethod
     def get_render_mode() -> tuple[str, str]:
-        return "vue", "dist/v5.1.2/assets"
+        return "vue", "dist/v5.1.3/assets"
 
     def get_sidebar_nav(self) -> list[dict[str, Any]]:
         return []
