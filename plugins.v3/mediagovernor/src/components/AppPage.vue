@@ -257,7 +257,7 @@ onBeforeUnmount(() => { window.clearInterval(timer); refreshRevision++; detailRe
   <main class="governor-shell">
     <section class="hero">
       <div>
-        <p class="eyebrow">MediaGovernor 5.1.3 · 只读识别候选</p>
+        <p class="eyebrow">MediaGovernor 5.1.4 · 只读试用候选</p>
         <p v-if="readOnly" class="notice">只读模式：可以检查、确认身份和查看预览，不会执行媒体修复。</p>
         <h1>检查现在，找到真实问题</h1>
         <p class="lead">逐作品比较原文件、当前硬链接和 MoviePilot 应有结果。已经完成的结果会立即保存，关掉页面也不会中断。</p>
