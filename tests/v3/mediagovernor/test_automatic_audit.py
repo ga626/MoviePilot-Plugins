@@ -181,8 +181,9 @@ def test_later_season_same_title_remains_ambiguous_not_filtered_by_premiere_year
     adapter.search = lambda _: [identity, {**identity, "year": "2018", "media_id": "999"}]
     service = G.GovernorService(tmp_path / "state", adapter)
     assert service._resolve_identity(obj, [])[0] == "candidate"
-    assert service._identity_audit(obj["id"])["reason"] == "database_ambiguous"
-    assert adapter.detail_calls == []
+    # 两项均回读：这个替身给第二个 ID 返回了第一项详情，应保留合同冲突而非静默排除。
+    assert service._identity_audit(obj["id"])["reason"] == "database_detail_conflict"
+    assert {row["media_id"] for row in adapter.detail_calls} == {identity["media_id"], "999"}
 
 
 def test_user_correction_overrides_an_automatic_audit_and_survives_restart(tmp_path):

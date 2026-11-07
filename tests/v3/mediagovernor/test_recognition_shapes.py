@@ -102,12 +102,13 @@ def test_dictionary_and_real_host_object_normalize_equivalently():
     assert G.identity_from_media(media) == G.identity_from_media(media.to_dict())
 
 
-def test_eight_results_with_unique_exact_match_reaches_detail(tmp_path):
+def test_search_exact_match_does_not_hide_unchecked_translation_competitors(tmp_path):
     adapter, obj, _, _, identity = audit_fixture(tmp_path)
     adapter.search = lambda _: [{**identity, "title": f"Other {n}", "media_id": str(100+n)} for n in range(7)] + [identity]
     service = G.GovernorService(tmp_path / "state", adapter)
-    assert service._resolve_identity(obj, [])[0] == "verified"
-    assert len(adapter.detail_calls) == 1 and adapter.recognize_calls == 0
+    assert service._resolve_identity(obj, [])[0] == "candidate"
+    assert len(adapter.detail_calls) == G.MAX_IDENTITY_DETAILS and adapter.recognize_calls == 0
+    assert service._identity_audit(obj["id"])["reason"] == "database_budget_exhausted"
 
 
 def test_detail_alias_recovers_localised_search_without_query_injection(tmp_path):
@@ -126,8 +127,8 @@ def test_translation_detail_budget_never_chooses_first_or_discards_unchecked(tmp
     adapter.search = lambda _: [{**identity, "title": f"译名{n}", "media_id": str(n)} for n in range(G.MAX_IDENTITY_DETAILS+1)]
     service = G.GovernorService(tmp_path / "state", adapter)
     assert service._resolve_identity(obj, [])[0] == "candidate"
-    assert adapter.detail_calls == [] and adapter.recognize_calls == 0
-    assert service._identity_audit(obj["id"])["reason"] == "database_page_full"
+    assert len(adapter.detail_calls) == G.MAX_IDENTITY_DETAILS and adapter.recognize_calls == 0
+    assert service._identity_audit(obj["id"])["reason"] == "database_budget_exhausted"
 
 
 @pytest.mark.parametrize("mode", ["empty", "adapter_conflict", "timeout"])
@@ -164,7 +165,8 @@ def test_work_identity_passes_but_inferred_mapping_must_match_official_preview(t
     assert service._resolve_identity(obj, [])[0] == "verified"
     result = service._official_preview(obj, adapter.database)
     assert result["mapping"]["inferred_sources"] == 1
-    assert bool(result["summary"]["failed"]) is wrong_target
+    assert bool(result["summary"]["contract_errors"]) is wrong_target
+    assert (result["validation"]["status"] == "mapping_unresolved") is wrong_target
 
 
 @pytest.mark.parametrize("names,eligible", [(["Film.2000.CD1.mkv", "Film.2000.CD2.mkv"], True),
@@ -201,7 +203,7 @@ def test_explicit_multi_season_identity_does_not_approve_wrong_season_preview(tm
     service = G.GovernorService(tmp_path / "state", adapter)
     assert service._resolve_identity(obj, [])[0] == "verified"
     result = service._official_preview(obj, adapter.database)
-    assert result["mapping"]["conflicts"] == 1 and result["summary"]["failed"]
+    assert result["mapping"]["conflicts"] == 1 and result["summary"]["contract_errors"]
 
 
 def test_one_missing_detail_field_does_not_hide_other_field_results():

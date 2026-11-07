@@ -126,10 +126,10 @@ def test_versions_api_and_frontend_contract_are_v5():
     package = json.loads((PLUGIN_DIR / "package.json").read_text(encoding="utf-8"))
     source = PLUGIN.read_text(encoding="utf-8")
     page = PAGE.read_text(encoding="utf-8")
-    assert manifest["version"] == package["version"] == "5.1.4"
-    assert next(iter(manifest["history"])) == "v5.1.4"
-    assert 'plugin_version = "5.1.4"' in source
-    assert 'return "vue", "dist/v5.1.4/assets"' in source
+    assert manifest["version"] == package["version"] == "5.1.5"
+    assert next(iter(manifest["history"])) == "v5.1.5"
+    assert 'plugin_version = "5.1.5"' in source
+    assert 'return "vue", "dist/v5.1.5/assets"' in source
     for endpoint in ("/audit/start", "/audit/status", "/findings", "/objects/{object_id}", "/identity/confirm", "/repair/{object_id}"):
         assert endpoint in source
     for forbidden in ("storage/list", "transfer/manual", "bundle_analyze_batch", "experiment_run", "map_commit"):
@@ -141,7 +141,7 @@ def test_versions_api_and_frontend_contract_are_v5():
     assert "正在停止…" in page and "检查已停止" in page
     module = load_plugin_with_host_boundary()
     plugin = module.MediaGovernor(); plugin.init_plugin({"enabled": False})
-    assert plugin.get_render_mode() == ("vue", "dist/v5.1.4/assets")
+    assert plugin.get_render_mode() == ("vue", "dist/v5.1.5/assets")
     assert [row["path"] for row in plugin.get_api()] == ["/audit/start", "/audit/status", "/findings", "/objects/{object_id}", "/identity/confirm", "/identity/search", "/repair/{object_id}"]
     assert all(row["auth"] == "bear" for row in plugin.get_api())
 
@@ -177,7 +177,7 @@ def test_real_moviepilot_v3_runtime_constructs_initializes_and_stops_plugin():
         assert callable(list_transfer_history)
         plugin = mediagovernor.MediaGovernor()
         plugin.init_plugin({"enabled": False})
-        assert plugin.get_state() is False and plugin.get_render_mode() == ("vue", "dist/v5.1.4/assets")
+        assert plugin.get_state() is False and plugin.get_render_mode() == ("vue", "dist/v5.1.5/assets")
         plugin.stop_service()
     finally:
         configure_chain_runtime_context_provider(None)
@@ -316,10 +316,14 @@ def test_golden_audit_cases_replay_through_v5_classifier(tmp_path):
             expected = case["expected"]
             if expected.get("disposition") == "normal":
                 # 正常对象的反证样本含故意错误的 preview：可以拒绝预览，不能报媒体故障。
-                intended = G.expected_category(data["identity"])
+                intended = G.media_type_key(data["identity"].get("media_type"))
                 conflicting_preview = intended not in {"unknown", "other"} and any(G.root_category(row["target"], inv.library_roots) not in {"other", intended} for row in preview["items"])
                 if conflicting_preview:
                     assert {row["kind"] for row in findings} == {"preview_error"}, case["id"]
+                elif any(G.normal_path(history.get("dest")) != G.normal_path(row["target"])
+                         for history in data["unit"].get("history") or [] for row in preview["items"]):
+                    # 同为 tv，仅显示名不同不是分类反证；仍须保留真实路径偏差。
+                    assert {row["kind"] for row in findings} == {"path_deviation"}, case["id"]
                 else:
                     assert findings == [], case["id"]
             elif expected.get("kind") in {"native_failure", "category_error", "identity_error", "episode_error", "hierarchy_error"}:
