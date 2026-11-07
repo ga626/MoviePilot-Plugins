@@ -84,6 +84,18 @@ class FakeAdapter:
             value["summary"]["total"] = len(value["items"])
         return value
 
+    def supports_selected_preview(self):
+        return True
+
+    def preview_files(self, source, files, identity):
+        # 模拟声明过的集合接口；专门的越界合同测试另用坏适配器返回原文。
+        value = self.preview(source, identity)
+        selected = {G.normal_path(row.get("path")) for row in files}
+        value["items"] = [row for row in value["items"] if G.normal_path(row.get("source")) in selected]
+        if not value["summary"].get("failed"):
+            value["summary"] = {"total": len(value["items"]), "success": len(value["items"]), "failed": 0}
+        return value
+
     def relationship(self, source, target):
         # 旧 golden 专门回放路径判断，文件关联在 fixture 中视为已知；
         # 真实同对象、复制和读取失败由后面的独立临时文件用例验证。
@@ -114,10 +126,10 @@ def test_versions_api_and_frontend_contract_are_v5():
     package = json.loads((PLUGIN_DIR / "package.json").read_text(encoding="utf-8"))
     source = PLUGIN.read_text(encoding="utf-8")
     page = PAGE.read_text(encoding="utf-8")
-    assert manifest["version"] == package["version"] == "5.1.3"
-    assert next(iter(manifest["history"])) == "v5.1.3"
-    assert 'plugin_version = "5.1.3"' in source
-    assert 'return "vue", "dist/v5.1.3/assets"' in source
+    assert manifest["version"] == package["version"] == "5.1.4"
+    assert next(iter(manifest["history"])) == "v5.1.4"
+    assert 'plugin_version = "5.1.4"' in source
+    assert 'return "vue", "dist/v5.1.4/assets"' in source
     for endpoint in ("/audit/start", "/audit/status", "/findings", "/objects/{object_id}", "/identity/confirm", "/repair/{object_id}"):
         assert endpoint in source
     for forbidden in ("storage/list", "transfer/manual", "bundle_analyze_batch", "experiment_run", "map_commit"):
@@ -129,7 +141,7 @@ def test_versions_api_and_frontend_contract_are_v5():
     assert "正在停止…" in page and "检查已停止" in page
     module = load_plugin_with_host_boundary()
     plugin = module.MediaGovernor(); plugin.init_plugin({"enabled": False})
-    assert plugin.get_render_mode() == ("vue", "dist/v5.1.3/assets")
+    assert plugin.get_render_mode() == ("vue", "dist/v5.1.4/assets")
     assert [row["path"] for row in plugin.get_api()] == ["/audit/start", "/audit/status", "/findings", "/objects/{object_id}", "/identity/confirm", "/identity/search", "/repair/{object_id}"]
     assert all(row["auth"] == "bear" for row in plugin.get_api())
 
@@ -165,7 +177,7 @@ def test_real_moviepilot_v3_runtime_constructs_initializes_and_stops_plugin():
         assert callable(list_transfer_history)
         plugin = mediagovernor.MediaGovernor()
         plugin.init_plugin({"enabled": False})
-        assert plugin.get_state() is False and plugin.get_render_mode() == ("vue", "dist/v5.1.3/assets")
+        assert plugin.get_state() is False and plugin.get_render_mode() == ("vue", "dist/v5.1.4/assets")
         plugin.stop_service()
     finally:
         configure_chain_runtime_context_provider(None)
