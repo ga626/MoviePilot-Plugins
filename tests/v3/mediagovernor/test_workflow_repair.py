@@ -108,7 +108,8 @@ def test_duplicate_expected_targets_are_blocked(tmp_path):
     adapter.preview_value = {"summary": {"total": 2}, "items": [{"source": row["path"], "target": "/fixture/library/same.mkv"} for row in sources]}
     service = G.GovernorService(tmp_path, adapter)
     result = service._official_preview({"entries": sources, "root": {"path": "/fixture"}}, {})
-    assert result["summary"]["failed"] and "同一个预览目标" in result["message"]
+    assert result["summary"]["contract_errors"] and "同一个预览目标" in result["message"]
+    assert not G.preview_cache_usable({**result, "_basis": "bad"}, "bad")
 
 
 def test_video_coverage_counts_unique_sources_not_pairs(tmp_path):
