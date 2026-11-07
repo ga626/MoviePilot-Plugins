@@ -64,15 +64,18 @@ def test_none_directory_result_is_not_an_empty_directory():
         adapter.list_dir({"path": "/fixture/download", "type": "dir"})
 
 
-def test_current_wrong_link_and_missing_expected_are_independent(tmp_path):
+def test_current_wrong_link_keeps_missing_fact_without_claiming_native_failure(tmp_path):
     adapter, obj, inv, source, target, wrong = local_fixture(tmp_path)
     marked_wrong = wrong.with_name("Other {tmdb-8}.mkv")
     marked_wrong.hardlink_to(source)
     inv.histories = [{"src": str(source), "dest": str(marked_wrong), "status": True}]
     service = G.GovernorService(tmp_path / "state", adapter)
     identity = {"title": "Film", "media_type": "movie", "media_source": "themoviedb", "media_id": "7"}
-    findings = service._findings(obj, inv.histories, "confirmed", identity, adapter.preview_value, inv)
-    assert {row["kind"] for row in findings} >= {"false_success", "native_failure"}
+    observation = {}
+    findings = service._findings(obj, inv.histories, "confirmed", identity, adapter.preview_value, inv, relation_observation=observation)
+    assert "false_success" in {row["kind"] for row in findings}
+    assert "native_failure" not in {row["kind"] for row in findings}
+    assert observation["expected_missing_count"] == 1
 
 
 def test_current_wrong_link_survives_expected_unproven(tmp_path):

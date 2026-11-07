@@ -34,15 +34,16 @@ MAX_RELATION_PAIRS = 64
 MAX_CANDIDATE_PAGE = 128
 MAX_TREE_NODES = 100000
 MAX_AI_BATCHES_PER_JOB = 8
-PREVIEW_REVISION = "file-reconciliation-v3"
+PREVIEW_REVISION = "exact-file-reconciliation-v4"
 CANDIDATE_RETRY_SECONDS = 3600
-IDENTITY_AUDIT_REVISION = "source-database-v2"
+IDENTITY_AUDIT_REVISION = "source-database-v3"
 MAX_IDENTITY_CANDIDATES = 64
 MAX_IDENTITY_DETAILS = 3
+MAX_IDENTITY_QUERIES = 3
 IDENTITY_AUDIT_SECONDS = 86400
 AUDIT_REASONS = {
     "source_incomplete": "源文件范围未读完整，不能自动核验身份",
-    "source_ambiguous": "源文件有多组标题、未解析项或超出证据预算，需要补充作品线索",
+    "source_ambiguous": "源文件线索未读完整、未解析或超出证据预算，需要补充作品线索",
     "source_year_missing": "源文件与同名容器都没有明确年份，尚不能排除同名作品",
     "source_structure_ambiguous": "源文件的电影或季集结构不明确，不能自动选择类型",
     "database_unavailable": "当前宿主没有可用的数据库详情接口，身份仍为候选",
@@ -148,6 +149,9 @@ def preview_cache_usable(payload: dict[str, Any], basis: str) -> bool:
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     if int(summary.get("failed") or 0) > 0:
         return False
+    validation = payload.get("validation")
+    if isinstance(validation, dict) and validation.get("status") != "verified":
+        return False
     items = payload.get("items") or []
     return bool(items) and int(summary.get("total") or 0) == len(items) and all(
         isinstance(row, dict) and row.get("source") and row.get("target") and row.get("success", True)
@@ -168,7 +172,12 @@ def is_sidecar(item: dict[str, Any]) -> bool:
 
 
 def is_sample(item: dict[str, Any]) -> bool:
-    return bool(SAMPLE_PATTERN.search(str(item.get("path") or item.get("name") or "")))
+    parts = normal_path(item.get("path") or item.get("name")).split("/")
+    # 父目录必须是完整的样片目录名；不能因为下载根/作品目录中含有
+    # “sample”一词，就把所有正式视频排除在核对范围外。
+    return bool(SAMPLE_PATTERN.search(str(item.get("name") or parts[-1]))) or any(
+        re.fullmatch(r"samples?|trailers?|extras?", part, re.IGNORECASE) for part in parts[:-1]
+    )
 
 
 def identity_key(identity: dict[str, Any] | None) -> str:
@@ -301,7 +310,9 @@ def source_identity_evidence(obj: dict[str, Any]) -> tuple[dict[str, Any], str]:
         root = parsed_name(item_name(obj.get("root") or {}))
         if len(discs) == 1 and root.get("parsed") and root.get("hint"):
             return {"title": root["hint"], "year": str(root.get("year") or ""), "media_type": "movie", "seasons": [], "disc": True, "mapping_review": False}, ""
-    if (not digest["file_count"] or digest["title_family_count"] != 1 or digest["parse_unresolved"] or digest["overflow"]):
+    # 多标题族先保留为候选证据，交给数据库别名归并；不能因为中英文、真人版
+    # 上下文或同包的少量标题差异，在数据库查询前把整包判成混包。
+    if (not digest["file_count"] or digest["parse_unresolved"] or digest["overflow"]):
         return {}, "source_ambiguous"
     files = [row for row in obj.get("entries") or [] if is_media_file(row) and not is_sample(row)]
     parsed = container_names(files)
@@ -320,7 +331,13 @@ def source_identity_evidence(obj: dict[str, Any]) -> tuple[dict[str, Any], str]:
         years.add(str(root["year"]))
     if len(years) > 1 and mtype == "movie":
         return {}, "source_ambiguous"
-    return {"title": hint, "year": next(iter(years)) if len(years) == 1 else "", "years": sorted(years), "media_type": mtype,
+    groups = list(dict.fromkeys(tuple(row.get("hints") or [row.get("hint")]) for row in parsed))
+    titles = list(dict.fromkeys(value for group in groups for value in group if value))
+    if hint and hint not in titles:
+        titles.insert(0, hint)
+    return {"title": hint, "titles": titles, "title_groups": [list(group) for group in groups],
+            "live_action_context": any(row.get("live_action_context") for row in parsed),
+            "year": next(iter(years)) if len(years) == 1 else "", "years": sorted(years), "media_type": mtype,
             "mapping_review": bool(digest["episode_mapping_review"]),
             "seasons": sorted({int(row.get("season") if row.get("season") is not None else 1) for row in parsed}) if mtype == "tv" else []}, ""
 
@@ -330,8 +347,15 @@ def source_matches_database(evidence: dict[str, Any], identity: dict[str, Any], 
     if media_type_key(identity.get("media_type")) != evidence["media_type"]:
         return False
     titles = media_aliases(identity)
-    if title_key(evidence["title"]) not in {title_key(value) for value in titles if value}:
+    groups = evidence.get("title_groups") or [[evidence.get("title")]]
+    aliases = {title_key(item) for item in titles if item}
+    if not all(any(title_key(value) in aliases for value in group if value) for group in groups):
         return False
+    if evidence.get("live_action_context"):
+        if expected_category(identity) == "anime":
+            return False
+        if details is not None and not identity.get("genres"):
+            return False
     if evidence["media_type"] == "movie":
         return bool(identity.get("year")) and (not evidence["year"] or str(identity.get("year")) == evidence["year"])
     if details is None:
@@ -359,7 +383,10 @@ def detail_comparison(evidence: dict[str, Any], requested: dict[str, Any], retur
     for key in ("media_source", "media_id", "media_type"):
         fields[key] = "missing" if not new[key] or (key == "media_type" and new[key] == "unknown") else "match" if old[key] == new[key] else "mismatch"
     names = media_aliases(returned)
-    fields["title"] = "missing" if not names else "match" if title_key(evidence.get("title")) in {title_key(name) for name in names} else "mismatch"
+    groups = evidence.get("title_groups") or [[evidence.get("title")]]
+    fields["title"] = "missing" if not names else "match" if all(any(title_key(value) in {title_key(name) for name in names} for value in group if value) for group in groups) else "mismatch"
+    if evidence.get("live_action_context"):
+        fields["live_action_context"] = "missing" if not returned.get("genres") else "mismatch" if expected_category(returned) == "anime" else "match"
     if not evidence.get("year") and not evidence.get("years"):
         fields["year"] = "not_provided" if returned.get("year") else "missing"
     elif evidence.get("media_type") == "movie":
@@ -437,7 +464,14 @@ def parsed_name(name: str) -> dict[str, Any]:
     try:
         from app.sdk.media import MetaInfo
         meta = MetaInfo(title=name)
-        return {"hint": str(meta.cn_name or meta.en_name or "")[:96], "year": str(meta.year or ""),
+        hints = []
+        for value in (getattr(meta, "cn_name", None), getattr(meta, "en_name", None), getattr(meta, "original_name", None)):
+            value = str(value or "").strip()[:96]
+            if value and value not in hints:
+                hints.append(value)
+        return {"hint": hints[0] if hints else "", "hints": hints,
+                "live_action_context": bool(re.search(r"(?:真人版|live[ ._-]?action)", name, re.IGNORECASE)),
+                "year": str(meta.year or ""),
                 "season": meta.begin_season, "episode": meta.begin_episode,
                 "episode_end": meta.end_episode, "part": str(getattr(meta, "part", "") or ""), "parsed": True}
     except Exception as error:  # noqa: BLE001 - 无 SDK/解析失败不能证明混包
@@ -447,14 +481,16 @@ def parsed_name(name: str) -> dict[str, Any]:
 def container_names(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """SDK 已解析的多集共同标题，只补齐同容器的裸数字命名尾集。
 
-    这是查询线索，不是执行用集号映射；至少两个 SDK 集号锚点、唯一最长标题，
-    且目标没有电影年份时才允许归并。未解析/同名不同年仍保留不确定性。
+    至少两个 SDK 集号锚点、唯一标题前缀，且目标没有电影年份才允许归并。
+    它不是作品身份证明；预览层须把推断显式传给官方并核对目标才算映射通过。
     """
     parsed = [dict(parsed_name(item_name(row))) for row in files]
     anchors: dict[str, list[int]] = {}
     for value in parsed:
-        if value.get("episode") is not None and value.get("hint"):
-            anchors.setdefault(value["hint"], []).append(int(value.get("season") if value.get("season") is not None else 1))
+        if value.get("episode") is not None:
+            for hint in value.get("hints") or [value.get("hint")]:
+                if hint:
+                    anchors.setdefault(hint, []).append(int(value.get("season") if value.get("season") is not None else 1))
     for row, value in zip(files, parsed):
         if value.get("episode") is not None or value.get("year"):
             continue
@@ -467,7 +503,7 @@ def container_names(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if match and 0 < int(match[1]) < 1000:
                 matches.append((hint, int(match[1]), anchor_seasons[0]))
         if len(matches) == 1:
-            value.update(hint=matches[0][0], episode=matches[0][1], season=matches[0][2], parsed=True, mapping_inferred=True)
+            value.update(hint=matches[0][0], hints=[matches[0][0]], episode=matches[0][1], season=matches[0][2], parsed=True, mapping_inferred=True)
     return parsed
 
 
@@ -478,11 +514,14 @@ def evidence_digest(obj: dict[str, Any]) -> dict[str, Any]:
     seasons: dict[int, set[int]] = {}
     files = [row for row in obj.get("entries") or [] if is_media_file(row) and not is_sample(row)]
     unknown = 0
+    variants = []
     parsed_rows = container_names(files)
     for row, parsed in zip(files, parsed_rows):
         name = item_name(row)
+        hints_for_row = parsed.get("hints") or ([parsed.get("hint")] if parsed.get("hint") else [])
         hint = parsed.get("hint") or ""
-        unknown += int(not parsed.get("parsed") or not hint)
+        unknown += int(not parsed.get("parsed") or not hints_for_row)
+        variants.extend(hints_for_row)
         if hint:
             family_key = hint.casefold() + (":" + parsed["year"] if parsed.get("year") and parsed.get("episode") is None else "")
             family = families.setdefault(family_key, {"hint": hint, "count": 0, "refs": []})
@@ -500,6 +539,7 @@ def evidence_digest(obj: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema": "identity-digest/v2", "container_hint": parsed_name(item_name(obj.get("root") or {})).get("hint") or "",
         "file_count": len(files), "title_hints": [{**row, "refs": row["refs"][:2]} for row in hints], "title_family_count": len(families),
+        "title_variants": list(dict.fromkeys(variants))[:24],
         "years": dict(sorted(years.items())[:12]),
         "episode_shapes": [{"season": season, "count": len(values), "min": min(values), "max": max(values)} for season, values in sorted(seasons.items())[:12]],
         "membership_review_required": len(families) > 1 and unknown == 0,
@@ -519,7 +559,7 @@ def observed_size(item: dict[str, Any]) -> int | None:
 
 
 ISSUE_LABELS = {
-    "native_failure": "原生整理失败",
+    "native_failure": "当前官方预期入口缺失（不代表历史执行失败）",
     "category_error": "目录分类错误",
     "identity_error": "作品对应错误",
     "episode_error": "季集对应错误",
@@ -532,6 +572,8 @@ ISSUE_LABELS = {
     "rule_change": "整理规则变化待确认",
     "read_error": "目录没有读取完整",
     "preview_error": "官方预览失败",
+    "preview_unresolved": "官方预览成功但没有完整目标",
+    "mapping_confirmation": "季集映射尚未证实",
     "path_deviation": "当前入口与官方预览不同，原因待确认",
 }
 
@@ -930,13 +972,22 @@ class MoviePilotAdapter:
         directory = ports["dirs"].get_dir(media=media, src_path=Path(str(source["path"])), storage=source.get("storage") or "local")
         if not directory or not directory.library_path:
             raise RuntimeError("MoviePilot 没有找到匹配的媒体库目录")
+        selection = source.get("_governor_selected_files")
+        selected_kwargs = {}
+        if selection:
+            # 只认运行时公开签名中的显式参数，不把 **kwargs 当能力证明，
+            # 也不通过失败后扩大目录范围来兜底。
+            if "selected_fileitems" not in inspect.signature(ports["transfer"].manual_transfer).parameters:
+                raise ValueError("宿主没有声明显式文件集合预览能力")
+            selected_kwargs["selected_fileitems"] = [ports["FileItem"](**{key: item.get(key) for key in ("path", "storage", "type", "name", "fileid", "parent_fileid") if item.get(key) is not None}) for item in selection]
         state, payload = ports["transfer"].manual_transfer(
             fileitem=src, target_storage=directory.library_storage, target_path=Path(directory.library_path),
             media_source=ports["MediaSource"](identity["media_source"]), media_id=str(identity["media_id"]),
             mtype=media.type, **self.mapping_options(identity),
             transfer_type=directory.transfer_type or "link", scrape=False,
             library_type_folder=directory.library_type_folder, library_category_folder=directory.library_category_folder,
-            force=True, background=False, preview=True, reorganize=False, sync_extra_files=not source.get("_governor_exact_file", False),
+            force=True, background=False, preview=True, reorganize=False,
+            sync_extra_files=False if selection else not source.get("_governor_exact_file", False), **selected_kwargs,
         )
         if not state:
             raise RuntimeError("MoviePilot 返回了失败的官方预览，不能使用其中的目标")
@@ -946,6 +997,18 @@ class MoviePilotAdapter:
                     item.setdefault("target_storage", directory.library_storage or "local")
             return payload
         return {"summary": {"total": 0, "success": 0, "failed": 0}, "items": []}
+
+    def supports_selected_preview(self) -> bool:
+        try:
+            return "selected_fileitems" in inspect.signature(self._ports()["transfer"].manual_transfer).parameters
+        except (TypeError, ValueError):
+            return False
+
+    def preview_files(self, source: dict[str, Any], files: list[dict[str, Any]], identity: dict[str, Any]) -> dict[str, Any]:
+        """已声明能力才批量精确选择；旧宿主由服务逐文件调用公开 preview。"""
+        if not files or not self.supports_selected_preview():
+            raise ValueError("宿主未声明文件集合能力，须使用精确单文件预览")
+        return self.preview({**source, "_governor_selected_files": files}, identity)
 
     def rebuild(self, entry: dict[str, Any], identity: dict[str, Any]) -> None:
         """执行已确认的单文件原生命令，不进入有历史清理副作用的 manual_transfer。"""
@@ -1535,8 +1598,25 @@ class GovernorService:
             reason = "database_unavailable"
         if not reason:
             try:
-                rows = self._readonly_call(job_id, "源身份数据库搜索", self.adapter.search, evidence["title"], timeout=SEARCH_TIMEOUT_SECONDS)
-                candidates = list({identity_key(row): public_identity(row) for row in rows or [] if identity_key(row)}.values())
+                queries = evidence.get("titles") or [evidence["title"]]
+                if evidence.get("live_action_context"):
+                    context = "真人版" if re.search(r"[\u3400-\u9fff]", queries[0]) else "live action"
+                    queries = list(dict.fromkeys([f"{queries[0]} {context}", *queries]))
+                # 查询有上限，但不丢掉剩余标题证据；详情仍必须解释全部组。
+                queries = queries[:MAX_IDENTITY_QUERIES]
+                collected: dict[str, dict[str, Any]] = {}
+                for query in queries:
+                    rows = self._readonly_call(job_id, "源身份数据库搜索", self.adapter.search, query, timeout=SEARCH_TIMEOUT_SECONDS)
+                    for row in rows or []:
+                        if identity_key(row):
+                            key = identity_key(row)
+                            projected = public_identity(row)
+                            if key in collected:
+                                projected["aliases"] = list(dict.fromkeys([*media_aliases(collected[key]), *media_aliases(projected)]))[:64]
+                            collected[key] = projected
+                    if len(collected) > MAX_IDENTITY_CANDIDATES:
+                        break
+                candidates = list(collected.values())
                 matches = {identity_key(row): row for row in candidates if source_matches_database(evidence, row)}
                 if len(candidates) > MAX_IDENTITY_CANDIDATES:
                     reason = "database_page_full"
@@ -1678,26 +1758,54 @@ class GovernorService:
 
     def _official_preview(self, obj: dict[str, Any], identity: dict[str, Any], job_id: str | None = None) -> dict[str, Any]:
         deadline = time.monotonic() + 60
-        sources = obj.get("preview_sources") or [obj.get("root") or {}]
+        files = [row for row in obj.get("entries") or [] if row.get("type", "file") == "file" and is_media_file(row) and not is_sample(row)]
+        parsed_files = container_names(files)
+        derived = {}
+        explicit_mapping = any(identity.get(key) is not None for key in ("season", "episode_group", "epformat"))
+        # 只补既有多锚点窄域规则得到的缺失集号，不覆盖 SDK 已有明确值，
+        # 不覆盖人工映射，不将映射写回作品身份。
+        if media_type_key(identity.get("media_type")) == "tv" and not explicit_mapping:
+            for source, parsed in zip(files, parsed_files):
+                if parsed.get("mapping_inferred") and parsed.get("episode") is not None:
+                    start, end = int(parsed["episode"]), int(parsed.get("episode_end") or parsed["episode"])
+                    derived[normal_path(source.get("path"))] = {"season": parsed.get("season"), "epformat": {"detail": str(start) if start == end else f"{start}-{end}"}}
+        default_files = [row for row in files if normal_path(row.get("path")) not in derived]
+        calls = []
+        supports_selected = getattr(self.adapter, "supports_selected_preview", None)
+        preview_files = getattr(self.adapter, "preview_files", None)
+        if default_files and callable(supports_selected) and supports_selected() and callable(preview_files):
+            calls.append((preview_files, (obj.get("root") or default_files[0], default_files, identity), default_files))
+        else:
+            calls.extend((self.adapter.preview, ({**row, "_governor_exact_file": True}, identity), [row]) for row in default_files)
+        calls.extend((self.adapter.preview, ({**row, "_governor_exact_file": True}, {**identity, **derived[normal_path(row.get("path"))]}), [row]) for row in files if normal_path(row.get("path")) in derived)
         items: list[dict[str, Any]] = []
         messages: list[str] = []
         failed_responses = 0
-        for source in sources:
+        request_failed = 0
+        scope_conflicts = 0
+        for method, arguments, selected in calls:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("本作品官方预览超过总预算 60 秒，未生成可执行计划")
-            value = self._readonly_call(job_id, "官方预览", self.adapter.preview, source, identity, timeout=min(MOVIEPILOT_TIMEOUT_SECONDS, remaining))
+            value = self._readonly_call(job_id, "官方预览", method, *arguments, timeout=min(MOVIEPILOT_TIMEOUT_SECONDS, remaining))
             response_items = self._preview_items(value)
             summary = value.get("summary") or {}
             if int(summary.get("failed") or 0) > 0 or not response_items or int(summary.get("total") or 0) != len(response_items):
                 failed_responses += 1
+                request_failed += 1
+            expected_scope = {normal_path(row.get("path")) for row in selected}
+            actual_scope = {normal_path(row.get("source")) for row in response_items}
+            if expected_scope != actual_scope or len(actual_scope) != len(response_items):
+                scope_conflicts += 1
+                failed_responses += 1
+                messages.append("官方精确预览没有遵守选中文件集合；未扩大范围重试")
             items.extend(response_items)
             if value.get("message"):
                 messages.append(str(value["message"]))
-        # 同一文件可能因附加文件同步被多次带出，以 source+target 去重。
+        # 保留越界/重复失败状态，去重只供后续显示，不使坏响应重新变为成功。
         unique = list({(normal_path(row.get("source")), str(row.get("target_storage") or "local"), normal_path(row.get("target"))): row for row in items}.values())
-        required = {normal_path(row.get("path")) for row in obj.get("entries") or [] if is_media_file(row)}
-        allowed = {normal_path(row.get("path")) for row in obj.get("entries") or []}
+        required = {normal_path(row.get("path")) for row in files}
+        allowed = required
         represented = {normal_path(row.get("source")) for row in unique}
         if required - represented or represented - allowed:
             failed_responses += 1
@@ -1705,32 +1813,57 @@ class GovernorService:
         if len(represented) != len(unique):
             failed_responses += 1
             messages.append("同一个源文件出现多个预览目标，需先确认")
-        if len({(str(row.get("target_storage") or "local"), normal_path(row.get("target"))) for row in unique}) != len(unique):
+        targets = [(str(row.get("target_storage") or "local"), normal_path(row.get("target"))) for row in unique if row.get("target")]
+        if len(set(targets)) != len(targets):
             failed_responses += 1
             messages.append("不同源文件指向同一个预览目标，已拒绝覆盖")
-        mapping = {"status": "not_applicable", "inferred_sources": 0, "checked_sources": 0, "conflicts": 0}
+        mapping = {"status": "not_applicable", "inferred_sources": 0, "derived_sources": len(derived), "checked_sources": 0, "conflicts": 0}
         if media_type_key(identity.get("media_type")) == "tv":
             mapping["status"] = "official_preview"
-            files = [row for row in obj.get("entries") or [] if is_media_file(row) and not is_sample(row)]
-            for source, parsed in zip(files, container_names(files)):
-                if any(identity.get(key) is not None for key in ("season", "episode_group", "epformat")):
-                    mapping["status"] = "explicit_options_official_preview"
-                    continue
-                mapping["checked_sources"] += 1
-                mapping["inferred_sources"] += int(bool(parsed.get("mapping_inferred")))
+            for source, parsed in zip(files, parsed_files):
                 planned = [row for row in unique if normal_path(row.get("source")) == normal_path(source.get("path"))]
                 target = parsed_name(Path(str(planned[0].get("target") or "")).name) if len(planned) == 1 else {}
+                mapping["checked_sources"] += 1
+                if explicit_mapping:
+                    mapping["status"] = "explicit_options_official_preview"
+                    # 显式选项可以覆盖源集号，但不能凭“传了选项”就认为已落地。
+                    # offset/episode_group 的完整解释仍由官方负责，不在此另造映射器。
+                    if target.get("episode") is None or (identity.get("season") is not None and target.get("season") != int(identity["season"])):
+                        mapping["conflicts"] += 1
+                    continue
+                mapping["inferred_sources"] += int(bool(parsed.get("mapping_inferred")))
                 if parsed.get("episode") is None or (target.get("season"), target.get("episode"), target.get("episode_end") or target.get("episode")) != (parsed.get("season"), parsed.get("episode"), parsed.get("episode_end") or parsed.get("episode")):
                     mapping["conflicts"] += 1
+            if derived:
+                mapping["status"] = "derived_options_official_preview"
             if mapping["conflicts"]:
                 mapping["status"] = "unresolved"
                 failed_responses += 1
                 messages.append("作品身份已核验，但源季集线索与官方预览不一致；季集映射尚未通过")
+        target_missing = sum(not row.get("target") for row in unique)
+        source_missing = sum(not row.get("source") for row in unique)
         failed = failed_responses + sum(not row.get("success", True) or not row.get("source") or not row.get("target") for row in unique)
         accounted = [{"ref": stable_id(row.get("storage") or "local", normal_path(row.get("path"))),
-                      "reason": "官方预览未计划此附件，插件不猜测目标" if is_sidecar(row) else "不支持的文件类型或原盘目录"}
+                      "reason": "样片或附加视频不参与正片预览" if is_sample(row) else "官方预览未计划此附件，插件不猜测目标" if is_sidecar(row) else "不支持的文件类型或原盘目录"}
                      for row in obj.get("entries") or [] if normal_path(row.get("path")) not in represented]
-        return {"summary": {"total": len(unique), "success": max(0, len(unique) - failed), "failed": failed}, "items": unique, "unplanned_files": accounted, "mapping": mapping, "message": "；".join(messages[:3])}
+        validation_status = "verified"
+        if target_missing or source_missing:
+            validation_status = "success_without_targets" if not request_failed and all(row.get("success", True) for row in unique) else "incomplete_targets"
+            messages.append("官方请求返回成功，但没有为每个源文件给出可对账目标；不能判为正常")
+        elif failed_responses or failed:
+            validation_status = "failed"
+        if mapping.get("status") == "unresolved" and not target_missing:
+            validation_status = "mapping_unresolved"
+        if scope_conflicts:
+            validation_status = "scope_mismatch"
+        if not files:
+            validation_status = "no_supported_sources"
+            failed = max(1, failed)
+            messages.append("没有可精确预览的正片文件；未调用目录预览，不能判为正常")
+        return {"summary": {"total": len(unique), "success": max(0, len(unique) - failed), "failed": failed}, "items": unique, "unplanned_files": accounted,
+                "mapping": mapping, "validation": {"status": validation_status, "summary_success": bool(calls) and not request_failed,
+                "source_count": len(represented), "target_count": len(unique) - target_missing, "target_missing": target_missing,
+                "source_missing": source_missing}, "message": "；".join(messages[:3])}
 
     def _observe_relations(self, obj: dict[str, Any], histories: list[dict[str, Any]], preview: dict[str, Any], inventory: Inventory, job_id: str | None, previous: dict[str, Any]) -> dict[str, Any]:
         """身份前候选发现 + 有界公平逐对核验；False 不作为未关联证据。"""
@@ -1884,8 +2017,15 @@ class GovernorService:
             return findings
         preview_items = self._preview_items(preview)
         summary = preview.get("summary") if isinstance(preview.get("summary"), dict) else {}
+        validation = preview.get("validation") if isinstance(preview.get("validation"), dict) else {}
+        if validation.get("status") in {"success_without_targets", "incomplete_targets"}:
+            findings.append({"kind": "preview_unresolved", "reason": "官方预览请求成功，但没有给出完整可对账目标；不能判为正常，也不能据此判定原生整理失败", "evidence": {"summary": summary, "validation": validation}})
+            return findings
+        if validation.get("status") == "mapping_unresolved" or (preview.get("mapping") or {}).get("status") == "unresolved":
+            findings.append({"kind": "mapping_confirmation", "reason": "作品身份已核验，但季集映射与官方预览不一致或未落地；需要单独确认映射", "evidence": {"summary": summary, "mapping": preview.get("mapping") or {}}})
+            return findings
         if not preview_cache_usable({**preview, "_basis": "current"}, "current"):
-            findings.append({"kind": "preview_error", "reason": str(preview.get("message") or ISSUE_LABELS["preview_error"])[:200], "evidence": {"summary": summary}})
+            findings.append({"kind": "preview_error", "reason": str(preview.get("message") or ISSUE_LABELS["preview_error"])[:200], "evidence": {"summary": summary, "validation": validation}})
             return findings
         false_kinds: list[str] = []
         manual_changes = 0
@@ -1929,7 +2069,7 @@ class GovernorService:
                             false_kinds.append(kind)
                         else:
                             path_deviations += 1
-            # 错误入口与正确入口缺失是两个独立事实，不能用 elif 遮掉其中一个。
+            # 分别保留已证实的其他入口和当前预期缺失，不能据此推断历史执行。
             if not expected_pair or expected_pair["status"] in {"pending", "unsupported", "unproven", "read_error"}:
                 unproven += int(not expected_pair)
                 continue
@@ -1937,15 +2077,20 @@ class GovernorService:
                 continue
             elif current_history and bool(current_history.get("status")) and not wrong:
                 manual_changes += 1
-            elif expected_pair["status"] == "missing" and (wrong or not inventory.library or inventory.library.get("complete")):
+            elif expected_pair["status"] == "missing" and wrong:
+                # 已证实另有入口时，不能把它说成“从未整理”；后续由
+                # false_success/path_deviation 解释错链或路径偏差。
+                continue
+            elif expected_pair["status"] == "missing" and (not inventory.library or inventory.library.get("complete")):
                 native_missing += 1
             else:
                 unproven += 1
         if false_kinds:
             labels = [ISSUE_LABELS[kind] for kind in dict.fromkeys(false_kinds)]
             findings.append({"kind": "false_success", "reason": "假成功：" + "、".join(labels), "evidence": {"issue_kinds": list(dict.fromkeys(false_kinds)), "comparisons": comparisons}})
+        expected_missing = [row for row in comparisons if row["expected_relation"] == "missing"]
         if native_missing and not any(row["kind"] == "native_failure" for row in findings):
-            findings.append({"kind": "native_failure", "reason": f"当前官方预期的 {native_missing} 个入口缺失；补回前需确认，不代表过去原生执行失败", "evidence": {"comparisons": comparisons, "past_execution": "unknown"}})
+            findings.append({"kind": "native_failure", "reason": f"当前官方预期的 {native_missing} 个入口缺失，且没有发现已证实的其他入口；这只说明当前入口缺失，不代表过去原生执行失败", "evidence": {"comparisons": comparisons, "past_execution": "unknown", "fact": "expected_target_missing_not_historical_failure"}})
         if manual_changes:
             findings.append({"kind": "manual_change", "reason": f"{manual_changes} 个历史成功文件目前不存在，无法判断是主动删除还是误删", "evidence": {"comparisons": comparisons}})
         if unproven:
@@ -1954,6 +2099,9 @@ class GovernorService:
             findings.append({"kind": "rule_change", "reason": f"整理规则已变化，{rule_changes} 个旧入口仍与源文件关联；请确认是否按新规则迁移", "evidence": receipt})
         if path_deviations:
             findings.append({"kind": "path_deviation", "reason": f"{path_deviations} 个已关联入口与当前官方预览不同；尚不能证明作品身份放错", "evidence": receipt})
+        if relation_observation is not None:
+            relation_observation["expected_missing_count"] = len(expected_missing)
+            relation_observation["historical_execution"] = "unknown"
         return findings
 
     def _process(self, job_id: str, obj: dict[str, Any], inventory: Inventory, resolved: tuple[str, dict[str, Any], list[dict[str, Any]], str] | None = None, force_preview: bool = False) -> None:
@@ -2012,7 +2160,7 @@ class GovernorService:
                 self.ledger.save_identity(obj["id"], state, obj["fingerprint"], identity, candidates, provenance, updated_at=candidate_time if state == "candidate" else None)
             self.ledger.save_observation(obj["id"], "source", bool(obj.get("complete")), obj["fingerprint"], {"object": obj, "histories": histories})
             self.ledger.save_observation(obj["id"], "preview", preview_cache_usable(preview, str(preview.get("_basis") or "")), fingerprint(self._preview_items(preview)), preview)
-            complete = bool(observation.get("pairs")) and not any(finding["kind"] in {"relation_confirmation", "rule_change", "path_deviation", "read_error", "preview_error"} for finding in findings)
+            complete = bool(observation.get("pairs")) and not any(finding["kind"] in {"relation_confirmation", "mapping_confirmation", "rule_change", "path_deviation", "read_error", "preview_error", "preview_unresolved"} for finding in findings)
             self.ledger.save_observation(obj["id"], "relations", complete, obj["fingerprint"], observation)
             self.ledger.save_observation(obj["id"], "digest", True, obj["fingerprint"], self._evidence(obj))
             self.ledger.replace_findings(obj["id"], findings)
@@ -2180,8 +2328,8 @@ class GovernorService:
         public = [{"id": row["id"], "object_id": row["object_id"], "title": row["label"], "kind": row["kind"], "reason": row["reason"],
                    "checked_at": row["updated_at"], "current_job": bool(job_id and checked.get(row["object_id"]) == job_id)} for row in rows]
         problems = [row for row in public if row["kind"] in {"native_failure", "false_success"}]
-        confirmations = [row for row in public if row["kind"] in {"identity_confirmation", "manual_change", "relation_confirmation", "rule_change", "path_deviation"}]
-        errors = [row for row in public if row["kind"] in {"read_error", "preview_error"}]
+        confirmations = [row for row in public if row["kind"] in {"identity_confirmation", "manual_change", "relation_confirmation", "mapping_confirmation", "rule_change", "path_deviation"}]
+        errors = [row for row in public if row["kind"] in {"read_error", "preview_error", "preview_unresolved"}]
         normal = []
         for row in self.ledger.query("SELECT i.*,o.label,o.source_json FROM identities i JOIN objects o ON o.id=i.object_id JOIN observations r ON r.object_id=o.id AND r.kind='relations' AND r.complete=1 JOIN observations p ON p.object_id=o.id AND p.kind='preview' AND p.complete=1 WHERE o.status!='REMOVED' AND NOT EXISTS (SELECT 1 FROM findings f WHERE f.object_id=o.id AND f.status='open')"):
             if job_id and checked.get(row["object_id"]) == job_id and (user_confirmed(row) or row["state"] == "verified") and self._identity_cache_usable(row, json.loads(row["source_json"])):
@@ -2350,6 +2498,8 @@ class GovernorService:
             raise ValueError("源文件范围尚未读取完整，不能执行修复")
         histories = source_payload.get("histories") or []
         preview = self._official_preview(obj, detail["identity"])
+        if (preview.get("mapping") or {}).get("derived_sources"):
+            raise ValueError("自动补齐的季集映射本轮仅用于只读核对；尚未授予修复执行合同")
         if not preview_cache_usable({**preview, "_basis": "repair"}, "repair"):
             raise ValueError("官方预览没有完整成功，不能执行修复")
         latest = latest_histories(histories)
@@ -2518,6 +2668,8 @@ class GovernorService:
         if not obj.get("complete") or obj.get("fingerprint") != detail["fingerprint"]:
             raise ValueError("源文件范围尚未读取完整或已经变化，请重新检查并生成修复预览")
         fresh_preview = self._official_preview(obj, plan["identity"])
+        if (fresh_preview.get("mapping") or {}).get("derived_sources"):
+            raise ValueError("自动补齐的季集映射仅用于只读核对，不能沿旧计划执行媒体写入")
         if not preview_cache_usable({**fresh_preview, "_basis": "execute"}, "execute"):
             raise ValueError("官方预览没有完整成功，不能执行修复")
         fresh_targets = [(normal_path(item.get("source")), str(item.get("target_storage") or "local"), normal_path(item.get("target"))) for item in self._preview_items(fresh_preview)]

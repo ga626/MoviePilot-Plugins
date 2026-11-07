@@ -84,6 +84,18 @@ class FakeAdapter:
             value["summary"]["total"] = len(value["items"])
         return value
 
+    def supports_selected_preview(self):
+        return True
+
+    def preview_files(self, source, files, identity):
+        # 模拟声明过的集合接口；专门的越界合同测试另用坏适配器返回原文。
+        value = self.preview(source, identity)
+        selected = {G.normal_path(row.get("path")) for row in files}
+        value["items"] = [row for row in value["items"] if G.normal_path(row.get("source")) in selected]
+        if not value["summary"].get("failed"):
+            value["summary"] = {"total": len(value["items"]), "success": len(value["items"]), "failed": 0}
+        return value
+
     def relationship(self, source, target):
         # 旧 golden 专门回放路径判断，文件关联在 fixture 中视为已知；
         # 真实同对象、复制和读取失败由后面的独立临时文件用例验证。

@@ -159,7 +159,7 @@ def test_work_identity_passes_but_inferred_mapping_must_match_official_preview(t
     preview["items"] = preview["items"][:3]
     preview["summary"] = {"total": 3, "success": 3, "failed": 0}
     preview["items"][2]["target"] = "/fixture/library/Title.S01E09.mkv" if wrong_target else "/fixture/library/Title.S01E10.mkv"
-    adapter.preview = lambda *_: preview
+    adapter.preview_value = preview
     service = G.GovernorService(tmp_path / "state", adapter)
     assert service._resolve_identity(obj, [])[0] == "verified"
     result = service._official_preview(obj, adapter.database)
